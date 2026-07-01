@@ -10,8 +10,18 @@
 mod backend {
     use std::path::PathBuf;
 
+    /// Directory that holds the save file, under the platform's data dir
+    /// (e.g. `~/.local/share/kingdom`, `~/Library/Application Support/kingdom`,
+    /// `%APPDATA%\kingdom`). Falls back to the current directory if the data
+    /// dir can't be resolved.
+    fn dir() -> PathBuf {
+        dirs::data_dir()
+            .map(|d| d.join("kingdom"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     fn path() -> PathBuf {
-        PathBuf::from("kingdom_save.dat")
+        dir().join("kingdom_save.dat")
     }
 
     pub fn init() {}
@@ -25,6 +35,10 @@ mod backend {
     }
 
     pub fn write(bytes: Vec<u8>) {
+        if let Err(e) = std::fs::create_dir_all(dir()) {
+            log::error!("save failed: could not create {}: {e}", dir().display());
+            return;
+        }
         if let Err(e) = std::fs::write(path(), bytes) {
             log::error!("save failed: {e}");
         } else {
