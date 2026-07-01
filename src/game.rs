@@ -862,8 +862,20 @@ fn soldier_behavior(
             world.walkable_for_siege(owner, x, y)
         }) {
             e.set_path(p);
+        } else {
+            // No route to any foe — even smashing through everything. Drop any
+            // stale path so we don't keep grinding down trees/rocks toward an
+            // unreachable target (out of range, across unbridged water, …).
+            e.set_path(Vec::new());
         }
         e.repath = 0.7;
+    }
+
+    // With no reachable foe there's nothing to march toward: wander rather than
+    // hacking obstacles along a dead route.
+    if e.path_done() {
+        wander_behavior(world, e, owner, rng, dt);
+        return None;
     }
 
     // If the next step is onto a tree/rock, hack it down instead of walking in.
