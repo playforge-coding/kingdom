@@ -1,0 +1,42 @@
+[package]
+name = "kingdom"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+winit = "0.30"
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.29", features = ["bytemuck"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+fastnoise-lite = "1.1"
+log = "0.4"
+cfg-if = "1"
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = { version = "0.31", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11"
+pollster = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+console_log = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Document", "Window", "Element", "HtmlCanvasElement", "Performance",
+    "IdbFactory", "IdbOpenDbRequest", "IdbDatabase", "IdbTransaction",
+    "IdbTransactionMode", "IdbObjectStore", "IdbRequest", "Event",
+] }
+# WebGL backend so the game runs in browsers without WebGPU.
+wgpu = { version = "24", features = ["webgl"] }
+
+[profile.release]
+opt-level = 3
+
+# Keep wasm debug builds small-ish and fast to iterate.
+[profile.dev]
+opt-level = 1
