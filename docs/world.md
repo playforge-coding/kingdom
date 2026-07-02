@@ -46,6 +46,8 @@ At world creation the generator places:
 
 - **Your village** near the origin — the settlement you start controlling.
 - **Four enemy villages** scattered around the island, each with its own units.
+- **Two allied villages** planted on far-off coasts — friendly [trade
+  partners](gameplay.md#factions) your cargo ships sail to.
 
 How these change hands is covered in
 [Capturing villages](gameplay.md#capturing-villages).

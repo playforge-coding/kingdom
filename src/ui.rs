@@ -6,8 +6,9 @@ use winit::event::WindowEvent;
 use winit::window::Window;
 
 use crate::game::{
-    BuildMode, Game, GatherPriority, Priority, BRIDGE_WOOD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
-    MINE_STONE_COST, WALL_STONE_COST, WALL_WOOD_COST,
+    BuildMode, Game, GatherPriority, Priority, BRIDGE_WOOD_COST, HOUSE_GOLD_COST, HOUSE_STONE_COST,
+    HOUSE_WOOD_COST, HUT_GOLD_COST, KNIGHT_GOLD_COST, MINE_GOLD_COST, MINE_STONE_COST, STONE_PRICE,
+    WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -167,6 +168,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ui.heading("Stockpile");
             ui.label(format!("🪵 Wood: {}", game.wood));
             ui.label(format!("🪨 Stone: {}", game.stone));
+            ui.label(format!("🪙 Gold: {}", game.money));
             ui.separator();
 
             ui.label(format!(
@@ -199,7 +201,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ui.radio_value(
                 &mut game.build_mode,
                 BuildMode::House,
-                format!("House  ({HOUSE_WOOD_COST} wood, {HOUSE_STONE_COST} stone)"),
+                format!("House  ({HOUSE_WOOD_COST} wood, {HOUSE_STONE_COST} stone, {HOUSE_GOLD_COST} gold)"),
             );
             ui.radio_value(
                 &mut game.build_mode,
@@ -209,22 +211,55 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ui.radio_value(
                 &mut game.build_mode,
                 BuildMode::Mine,
-                format!("⛏ Mine  ({MINE_STONE_COST} stone)"),
+                format!("⛏ Mine  ({MINE_STONE_COST} stone, {MINE_GOLD_COST} gold)"),
             );
             ui.radio_value(
                 &mut game.build_mode,
                 BuildMode::Wall,
-                format!("🧱 Wall  ({WALL_WOOD_COST} wood, {WALL_STONE_COST} stone)"),
+                format!("🧱 Wall  ({WALL_WOOD_COST} wood, {WALL_STONE_COST} stone, {WALL_GOLD_COST} gold)"),
             );
             ui.radio_value(
                 &mut game.build_mode,
                 BuildMode::Hut,
-                "🛖 Hut  (click a tree; a knight builds it)",
+                format!("🛖 Hut  (click a tree; {HUT_GOLD_COST} gold)"),
             );
             ui.radio_value(&mut game.build_mode, BuildMode::Rally, "⚑ Rally knights");
             if game.rally_point.is_some() && ui.button("✖ Clear rally").clicked() {
                 game.clear_rally();
             }
+            ui.separator();
+
+            ui.heading("Trade");
+            ui.radio_value(
+                &mut game.build_mode,
+                BuildMode::Ship,
+                "🚢 Ship goods (open water by your village)",
+            );
+            // Adjust the cargo the next ship carries. Load is capped to the
+            // stockpile when the ship is actually dispatched.
+            ui.horizontal(|ui| {
+                ui.label(format!("🪵 Wood: {}", game.ship_wood));
+                if ui.small_button("−").clicked() {
+                    game.ship_wood = game.ship_wood.saturating_sub(5);
+                }
+                if ui.small_button("+").clicked() {
+                    game.ship_wood += 5;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(format!("🪨 Stone: {}", game.ship_stone));
+                if ui.small_button("−").clicked() {
+                    game.ship_stone = game.ship_stone.saturating_sub(5);
+                }
+                if ui.small_button("+").clicked() {
+                    game.ship_stone += 5;
+                }
+            });
+            ui.label(format!(
+                "Payout: 🪙 {}  (🪵×{WOOD_PRICE}, 🪨×{STONE_PRICE})",
+                game.ship_payout()
+            ));
+            ui.small("Ships sail to the nearest allied coast, banking gold on arrival.");
             ui.separator();
 
             ui.horizontal(|ui| {
@@ -238,6 +273,11 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
 
             ui.small("Houses must be built next to your village.");
             ui.small("Houses raise new workers only while you have 4+ farmers.");
+            ui.small(format!(
+                "Each new knight costs {KNIGHT_GOLD_COST} gold; a broke village raises a farmer instead."
+            ));
+            ui.small("Trade: load a ship on the coast — it sails to an allied shore for gold.");
+            ui.small("Allies fight the enemy on their own, but never join your battles.");
             ui.small("Farmers gather • Knights defend.");
             ui.small("Farmers replant trees and mine caves once resources run dry.");
             ui.small("Mines never run out, but only 4 farmers can work one at a time.");

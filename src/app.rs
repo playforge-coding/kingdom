@@ -180,8 +180,9 @@ impl State {
     fn apply_action(&mut self, action: Action) {
         match action {
             Action::CreateWorld(seed) => {
-                self.game = Some(Game::new(seed));
-                self.camera.center = Vec2::ZERO;
+                let game = Game::new(seed);
+                self.camera.center = game.start_center();
+                self.game = Some(game);
                 self.camera.view_height = DEFAULT_VIEW_HEIGHT;
                 self.scene = Scene::Playing;
                 log::info!("created world with seed {seed}");
@@ -229,10 +230,12 @@ impl State {
         let rock = self.atlas.uv("rock");
         let house = self.atlas.uv("house");
         let enemy_house = self.atlas.uv("enemy_house");
+        let ally_house = self.atlas.uv("ally_house");
         let wall = self.atlas.uv("wall");
         let cave = self.atlas.uv("cave");
         let hut = self.atlas.uv("hut");
         let enemy_hut = self.atlas.uv("enemy_hut");
+        let ally_hut = self.atlas.uv("ally_hut");
         let white = self.atlas.uv("white");
 
         let (minx, miny, maxx, maxy) = self.visible_bounds();
@@ -264,17 +267,23 @@ impl State {
                     out.push(quad(p, [1.0, 1.0], house));
                 } else if world.is_enemy_house(x, y) {
                     out.push(quad(p, [1.0, 1.0], enemy_house));
+                } else if world.is_ally_house(x, y) {
+                    out.push(quad(p, [1.0, 1.0], ally_house));
                 } else if world.is_cave(x, y) {
                     out.push(quad(p, [1.0, 1.0], cave));
                 } else if let Some(h) = world.hut(x, y) {
-                    let uv = if h.owner == 0 { hut } else { enemy_hut };
+                    let uv = match h.owner {
+                        0 => hut,
+                        2 => ally_hut,
+                        _ => enemy_hut,
+                    };
                     out.push(quad(p, [1.0, 1.0], uv));
                 } else if let Some(w) = world.wall(x, y) {
-                    // Tint enemy walls red so the two factions read apart.
-                    let tint = if w.owner == 0 {
-                        WHITE
-                    } else {
-                        [1.0, 0.55, 0.5, 1.0]
+                    // Tint walls by faction so they read apart: enemy red, ally green.
+                    let tint = match w.owner {
+                        0 => WHITE,
+                        2 => [0.55, 1.0, 0.6, 1.0],
+                        _ => [1.0, 0.55, 0.5, 1.0],
                     };
                     out.push(tinted(p, [1.0, 1.0], wall, tint));
                 } else if let Some(node) = world.node(x, y) {
@@ -328,13 +337,21 @@ impl State {
                 let bx = e.pos.x - bw / 2.0;
                 let by = e.pos.y - 0.72;
                 out.push(tinted([bx, by], [bw, bh], white, [0.15, 0.0, 0.0, 0.85]));
-                let col = if e.faction == Faction::Player {
-                    [0.2, 0.85, 0.2, 0.95]
-                } else {
-                    [0.9, 0.25, 0.2, 0.95]
+                let col = match e.faction {
+                    Faction::Player => [0.3, 0.55, 1.0, 0.95],
+                    Faction::Ally => [0.25, 0.85, 0.3, 0.95],
+                    Faction::Enemy => [0.9, 0.25, 0.2, 0.95],
                 };
                 out.push(tinted([bx, by], [bw * ratio, bh], white, col));
             }
+        }
+
+        // Cargo ships at sea: a wide sprite with a gentle 3-frame bob. Each
+        // 32x32 frame covers a 2x2-tile footprint, drawn centred on the hull.
+        for s in game.ships() {
+            let col = ((s.bob * 3.0) as u32) % 3;
+            let uv = self.atlas.frame_uv("cargo_ship", col, 0);
+            out.push(quad([s.pos.x - 1.0, s.pos.y - 1.0], [2.0, 2.0], uv));
         }
 
         // Pending hut orders: a ghostly hut on each tree awaiting a builder.
@@ -449,6 +466,8 @@ fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
         (Faction::Player, Job::Knight) => "knight",
         (Faction::Enemy, Job::Farmer) => "enemy_farmer",
         (Faction::Enemy, Job::Knight) => "enemy_knight",
+        (Faction::Ally, Job::Farmer) => "ally_farmer",
+        (Faction::Ally, Job::Knight) => "ally_knight",
     };
     let rows = match e.job {
         Job::Farmer => FARMER_ROWS,

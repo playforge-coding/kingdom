@@ -12,9 +12,10 @@ save slot; pressing **💾 Save** in the HUD overwrites it.
 A save captures everything needed to reconstruct your session exactly:
 
 - The world **seed**.
-- Your **stockpile** (wood and stone).
+- Your **stockpile** (wood, stone, and gold).
 - **Stats** — enemies defeated, units lost.
 - **Every unit** — position, faction, role, and state.
+- **Cargo ships** currently at sea, with their load and payout.
 - **All edited chunks** — buildings, bridges, and depleted resources.
 
 Loading replays the seed to regenerate untouched terrain, then applies your

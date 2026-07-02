@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use fastnoise_lite::{FastNoiseLite, NoiseType};
+use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 
 /// Chunk edge length in tiles.
 pub const CHUNK: i32 = 32;
@@ -54,6 +54,9 @@ pub struct Chunk {
     pub nodes: Vec<Option<Node>>,
     pub houses: Vec<bool>,
     pub enemy_houses: Vec<bool>,
+    /// Allied houses: a friendly third faction that trades with the player and
+    /// fights the enemy, but never joins the player's own battles.
+    pub ally_houses: Vec<bool>,
     pub bridges: Vec<bool>,
     pub walls: Vec<Option<Wall>>,
     /// Player-built mines: bottomless stone sources farmers work at.
@@ -69,6 +72,7 @@ impl Chunk {
             nodes: vec![None; CHUNK_TILES],
             houses: vec![false; CHUNK_TILES],
             enemy_houses: vec![false; CHUNK_TILES],
+            ally_houses: vec![false; CHUNK_TILES],
             bridges: vec![false; CHUNK_TILES],
             walls: vec![None; CHUNK_TILES],
             caves: vec![false; CHUNK_TILES],
@@ -95,6 +99,8 @@ pub struct World {
     chunks: HashMap<(i32, i32), Chunk>,
     /// Global tiles occupied by enemy houses, for spawning.
     pub enemy_house_tiles: Vec<(i32, i32)>,
+    /// Global tiles occupied by allied houses, for spawning and sea trade.
+    pub ally_house_tiles: Vec<(i32, i32)>,
 }
 
 impl World {
@@ -103,6 +109,7 @@ impl World {
             seed,
             chunks: HashMap::new(),
             enemy_house_tiles: Vec::new(),
+            ally_house_tiles: Vec::new(),
         }
     }
 
@@ -113,6 +120,7 @@ impl World {
             w.chunks.insert(coord, chunk);
         }
         w.rescan_enemy_houses();
+        w.rescan_ally_houses();
         w
     }
 
@@ -148,6 +156,22 @@ impl World {
                 for lx in 0..CHUNK {
                     if chunk.enemy_houses[li(lx, ly)] {
                         self.enemy_house_tiles
+                            .push((cx * CHUNK + lx, cy * CHUNK + ly));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn rescan_ally_houses(&mut self) {
+        self.ally_house_tiles.clear();
+        let coords: Vec<(i32, i32)> = self.chunks.keys().copied().collect();
+        for (cx, cy) in coords {
+            let chunk = &self.chunks[&(cx, cy)];
+            for ly in 0..CHUNK {
+                for lx in 0..CHUNK {
+                    if chunk.ally_houses[li(lx, ly)] {
+                        self.ally_house_tiles
                             .push((cx * CHUNK + lx, cy * CHUNK + ly));
                     }
                 }
@@ -202,6 +226,10 @@ impl World {
         self.chunk_at(x, y)
             .map_or(false, |c| c.enemy_houses[li(local_of(x), local_of(y))])
     }
+    pub fn is_ally_house(&self, x: i32, y: i32) -> bool {
+        self.chunk_at(x, y)
+            .map_or(false, |c| c.ally_houses[li(local_of(x), local_of(y))])
+    }
     pub fn is_bridge(&self, x: i32, y: i32) -> bool {
         self.chunk_at(x, y)
             .map_or(false, |c| c.bridges[li(local_of(x), local_of(y))])
@@ -243,6 +271,7 @@ impl World {
             && c.nodes[i].is_none()
             && !c.houses[i]
             && !c.enemy_houses[i]
+            && !c.ally_houses[i]
             && !c.caves[i]
             && c.huts[i].is_none()
     }
@@ -265,6 +294,7 @@ impl World {
         c.tiles[i] == Tile::Grass
             && !c.houses[i]
             && !c.enemy_houses[i]
+            && !c.ally_houses[i]
             && !c.caves[i]
             && c.huts[i].is_none()
     }
@@ -278,6 +308,7 @@ impl World {
             && c.nodes[i].is_none()
             && !c.houses[i]
             && !c.enemy_houses[i]
+            && !c.ally_houses[i]
             && !c.bridges[i]
             && c.walls[i].is_none()
             && !c.caves[i]
@@ -332,6 +363,18 @@ impl World {
         self.ensure(chunk_of(x), chunk_of(y));
         if let Some(c) = self.chunk_at_mut(x, y) {
             c.bridges[li(local_of(x), local_of(y))] = v;
+        }
+    }
+
+    /// Turn a tile into open water, clearing whatever sat on it. Used to carve
+    /// rivers that link inland lakes out to the sea so ships can pass.
+    pub fn carve_water(&mut self, x: i32, y: i32) {
+        self.ensure(chunk_of(x), chunk_of(y));
+        if let Some(c) = self.chunk_at_mut(x, y) {
+            let i = li(local_of(x), local_of(y));
+            c.tiles[i] = Tile::Water;
+            c.nodes[i] = None;
+            c.bridges[i] = false;
         }
     }
 
@@ -443,9 +486,10 @@ impl World {
         Some(kind)
     }
 
-    /// Plant an enemy camp near a tile, spacing houses on grass. Used once at
-    /// world creation so there is always an enemy presence near the start.
-    pub fn plant_camp(&mut self, center: (i32, i32), count: usize) {
+    /// Plant a camp near a tile, spacing houses on grass. `owner` tags the camp
+    /// (1 = enemy, 2 = ally). Used once at world creation so there is always a
+    /// rival — and a trade partner — established on the island.
+    pub fn plant_camp(&mut self, center: (i32, i32), count: usize, owner: u8) {
         let (cx0, cy0) = center;
         self.ensure_region(cx0 - 6, cy0 - 6, cx0 + 6, cy0 + 6);
         let mut placed = 0;
@@ -462,9 +506,17 @@ impl World {
                     if let Some(c) = self.chunk_at_mut(x, y) {
                         let i = li(local_of(x), local_of(y));
                         c.nodes[i] = None;
-                        c.enemy_houses[i] = true;
+                        if owner == 2 {
+                            c.ally_houses[i] = true;
+                        } else {
+                            c.enemy_houses[i] = true;
+                        }
                     }
-                    self.enemy_house_tiles.push((x, y));
+                    if owner == 2 {
+                        self.ally_house_tiles.push((x, y));
+                    } else {
+                        self.enemy_house_tiles.push((x, y));
+                    }
                     placed += 1;
                 }
             }
@@ -478,14 +530,15 @@ impl World {
                     break 'huts;
                 }
                 let (x, y) = (cx0 + rx, cy0 + ry);
+                let taken = self.is_enemy_house(x, y) || self.is_ally_house(x, y);
                 if self.tile(x, y) == Tile::Grass
-                    && !self.is_enemy_house(x, y)
+                    && !taken
                     && self.hut(x, y).is_none()
                     && (rx != 0 || ry != 0)
                     && rx.rem_euclid(2) == 0
                     && ry.rem_euclid(2) == 0
                 {
-                    self.set_hut(x, y, 1, ENEMY_HUT_HP);
+                    self.set_hut(x, y, owner, CAMP_HUT_HP);
                     huts += 1;
                 }
             }
@@ -493,14 +546,46 @@ impl World {
     }
 }
 
-/// Starting HP of an enemy camp's huts (matches the player's hut toughness).
-const ENEMY_HUT_HP: f32 = 400.0;
+/// Starting HP of a camp's huts (matches the player's hut toughness).
+const CAMP_HUT_HP: f32 = 400.0;
+
+/// Fraction of the way to land: a tile is grass when its shaped elevation rises
+/// above this. Kept high so oceans dominate and land forms distinct continents
+/// rather than a speckled scatter of islands.
+const SEA_LEVEL: f32 = 0.16;
+
+/// Radius (in tiles) of the always-dry home core: the player's starting village
+/// footprint, kept solid land so a fresh world never drowns the capital.
+const HOME_SOLID: f32 = 28.0;
+
+/// Radius (in tiles) over which the home-continent bias fades to nothing. The
+/// player and their rival start within this, so there is always a landmass to
+/// settle; beyond it the map is left to the natural continent noise.
+const HOME_RADIUS: f32 = 155.0;
 
 /// Generate one chunk deterministically from the seed and chunk coordinates.
 fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
-    let mut elevation = FastNoiseLite::with_seed(seed);
-    elevation.set_noise_type(Some(NoiseType::OpenSimplex2));
-    elevation.set_frequency(Some(0.035));
+    // Continental shape: a very low-frequency fractal (FBm) lays out the big
+    // picture — broad landmasses separated by wide oceans. Low frequency means
+    // each feature spans hundreds of tiles, so continents and seas are large.
+    let mut continent = FastNoiseLite::with_seed(seed);
+    continent.set_noise_type(Some(NoiseType::OpenSimplex2));
+    continent.set_fractal_type(Some(FractalType::FBm));
+    continent.set_fractal_octaves(Some(5));
+    continent.set_frequency(Some(0.0042));
+
+    // Coastline detail: a finer noise that only nudges the shoreline, breaking
+    // up the smooth continental blobs into ragged, natural-looking coasts,
+    // peninsulas and the odd offshore island.
+    let mut coast = FastNoiseLite::with_seed(seed.wrapping_add(91));
+    coast.set_noise_type(Some(NoiseType::OpenSimplex2));
+    coast.set_frequency(Some(0.03));
+
+    // Inland lakes: a higher-frequency noise that punches small, isolated water
+    // pockets into the middle of landmasses, so continents aren't uniformly dry.
+    let mut lake = FastNoiseLite::with_seed(seed.wrapping_add(4201));
+    lake.set_noise_type(Some(NoiseType::OpenSimplex2));
+    lake.set_frequency(Some(0.09));
 
     let mut scatter = FastNoiseLite::with_seed(seed.wrapping_add(1337));
     scatter.set_noise_type(Some(NoiseType::OpenSimplex2));
@@ -513,13 +598,40 @@ fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
             let y = cy * CHUNK + ly;
             let i = li(lx, ly);
 
-            let e = elevation.get_noise_2d(x as f32, y as f32); // [-1, 1]
-            if e < -0.12 {
+            let base = continent.get_noise_2d(x as f32, y as f32); // ~[-1, 1]
+            let rough = coast.get_noise_2d(x as f32, y as f32); // fine coast warp
+            let mut e = base + 0.20 * rough;
+
+            // Bias the origin up into land, tapering to nothing by HOME_RADIUS
+            // so the guaranteed starting continent melts seamlessly into the
+            // surrounding ocean map. Inside HOME_SOLID the ground is forced dry
+            // so the capital is never half-drowned.
+            let dist = ((x * x + y * y) as f32).sqrt();
+            if dist < HOME_SOLID {
+                chunk.tiles[i] = Tile::Grass;
+            } else {
+                let home = ((HOME_RADIUS - dist) / (HOME_RADIUS - HOME_SOLID)).clamp(0.0, 1.0);
+                e += home * 1.4;
+                if e < SEA_LEVEL {
+                    chunk.tiles[i] = Tile::Water;
+                    continue;
+                }
+                chunk.tiles[i] = Tile::Grass;
+            }
+
+            // Carve occasional small inland lakes: only where the noise peaks
+            // and the land sits well clear of the coast (so ponds stay wholly
+            // surrounded by land rather than merging into the sea). The dry home
+            // core is left untouched so the capital never floods.
+            if dist >= HOME_SOLID
+                && e > SEA_LEVEL + 0.22
+                && lake.get_noise_2d(x as f32, y as f32) > 0.72
+            {
                 chunk.tiles[i] = Tile::Water;
                 continue;
             }
-            chunk.tiles[i] = Tile::Grass;
 
+            // This tile is land: scatter woods and rocks across it.
             let s = scatter.get_noise_2d(x as f32, y as f32);
             if s > 0.45 {
                 chunk.nodes[i] = Some(Node {

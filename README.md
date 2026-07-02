@@ -31,23 +31,34 @@ both natively and in the browser (via WebGL) using **Trunk**.
 - **Knights** seek out and **attack** the enemy faction. Both sides take damage
   in melee; HP bars appear above wounded units. Set a **rally flag** (left-click
   in rally mode; right-click to clear) to pull them to a point.
-- **Enemies** hold **four villages** scattered around the island; their soldiers
-  stream out to hunt your units, so keep some knights around to defend.
+- **Three factions** (you = blue, enemy = red, allies = green). The **enemy**
+  holds **four villages** and is hostile to everyone; their soldiers stream out
+  to hunt you. The **allies** hold villages on far-off coasts: they trade with
+  you and attack the enemy on their own, but never join your battles and never
+  fight you.
 - **Your village.** You begin controlling a single village near the origin.
   Villages change hands per-camp: leave one undefended with an enemy inside and
   you lose it (your knights auto-rally to retake it); strip an enemy village of
-  its defenders and stand a unit in it to capture it.
+  its defenders and stand a unit in it to capture it. (Allied villages can't be
+  captured.)
 - **Priorities.** Toggle **Agriculture / Military** to bias which workers your
   houses raise, and **Balanced / Wood / Stone** to steer what farmers gather.
+- **Economy.** Alongside wood and stone you keep a purse of **gold**. You start
+  with some seed gold; every new **knight** costs gold to arm (a broke village
+  raises a free farmer instead), and most structures cost gold too.
+- **Trade.** Load wood and stone onto a **cargo ship** and left-click open water
+  to launch it. It charts a water route to the **nearest allied coast** (never
+  crossing land) and sells the goods for gold on arrival — **stone fetches more
+  than wood**.
 - **Building.** Left-click to build:
-  - a **House** on open grass (wood + stone) — only *next to your existing
+  - a **House** on open grass (wood + stone + gold) — only *next to your existing
     village*, so your territory grows organically. Houses raise your population
     cap and spawn new workers (while you have 4+ farmers).
   - a **Bridge** on open water (wood) — makes that tile walkable.
-  - a **Mine** on open ground (stone) — a bottomless stone source, worked by up
-    to four farmers at once.
-  - a **Wall** (wood + stone) — a defensive blocker units path around.
-  - a **Hut** (click a tree) — a knight builds it; it shelters farmers from
+  - a **Mine** on open ground (stone + gold) — a bottomless stone source, worked
+    by up to four farmers at once.
+  - a **Wall** (wood + stone + gold) — a defensive blocker units path around.
+  - a **Hut** (click a tree, gold) — a knight builds it; it shelters farmers from
     raids, and knights rush to defend an attacked one.
 - Units navigate with grid **pathfinding** (BFS) and treat water, buildings and
   resource nodes as obstacles, routing around them or across bridges.

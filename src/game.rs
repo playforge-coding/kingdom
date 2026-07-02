@@ -2,6 +2,8 @@
 //! collision-aware movement via BFS pathfinding, enemies, combat, building, and
 //! (de)serialization to the custom `.dat` save format.
 
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use glam::Vec2;
 
 use crate::pathfind;
@@ -36,6 +38,24 @@ impl Rng {
 pub enum Faction {
     Player,
     Enemy,
+    /// A friendly third faction: the player's trade partner. Allies fight the
+    /// enemy on their own initiative but never join the player's battles, and
+    /// the player and allies never fight each other.
+    Ally,
+}
+
+/// The only truly hostile faction is the Enemy: it is at war with both the
+/// player and the allies, while player and allies stay at peace. So two
+/// factions clash exactly when precisely one of them is the Enemy.
+fn hostile(a: Faction, b: Faction) -> bool {
+    (a == Faction::Enemy) != (b == Faction::Enemy)
+}
+
+/// Hostility between two building owners (0 = player, 1 = enemy, 2 = ally),
+/// mirroring [`hostile`]: only enemy-owned structures are fair game, and only to
+/// non-enemies.
+fn owner_hostile(a: u8, b: u8) -> bool {
+    (a == owner_of(Faction::Enemy)) != (b == owner_of(Faction::Enemy))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -106,6 +126,7 @@ fn max_hp_for(faction: Faction, job: Job) -> f32 {
         (_, Job::Knight) => 60.0,
         (Faction::Player, Job::Farmer) => 28.0,
         (Faction::Enemy, Job::Farmer) => 22.0,
+        (Faction::Ally, Job::Farmer) => 24.0,
     }
 }
 
@@ -161,8 +182,37 @@ pub const BRIDGE_WOOD_COST: u32 = 3;
 pub const MINE_STONE_COST: u32 = 12;
 pub const WALL_WOOD_COST: u32 = 2;
 pub const WALL_STONE_COST: u32 = 4;
+
+/// Gold in the coffers at the start of a new world.
+pub const START_MONEY: u32 = 150;
+/// Gold every new knight costs to arm and equip; a house raises a (free) farmer
+/// instead when the treasury can't afford one.
+pub const KNIGHT_GOLD_COST: u32 = 25;
+/// Gold cost of built structures (on top of their wood/stone). Bridges are the
+/// deliberate exception — they stay gold-free so you can always reach the coast
+/// to trade even when broke.
+pub const HOUSE_GOLD_COST: u32 = 30;
+pub const MINE_GOLD_COST: u32 = 40;
+pub const WALL_GOLD_COST: u32 = 5;
+pub const HUT_GOLD_COST: u32 = 15;
+
+/// Gold a distant village pays per unit of cargo. Stone is the premium good.
+pub const WOOD_PRICE: u32 = 2;
+pub const STONE_PRICE: u32 = 5;
+/// How fast a laden cargo ship sails out to sea (tiles/second).
+const SHIP_SPEED: f32 = 3.2;
+/// Water tiles a ship's route search may explore before giving up. Generous, as
+/// allied coasts can be far across open ocean; the search runs once, on launch.
+/// Sized to comfortably reach the nearest overseas ally (a disc of ~200-tile
+/// radius) even across the enlarged oceans.
+const SHIP_PATH_BUDGET: usize = 130_000;
+
 /// A new house must be within this many tiles of one you already own.
 pub const BUILD_NEAR_RADIUS: i32 = 5;
+
+/// A cargo ship may only launch from water within this many tiles of one of the
+/// player's own houses — its home port — not from any distant coast.
+pub const SHIP_NEAR_RADIUS: i32 = 8;
 
 const FARMER_SPEED: f32 = 2.4;
 const KNIGHT_SPEED: f32 = 2.9;
@@ -201,6 +251,15 @@ fn owner_of(f: Faction) -> u8 {
     match f {
         Faction::Player => 0,
         Faction::Enemy => 1,
+        Faction::Ally => 2,
+    }
+}
+
+fn faction_of(owner: u8) -> Faction {
+    match owner {
+        1 => Faction::Enemy,
+        2 => Faction::Ally,
+        _ => Faction::Player,
     }
 }
 
@@ -243,6 +302,37 @@ const CLUSTER_GAP: i32 = 8;
 const CAPTURE_RADIUS: f32 = 5.0;
 /// How many enemy villages to scatter around the map at world creation.
 const ENEMY_VILLAGES: usize = 4;
+/// How many allied (trade-partner) villages to plant on far-off coasts.
+const ALLY_VILLAGES: usize = 2;
+/// Allied camps raise new units on their own clock, like the enemy.
+const ALLY_SPAWN_INTERVAL: f32 = 10.0;
+/// Most allied units alive at once across all their villages.
+const ALLY_CAP: usize = 12;
+
+// The world is effectively infinite, so the initial villages above are only a
+// seed: fresh enemy and allied settlements keep being founded forever, each
+// planted farther out on an ever-widening frontier and spaced apart so the map
+// never clumps.
+/// Seconds between founding a brand-new enemy / allied village.
+const ENEMY_FOUND_INTERVAL: f32 = 35.0;
+const ALLY_FOUND_INTERVAL: f32 = 65.0;
+/// A newly founded village must sit at least this far (Chebyshev) from every
+/// existing settlement of any faction, so villages stay spread out.
+const VILLAGE_SPACING: i32 = 42;
+/// How far out the frontier starts, and how much farther each successive
+/// founding reaches. Allies begin beyond the enemy frontier, out across the sea.
+const FOUND_BASE_RADIUS: i32 = 110;
+const FOUND_RADIUS_STEP: i32 = 36;
+const ALLY_FOUND_BONUS: i32 = 40;
+
+/// A connected water body of at least this many tiles counts as the open ocean
+/// rather than an inland lake or enclosed sea — the threshold for deciding
+/// whether the capital's water needs a river dug out to the real coast, and for
+/// vetting allied ports. Set well above any plausible landlocked body so only
+/// the true, effectively-boundless ocean qualifies.
+const OCEAN_MIN_SIZE: usize = 6000;
+/// Cap on tiles explored while routing a river from a lake to the sea.
+const RIVER_BUDGET: usize = 40_000;
 
 /// Tiles kept generated around live entities so AI/pathfinding have room.
 const ENSURE_MARGIN: i32 = 40;
@@ -262,12 +352,30 @@ pub enum BuildMode {
     /// Left-click plants a rally flag: player knights drop everything (even a
     /// fight) and rush to it. The flag clears once they arrive.
     Rally,
+    /// Left-click open water to launch a cargo ship laden with the configured
+    /// wood/stone; it sails off to sell the goods at a far-away village.
+    Ship,
 }
 
 /// A sown sapling growing toward a harvestable tree (`grow` runs 0 → 1).
 struct Sapling {
     tile: Tile,
     grow: f32,
+}
+
+/// A cargo ship carrying goods to a distant village. It follows a water route to
+/// the nearest allied coast (never crossing land); once it docks there the cargo
+/// is sold and its `reward` in gold is banked.
+pub struct Ship {
+    pub pos: Vec2,
+    /// Water tiles leading to the destination port (last tile is the port).
+    path: Vec<Tile>,
+    path_cursor: usize,
+    wood: u32,
+    stone: u32,
+    reward: u32,
+    /// Seconds afloat, used to animate the gentle bob of the sprite.
+    pub bob: f32,
 }
 
 /// Which kind of villager the player's houses favour raising.
@@ -310,6 +418,15 @@ pub struct Game {
     pub entities: Vec<Entity>,
     pub wood: u32,
     pub stone: u32,
+    /// Gold: pays for new knights and most construction; earned by shipping
+    /// goods off to a far-away village.
+    pub money: u32,
+    /// Cargo the next dispatched ship should be loaded with (player-set, clamped
+    /// to the stockpile at launch).
+    pub ship_wood: u32,
+    pub ship_stone: u32,
+    /// Cargo ships currently at sea, sailing out to sell their goods.
+    ships: Vec<Ship>,
     pub build_mode: BuildMode,
     pub priority: Priority,
     pub gather_priority: GatherPriority,
@@ -332,8 +449,20 @@ pub struct Game {
     player_bridges: Vec<Tile>,
     enemy_spawn_timer: f32,
     player_spawn_timer: f32,
+    ally_spawn_timer: f32,
     player_spawn_cycle: u32,
     enemy_spawn_cycle: u32,
+    ally_spawn_cycle: u32,
+    /// Clocks and counters for founding ever-farther new villages (see the
+    /// `*_FOUND_INTERVAL` constants). The counts drive the frontier radius, so
+    /// each new settlement reaches farther out than the last.
+    enemy_found_timer: f32,
+    ally_found_timer: f32,
+    enemy_villages_founded: u32,
+    ally_villages_founded: u32,
+    /// The player's home landmass, flood-filled once and cached, so allied
+    /// villages can be kept off it (reaching them means a sea voyage).
+    home_continent: Option<HashSet<Tile>>,
     rng: Rng,
 }
 
@@ -344,19 +473,41 @@ impl Game {
 
         let mut entities = Vec::new();
 
-        // The player starts controlling a single village near the origin, and
-        // expands outward from it. Anchor it on the grass tile nearest origin.
-        let anchor = open_tiles_near(&world, 0, 0, 24)
-            .into_iter()
-            .min_by_key(|(x, y)| x.abs() + y.abs())
-            .unwrap_or((0, 0));
-        let mut player_house_tiles = Vec::new();
-        for (dx, dy) in [(0, 0), (3, 0), (0, 3), (3, 3), (-3, 2)] {
-            let (x, y) = (anchor.0 + dx, anchor.1 + dy);
-            if world.is_open_grass(x, y) {
+        // The player starts controlling a single village on the coast nearest
+        // the origin — right by the water, so their cargo port has a shore to
+        // launch from — and expands inland from there. Fall back to the nearest
+        // open land if (improbably) no coast is close.
+        let anchor = coastal_start(&mut world, 200).unwrap_or_else(|| {
+            open_tiles_near(&world, 0, 0, 24)
+                .into_iter()
+                .min_by_key(|(x, y)| x.abs() + y.abs())
+                .unwrap_or((0, 0))
+        });
+        // Lay the capital's houses on real open land around the anchor: the
+        // coast cuts off some directions, so pick actual grass tiles (nearest
+        // first, kept a couple tiles apart) rather than fixed offsets that could
+        // drop a house in the sea.
+        let mut player_house_tiles: Vec<Tile> = Vec::new();
+        let mut candidates = open_tiles_near(&world, anchor.0, anchor.1, 5);
+        candidates.sort_by_key(|&(x, y)| (x - anchor.0).abs() + (y - anchor.1).abs());
+        for (x, y) in candidates {
+            if player_house_tiles.len() >= 5 {
+                break;
+            }
+            let spaced = player_house_tiles
+                .iter()
+                .all(|&(hx, hy)| (hx - x).abs().max((hy - y).abs()) >= 2);
+            if spaced {
                 world.set_house(x, y, true);
                 player_house_tiles.push((x, y));
             }
+        }
+
+        // The capital sits by the water. If that water is a small inland lake
+        // rather than the open sea, dig a river from it out to the coast so a
+        // cargo ship launched here can still reach the allied shores.
+        if let Some(w) = nearest_water(&mut world, anchor.0, anchor.1, 8) {
+            carve_river_to_sea(&mut world, w, &player_house_tiles);
         }
 
         // Villagers: farmers to gather, knights to defend.
@@ -391,7 +542,7 @@ impl Game {
                 continue;
             };
             let before = world.enemy_house_tiles.len();
-            world.plant_camp(anchor, 4);
+            world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
             let houses: Vec<Tile> = world.enemy_house_tiles[before..].to_vec();
             if houses.is_empty() {
                 continue;
@@ -413,12 +564,70 @@ impl Game {
             }
         }
 
+        // Allied settlements: a friendly trade partner, planted on far-off coasts
+        // *across the sea* from the player. They keep their own farmers and
+        // knights, harass the enemy, but never join the player's fights.
+        //
+        // Map out the player's home landmass first so allied camps can be kept
+        // off it — a village you could just walk to would make the cargo ships
+        // pointless. Reaching an ally must mean crossing open water.
+        let home = home_continent_tiles(&mut world, anchor, 300, 60_000);
+        // Rather than guess a direction and hope a ship can get there, sail out
+        // from the player's own port and settle allies only on coasts the ships
+        // actually reach — spaced apart, and nearest first for short, reliable
+        // trade routes.
+        let mut ally_anchors: Vec<Tile> = Vec::new();
+        if let Some(port) = nearest_water(&mut world, anchor.0, anchor.1, 12) {
+            // Explore as far as a ship itself could sail, so every coast we find
+            // is genuinely reachable at launch.
+            let mut coasts = reachable_overseas_coasts(&mut world, port, &home, SHIP_PATH_BUDGET);
+            coasts.sort_by_key(|&(x, y)| (x - port.0).abs() + (y - port.1).abs());
+            for c in coasts {
+                if ally_anchors.len() >= ALLY_VILLAGES {
+                    break;
+                }
+                // A real sea crossing (not a coast hugging the player's own
+                // shore), clear of the home continent's footprint, and spaced
+                // from the allies already chosen.
+                if (c.0 - port.0).abs() + (c.1 - port.1).abs() < 24 {
+                    continue;
+                }
+                let on_home =
+                    (-5..=5).any(|dy| (-5..=5).any(|dx| home.contains(&(c.0 + dx, c.1 + dy))));
+                let spaced = ally_anchors
+                    .iter()
+                    .all(|&(ax, ay)| (ax - c.0).abs().max((ay - c.1).abs()) >= VILLAGE_SPACING);
+                if !on_home && spaced {
+                    ally_anchors.push(c);
+                }
+            }
+        }
+        for ally_anchor in ally_anchors {
+            let before = world.ally_house_tiles.len();
+            world.plant_camp(ally_anchor, 4, owner_of(Faction::Ally));
+            let houses: Vec<Tile> = world.ally_house_tiles[before..].to_vec();
+            if houses.is_empty() {
+                continue;
+            }
+            let roster = [Job::Farmer, Job::Farmer, Job::Farmer, Job::Knight];
+            for (k, &job) in roster.iter().enumerate() {
+                let (hx, hy) = houses[k % houses.len()];
+                if let Some(t) = adjacent_walkable(&world, hx, hy) {
+                    entities.push(Entity::new(Faction::Ally, job, t));
+                }
+            }
+        }
+
         let hut_tiles = world.all_hut_tiles();
         Game {
             world,
             entities,
             wood: 20,
             stone: 20,
+            money: START_MONEY,
+            ship_wood: 20,
+            ship_stone: 20,
+            ships: Vec::new(),
             build_mode: BuildMode::House,
             priority: Priority::Agriculture,
             gather_priority: GatherPriority::Balanced,
@@ -433,10 +642,33 @@ impl Game {
             player_bridges: Vec::new(),
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
             player_spawn_timer: PLAYER_SPAWN_INTERVAL,
+            ally_spawn_timer: ALLY_SPAWN_INTERVAL,
             player_spawn_cycle: 0,
             enemy_spawn_cycle: 0,
+            ally_spawn_cycle: 0,
+            enemy_found_timer: ENEMY_FOUND_INTERVAL,
+            ally_found_timer: ALLY_FOUND_INTERVAL,
+            enemy_villages_founded: ENEMY_VILLAGES as u32,
+            ally_villages_founded: ALLY_VILLAGES as u32,
+            home_continent: Some(home),
             rng: Rng::new(seed as u64 ^ 0xD1B54A32D192ED03),
         }
+    }
+
+    /// Where the camera should open on a fresh world: the centre of the
+    /// player's starting village (now planted on the coast, away from origin).
+    pub fn start_center(&self) -> Vec2 {
+        if self.player_house_tiles.is_empty() {
+            return Vec2::ZERO;
+        }
+        let (sx, sy) = self
+            .player_house_tiles
+            .iter()
+            .fold((0i64, 0i64), |(ax, ay), &(x, y)| {
+                (ax + x as i64, ay + y as i64)
+            });
+        let n = self.player_house_tiles.len() as f32;
+        Vec2::new(sx as f32 / n + 0.5, sy as f32 / n + 0.5)
     }
 
     pub fn population(&self) -> usize {
@@ -449,6 +681,12 @@ impl Game {
         self.entities
             .iter()
             .filter(|e| e.faction == Faction::Enemy)
+            .count()
+    }
+    fn ally_count(&self) -> usize {
+        self.entities
+            .iter()
+            .filter(|e| e.faction == Faction::Ally)
             .count()
     }
     fn farmer_count(&self, faction: Faction) -> usize {
@@ -466,6 +704,15 @@ impl Game {
     pub fn near_player_house(&self, x: i32, y: i32) -> bool {
         self.player_house_tiles.iter().any(|&(hx, hy)| {
             (hx - x).abs() <= BUILD_NEAR_RADIUS && (hy - y).abs() <= BUILD_NEAR_RADIUS
+        })
+    }
+
+    /// Is `(x, y)` a launch spot within the player's home port — close enough to
+    /// one of their houses that ships set sail from the village, not from some
+    /// random far-off stretch of coast.
+    pub fn near_player_dock(&self, x: i32, y: i32) -> bool {
+        self.player_house_tiles.iter().any(|&(hx, hy)| {
+            (hx - x).abs() <= SHIP_NEAR_RADIUS && (hy - y).abs() <= SHIP_NEAR_RADIUS
         })
     }
 
@@ -507,6 +754,7 @@ impl Game {
         // the village to become farmers again (and wall it up on the way).
         let player_under = self.farmer_count(Faction::Player) <= MIN_FARMERS_TO_GROW;
         let enemy_under = self.farmer_count(Faction::Enemy) <= MIN_FARMERS_TO_GROW;
+        let ally_under = self.farmer_count(Faction::Ally) <= MIN_FARMERS_TO_GROW;
         let pref = self.gather_priority.preferred();
 
         // Combat: knights damage the nearest opponent in range, or hack at an
@@ -524,7 +772,7 @@ impl Game {
             let mut best: Option<usize> = None;
             let mut bd = COMBAT_RANGE * COMBAT_RANGE;
             for (j, &(pj, fj)) in snap.iter().enumerate() {
-                if j == i || fj == fi {
+                if j == i || !hostile(fi, fj) {
                     continue;
                 }
                 let d = pi.distance_squared(pj);
@@ -570,7 +818,7 @@ impl Game {
                 let trapped = hut.occupants as u32;
                 if hut.owner == owner_of(Faction::Player) {
                     self.units_lost += trapped;
-                } else {
+                } else if hut.owner == owner_of(Faction::Enemy) {
                     self.enemies_defeated += trapped;
                 }
                 self.hut_tiles.retain(|&t| t != tile);
@@ -586,6 +834,7 @@ impl Game {
             let under = match faction {
                 Faction::Player => player_under,
                 Faction::Enemy => enemy_under,
+                Faction::Ally => ally_under,
             };
             let event = match (faction, self.entities[i].job) {
                 (Faction::Player, Job::Farmer) => {
@@ -634,6 +883,21 @@ impl Game {
                     acting[i],
                     under,
                     &self.world.enemy_house_tiles,
+                    None,
+                    None,
+                    &self.hut_tiles,
+                    &[],
+                    None,
+                    dt,
+                ),
+                (Faction::Ally, _) => ai_step(
+                    &self.world,
+                    &mut self.entities[i],
+                    &mut self.rng,
+                    &snap,
+                    acting[i],
+                    under,
+                    &self.world.ally_house_tiles,
                     None,
                     None,
                     &self.hut_tiles,
@@ -691,6 +955,7 @@ impl Game {
                 match self.entities[i].faction {
                     Faction::Enemy => self.enemies_defeated += 1,
                     Faction::Player => self.units_lost += 1,
+                    Faction::Ally => {}
                 }
                 self.entities.swap_remove(i);
             } else if self.entities[i].sheltered {
@@ -703,6 +968,42 @@ impl Game {
         self.emerge_from_huts();
         self.clear_reached_rally();
         self.resolve_captures();
+        self.update_ships(dt);
+    }
+
+    /// Sail cargo ships along their water route. A ship is always simulated (even
+    /// far off-screen); when it reaches the allied port at the end of its path
+    /// the goods are sold and the gold banked.
+    fn update_ships(&mut self, dt: f32) {
+        let mut i = 0;
+        while i < self.ships.len() {
+            self.ships[i].bob += dt;
+            let arrived = advance_ship(&mut self.ships[i], dt);
+            if arrived {
+                let s = &self.ships[i];
+                log::info!(
+                    "cargo ship reached the allied coast with {} wood + {} stone — +{} gold",
+                    s.wood,
+                    s.stone,
+                    s.reward
+                );
+                self.money += s.reward;
+                self.ships.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Ships currently at sea, for rendering.
+    pub fn ships(&self) -> &[Ship] {
+        &self.ships
+    }
+
+    /// Gold the next dispatched ship would fetch, given the current load and
+    /// stockpile (each field clamped to what's actually available).
+    pub fn ship_payout(&self) -> u32 {
+        self.ship_wood.min(self.wood) * WOOD_PRICE + self.ship_stone.min(self.stone) * STONE_PRICE
     }
 
     /// Let sheltering farmers back out of any hut the enemy has left alone.
@@ -715,17 +1016,13 @@ impl Game {
             if h.occupants == 0 {
                 continue;
             }
-            let faction = if h.owner == owner_of(Faction::Player) {
-                Faction::Player
-            } else {
-                Faction::Enemy
-            };
+            let faction = faction_of(h.owner);
             let center = tile_center((hx, hy));
             let r2 = HUT_SAFE_RADIUS * HUT_SAFE_RADIUS;
             let danger = self
                 .entities
                 .iter()
-                .any(|e| e.faction != faction && e.pos.distance_squared(center) <= r2);
+                .any(|e| hostile(e.faction, faction) && e.pos.distance_squared(center) <= r2);
             if danger {
                 continue;
             }
@@ -760,9 +1057,10 @@ impl Game {
     fn resolve_captures(&mut self) {
         let mut changed = false;
 
-        // Enemy villages overrun by the player.
+        // Enemy villages overrun by the player. Only the player can take enemy
+        // ground — an allied unit passing through never flips it.
         for village in cluster(&self.world.enemy_house_tiles) {
-            if self.village_undefended(&village, Faction::Enemy) {
+            if self.village_taken(&village, Faction::Enemy, Faction::Player) {
                 for &(x, y) in &village {
                     self.world.convert_house(x, y, 0);
                     self.world.reown_walls_near(x, y, 4, 1, 0);
@@ -773,7 +1071,7 @@ impl Game {
         // Player villages overrun by the enemy.
         let player_tiles = self.player_house_tiles.clone();
         for village in cluster(&player_tiles) {
-            if self.village_undefended(&village, Faction::Player) {
+            if self.village_taken(&village, Faction::Player, Faction::Enemy) {
                 for &(x, y) in &village {
                     self.world.convert_house(x, y, 1);
                     self.world.reown_walls_near(x, y, 4, 0, 1);
@@ -792,12 +1090,14 @@ impl Game {
         }
     }
 
-    /// True when `owner` has no unit within capture range of the village but at
-    /// least one opposing unit is standing in it.
-    fn village_undefended(&self, village: &[Tile], owner: Faction) -> bool {
+    /// True when the village has no `owner` defender within capture range but at
+    /// least one unit of the specific attacker faction `by` is standing in it.
+    /// Requiring a named attacker keeps a neutral third party (the allies) from
+    /// ever flipping a village they merely wander through.
+    fn village_taken(&self, village: &[Tile], owner: Faction, by: Faction) -> bool {
         let r2 = CAPTURE_RADIUS * CAPTURE_RADIUS;
         let mut owner_present = false;
-        let mut foe_present = false;
+        let mut attacker_present = false;
         for e in &self.entities {
             let inside = village
                 .iter()
@@ -805,12 +1105,12 @@ impl Game {
             if inside {
                 if e.faction == owner {
                     owner_present = true;
-                } else {
-                    foe_present = true;
+                } else if e.faction == by {
+                    attacker_present = true;
                 }
             }
         }
-        !owner_present && foe_present
+        !owner_present && attacker_present
     }
 
     /// Rebuild the cached list of player-owned house tiles from the world.
@@ -912,7 +1212,7 @@ impl Game {
                     // Agriculture favours farmers (2:1); Military favours
                     // knights (1:2). Both still raise some of each.
                     let c = self.player_spawn_cycle % 3;
-                    let job = match self.priority {
+                    let mut job = match self.priority {
                         Priority::Agriculture => {
                             if c == 2 {
                                 Job::Knight
@@ -928,10 +1228,167 @@ impl Game {
                             }
                         }
                     };
+                    // Knights must be paid for; an empty treasury raises a
+                    // (free) farmer instead, so the village still grows.
+                    if job == Job::Knight {
+                        if self.money >= KNIGHT_GOLD_COST {
+                            self.money -= KNIGHT_GOLD_COST;
+                        } else {
+                            job = Job::Farmer;
+                        }
+                    }
                     self.player_spawn_cycle += 1;
                     self.entities.push(Entity::new(Faction::Player, job, t));
                 }
             }
+        }
+
+        // Allied camps raise their own units — mostly knights to press the
+        // enemy, with the odd farmer to keep the village supported.
+        self.ally_spawn_timer -= dt;
+        if self.ally_spawn_timer <= 0.0 {
+            let farmers = self.farmer_count(Faction::Ally);
+            self.ally_spawn_timer = spawn_interval(ALLY_SPAWN_INTERVAL, farmers);
+            if !self.world.ally_house_tiles.is_empty()
+                && self.ally_count() < ALLY_CAP
+                && farmers > MIN_FARMERS_TO_GROW
+            {
+                let pick = self.rng.range(0, self.world.ally_house_tiles.len() as i32) as usize;
+                let (hx, hy) = self.world.ally_house_tiles[pick];
+                if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
+                    let job = if self.ally_spawn_cycle % 3 == 2 {
+                        Job::Farmer
+                    } else {
+                        Job::Knight
+                    };
+                    self.ally_spawn_cycle += 1;
+                    self.entities.push(Entity::new(Faction::Ally, job, t));
+                }
+            }
+        }
+
+        // Found brand-new villages on their own slow clocks, pushing the
+        // frontier ever outward so the infinite world keeps filling in.
+        self.enemy_found_timer -= dt;
+        if self.enemy_found_timer <= 0.0 {
+            self.enemy_found_timer = ENEMY_FOUND_INTERVAL;
+            self.found_enemy_village();
+        }
+        self.ally_found_timer -= dt;
+        if self.ally_found_timer <= 0.0 {
+            self.ally_found_timer = ALLY_FOUND_INTERVAL;
+            self.found_ally_village();
+        }
+    }
+
+    /// True if `anchor` is far enough from every existing settlement to found a
+    /// new village there without clumping.
+    fn village_spot_clear(&self, anchor: Tile) -> bool {
+        let spaced = |tiles: &[Tile]| {
+            tiles.iter().all(|&(hx, hy)| {
+                (hx - anchor.0).abs() >= VILLAGE_SPACING || (hy - anchor.1).abs() >= VILLAGE_SPACING
+            })
+        };
+        spaced(&self.world.enemy_house_tiles)
+            && spaced(&self.world.ally_house_tiles)
+            && spaced(&self.player_house_tiles)
+    }
+
+    /// Ensure the cached home-continent tile set exists (flood-filled from the
+    /// capital), computing it lazily on first need — e.g. after a load.
+    fn ensure_home_set(&mut self) {
+        if self.home_continent.is_none() {
+            let seed_tile = self
+                .player_house_tiles
+                .iter()
+                .min_by_key(|(x, y)| x.abs() + y.abs())
+                .copied()
+                .unwrap_or((0, 0));
+            let set = home_continent_tiles(&mut self.world, seed_tile, 300, 60_000);
+            self.home_continent = Some(set);
+        }
+    }
+
+    /// Found a new enemy village somewhere out on the expanding frontier, on any
+    /// landmass, kept spaced from existing settlements. Seeds it with a starting
+    /// roster so it is a going concern the moment the player stumbles on it.
+    fn found_enemy_village(&mut self) {
+        let base = FOUND_BASE_RADIUS + self.enemy_villages_founded as i32 * FOUND_RADIUS_STEP;
+        for _ in 0..8 {
+            let ang = self.rng.range(0, 62832) as f32 / 10000.0;
+            let r = (base + self.rng.range(-30, 31)) as f32;
+            let target = ((ang.cos() * r) as i32, (ang.sin() * r) as i32);
+            let Some(anchor) = find_land_anchor(&mut self.world, target, 22) else {
+                continue;
+            };
+            if !self.village_spot_clear(anchor) {
+                continue;
+            }
+            let before = self.world.enemy_house_tiles.len();
+            self.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
+            let houses: Vec<Tile> = self.world.enemy_house_tiles[before..].to_vec();
+            if houses.is_empty() {
+                continue;
+            }
+            self.enemy_villages_founded += 1;
+            for (k, &job) in [Job::Farmer, Job::Farmer, Job::Farmer, Job::Knight, Job::Knight]
+                .iter()
+                .enumerate()
+            {
+                let (hx, hy) = houses[k % houses.len()];
+                if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
+                    self.entities.push(Entity::new(Faction::Enemy, job, t));
+                }
+            }
+            return;
+        }
+    }
+
+    /// Found a new allied village, always on a coast *off* the home continent so
+    /// cargo ships remain the only way to reach it, and spaced from other camps.
+    fn found_ally_village(&mut self) {
+        self.ensure_home_set();
+        let base = FOUND_BASE_RADIUS
+            + ALLY_FOUND_BONUS
+            + self.ally_villages_founded as i32 * FOUND_RADIUS_STEP;
+        for _ in 0..10 {
+            let ang = self.rng.range(0, 62832) as f32 / 10000.0;
+            let r = (base + self.rng.range(-30, 31)) as f32;
+            let target = ((ang.cos() * r) as i32, (ang.sin() * r) as i32);
+            let Some(anchor) = find_ocean_coast_anchor(&mut self.world, target, 24) else {
+                continue;
+            };
+            if !self.village_spot_clear(anchor) {
+                continue;
+            }
+            let on_home = (-5..=5).any(|dy| {
+                (-5..=5).any(|dx| {
+                    self.home_continent
+                        .as_ref()
+                        .unwrap()
+                        .contains(&(anchor.0 + dx, anchor.1 + dy))
+                })
+            });
+            if on_home {
+                continue;
+            }
+            let before = self.world.ally_house_tiles.len();
+            self.world.plant_camp(anchor, 4, owner_of(Faction::Ally));
+            let houses: Vec<Tile> = self.world.ally_house_tiles[before..].to_vec();
+            if houses.is_empty() {
+                continue;
+            }
+            self.ally_villages_founded += 1;
+            for (k, &job) in [Job::Farmer, Job::Farmer, Job::Farmer, Job::Knight]
+                .iter()
+                .enumerate()
+            {
+                let (hx, hy) = houses[k % houses.len()];
+                if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
+                    self.entities.push(Entity::new(Faction::Ally, job, t));
+                }
+            }
+            return;
         }
     }
 
@@ -945,11 +1402,13 @@ impl Game {
                     || !self.near_player_house(x, y)
                     || self.wood < HOUSE_WOOD_COST
                     || self.stone < HOUSE_STONE_COST
+                    || self.money < HOUSE_GOLD_COST
                 {
                     return false;
                 }
                 self.wood -= HOUSE_WOOD_COST;
                 self.stone -= HOUSE_STONE_COST;
+                self.money -= HOUSE_GOLD_COST;
                 self.world.set_house(x, y, true);
                 self.player_house_tiles.push((x, y));
                 true
@@ -975,10 +1434,12 @@ impl Game {
                 if !self.world.is_open_grass(x, y)
                     || !self.near_player_house(x, y)
                     || self.stone < MINE_STONE_COST
+                    || self.money < MINE_GOLD_COST
                 {
                     return false;
                 }
                 self.stone -= MINE_STONE_COST;
+                self.money -= MINE_GOLD_COST;
                 self.world.set_cave(x, y, true);
                 self.cave_tiles.push((x, y));
                 true
@@ -989,11 +1450,13 @@ impl Game {
                     || !self.near_player_house(x, y)
                     || self.wood < WALL_WOOD_COST
                     || self.stone < WALL_STONE_COST
+                    || self.money < WALL_GOLD_COST
                 {
                     return false;
                 }
                 self.wood -= WALL_WOOD_COST;
                 self.stone -= WALL_STONE_COST;
+                self.money -= WALL_GOLD_COST;
                 self.world
                     .set_wall(x, y, owner_of(Faction::Player), WALL_MAX_HP);
                 true
@@ -1005,8 +1468,14 @@ impl Game {
                     return false;
                 }
                 if let Some(i) = self.hut_orders.iter().position(|&t| t == (x, y)) {
+                    // Cancelling a pending order refunds its gold.
                     self.hut_orders.remove(i);
+                    self.money += HUT_GOLD_COST;
                 } else {
+                    if self.money < HUT_GOLD_COST {
+                        return false;
+                    }
+                    self.money -= HUT_GOLD_COST;
                     self.hut_orders.push((x, y));
                 }
                 true
@@ -1020,6 +1489,36 @@ impl Game {
                 } else {
                     Some(here)
                 };
+                true
+            }
+            BuildMode::Ship => {
+                // Launch a laden cargo ship from open water in the village's own
+                // harbour. It needs a water route to an allied coast; with no
+                // reachable ally port the launch is refused (and the cargo kept).
+                if !self.world.is_open_water(x, y) || !self.near_player_dock(x, y) {
+                    return false;
+                }
+                let wood = self.ship_wood.min(self.wood);
+                let stone = self.ship_stone.min(self.stone);
+                if wood + stone == 0 {
+                    return false;
+                }
+                let Some(path) = plan_sea_route(&self.world, (x, y), &self.world.ally_house_tiles)
+                else {
+                    return false;
+                };
+                self.wood -= wood;
+                self.stone -= stone;
+                let reward = wood * WOOD_PRICE + stone * STONE_PRICE;
+                self.ships.push(Ship {
+                    pos: tile_center((x, y)),
+                    path,
+                    path_cursor: 0,
+                    wood,
+                    stone,
+                    reward,
+                    bob: 0.0,
+                });
                 true
             }
         }
@@ -1075,9 +1574,10 @@ fn ai_step(
                 soldier_behavior(world, e, owner, rng, snap, rally, hut_orders, acting, dt)
             }
         }
-        (Faction::Enemy, Job::Farmer) => {
-            // Enemy farmers shelter in their own huts when the player's near.
-            if let Some(ev) = seek_shelter(world, e, owner, Faction::Enemy, snap, huts, dt) {
+        (_, Job::Farmer) => {
+            // Enemy and allied farmers shelter in their own huts when a hostile
+            // faction closes in, then potter about their village.
+            if let Some(ev) = seek_shelter(world, e, owner, e.faction, snap, huts, dt) {
                 return ev;
             }
             wander_behavior(world, e, owner, None, rng, dt);
@@ -1191,11 +1691,12 @@ fn plan_plant(
     Some((path, spot))
 }
 
-/// Is an enemy of `faction` within `r` of `pos`?
+/// Is a hostile unit within `r` of `pos`? (Allies don't scare the player, and
+/// vice versa — only the enemy triggers a flight to shelter.)
 fn enemy_within(snap: &[(Vec2, Faction)], pos: Vec2, faction: Faction, r: f32) -> bool {
     let r2 = r * r;
     snap.iter()
-        .any(|&(p, f)| f != faction && p.distance_squared(pos) <= r2)
+        .any(|&(p, f)| hostile(f, faction) && p.distance_squared(pos) <= r2)
 }
 
 /// Nearest friendly hut (owned by `owner`) with room and a reachable doorway.
@@ -1487,7 +1988,7 @@ fn soldier_behavior(
     // fixating on a straight-line-nearest foe that's stranded across water.
     let foes: std::collections::HashSet<Tile> = snap
         .iter()
-        .filter(|&&(_, f)| f != e.faction)
+        .filter(|&&(_, f)| hostile(f, e.faction))
         .map(|&(p, _)| (p.x.floor() as i32, p.y.floor() as i32))
         .collect();
 
@@ -1674,6 +2175,45 @@ fn follow_path(e: &mut Entity, speed: f32, dt: f32) -> bool {
     true
 }
 
+/// Plot a water-only route from `start` (a water tile) to the nearest port — a
+/// water tile touching an allied house. Returns `None` if no allied coast is
+/// reachable across water within the search budget. Because the route travels
+/// only over water tiles, a ship following it never crosses land.
+fn plan_sea_route(world: &World, start: Tile, ally_houses: &[Tile]) -> Option<Vec<Tile>> {
+    use crate::world::Tile as WTile;
+    if ally_houses.is_empty() {
+        return None;
+    }
+    let ports: std::collections::HashSet<Tile> = ally_houses.iter().copied().collect();
+    let sea = |x: i32, y: i32| world.tile(x, y) == WTile::Water;
+    let is_port = |x: i32, y: i32| {
+        sea(x, y)
+            && [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .iter()
+                .any(|&(dx, dy)| ports.contains(&(x + dx, y + dy)))
+    };
+    pathfind::bfs(start, SHIP_PATH_BUDGET, is_port, sea)
+}
+
+/// Advance a ship one step along its water route. Returns true once it has
+/// reached the final port tile (an empty route counts as already arrived).
+fn advance_ship(s: &mut Ship, dt: f32) -> bool {
+    if s.path_cursor >= s.path.len() {
+        return true;
+    }
+    let goal = tile_center(s.path[s.path_cursor]);
+    let to = goal - s.pos;
+    let dist = to.length();
+    let step = SHIP_SPEED * dt;
+    if dist <= step.max(0.02) {
+        s.pos = goal;
+        s.path_cursor += 1;
+    } else {
+        s.pos += to / dist * step;
+    }
+    s.path_cursor >= s.path.len()
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1730,12 +2270,13 @@ fn plan_gather_kind(
     Some((path, node))
 }
 
-/// An enemy-owned wall adjacent to `tile`, if any (which knights hack down).
+/// A hostile-owned wall adjacent to `tile`, if any (which knights hack down).
+/// Friendly and allied walls are left alone.
 fn adjacent_enemy_wall(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
         let (nx, ny) = (tile.0 + dx, tile.1 + dy);
         if let Some(w) = world.wall(nx, ny) {
-            if w.owner != owner {
+            if owner_hostile(w.owner, owner) {
                 return Some((nx, ny));
             }
         }
@@ -1743,12 +2284,12 @@ fn adjacent_enemy_wall(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     None
 }
 
-/// An enemy-owned hut adjacent to `tile`, if any (which knights break into).
+/// A hostile-owned hut adjacent to `tile`, if any (which knights break into).
 fn adjacent_enemy_hut(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
         let (nx, ny) = (tile.0 + dx, tile.1 + dy);
         if let Some(h) = world.hut(nx, ny) {
-            if h.owner != owner {
+            if owner_hostile(h.owner, owner) {
                 return Some((nx, ny));
             }
         }
@@ -1821,6 +2362,266 @@ fn find_land_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile> {
     best.map(|(t, _)| t)
 }
 
+/// Flood-fill the landmass the player starts on, returning every land tile
+/// reachable from `seed` by walking over grass (short auto-bridged straits
+/// count as the same landmass). Bounded by `max_radius` from the seed and a
+/// hard tile cap so a freak mega-continent can't stall world creation. Used to
+/// keep allied villages *off* the home continent, so reaching them means a sea
+/// voyage — the whole point of the cargo ships.
+fn home_continent_tiles(world: &mut World, seed: Tile, max_radius: i32, cap: usize) -> HashSet<Tile> {
+    let mut seen: HashSet<Tile> = HashSet::new();
+    let mut queue: VecDeque<Tile> = VecDeque::new();
+    let passable = |world: &mut World, x: i32, y: i32| {
+        world.ensure(x.div_euclid(CHUNK), y.div_euclid(CHUNK));
+        world.tile(x, y) == crate::world::Tile::Grass || world.is_bridge(x, y)
+    };
+    if passable(world, seed.0, seed.1) {
+        seen.insert(seed);
+        queue.push_back(seed);
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        if seen.len() >= cap {
+            break;
+        }
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let (nx, ny) = (x + dx, y + dy);
+            if (nx - seed.0).abs() > max_radius || (ny - seed.1).abs() > max_radius {
+                continue;
+            }
+            if seen.contains(&(nx, ny)) || !passable(world, nx, ny) {
+                continue;
+            }
+            seen.insert((nx, ny));
+            queue.push_back((nx, ny));
+        }
+    }
+    seen
+}
+
+/// Find the open-grass tile nearest the origin that sits right by the shore —
+/// land with open water within a few tiles, but not so surrounded by sea that a
+/// village's houses would spill into it. Used to plant the player's capital on
+/// the coast. Returns `None` only if no land near origin is close to water.
+fn coastal_start(world: &mut World, r: i32) -> Option<Tile> {
+    world.ensure_region(-r, -r, r, r);
+    let mut best: Option<(Tile, i32)> = None;
+    for y in -r..=r {
+        for x in -r..=r {
+            if !world.is_open_grass(x, y) {
+                continue;
+            }
+            // Water close enough to be "on the coast" (within 4 tiles), so the
+            // village overlooks the sea and its port has somewhere to launch.
+            let near_water = (-4..=4).any(|dy| {
+                (-4..=4).any(|dx| world.tile(x + dx, y + dy) == crate::world::Tile::Water)
+            });
+            if !near_water {
+                continue;
+            }
+            let d = x.abs() + y.abs();
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some(((x, y), d));
+            }
+        }
+    }
+    best.map(|(t, _)| t)
+}
+
+/// The open-water tile nearest `(cx, cy)` within radius `r` (Chebyshev).
+/// Find a shoreline anchor whose coast fronts the *open ocean*, not an inland
+/// lake or enclosed sea — so a cargo ship can actually sail there. Returns the
+/// ocean-coast grass tile nearest `near`, or `None` if none is within `r`.
+fn find_ocean_coast_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile> {
+    use crate::world::Tile as WTile;
+    world.ensure_region(near.0 - r, near.1 - r, near.0 + r, near.1 + r);
+    let mut cands: Vec<Tile> = Vec::new();
+    for y in (near.1 - r)..=(near.1 + r) {
+        for x in (near.0 - r)..=(near.0 + r) {
+            let coastal = world.is_open_grass(x, y)
+                && [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|&(dx, dy)| world.tile(x + dx, y + dy) == WTile::Water);
+            if coastal {
+                cands.push((x, y));
+            }
+        }
+    }
+    cands.sort_by_key(|&(x, y)| (x - near.0).abs() + (y - near.1).abs());
+    // Check candidates nearest-first; cache lake tiles so each small body is only
+    // flooded once.
+    let mut lake: HashSet<Tile> = HashSet::new();
+    for (x, y) in cands {
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let w = (x + dx, y + dy);
+            if world.tile(w.0, w.1) != WTile::Water || lake.contains(&w) {
+                continue;
+            }
+            let (sea, body) = flood_water(world, w.0, w.1, OCEAN_MIN_SIZE);
+            if sea {
+                return Some((x, y));
+            }
+            lake.extend(body);
+        }
+    }
+    None
+}
+
+/// Sail out from `start_sea` (BFS over open water, 4-connected, bounded by
+/// `explore_cap` tiles) and collect every off-home coast tile the ship can
+/// reach. Any ally settled on one of these is guaranteed a working sea route
+/// back to the player — reachability is established by construction rather than
+/// hoped for.
+fn reachable_overseas_coasts(
+    world: &mut World,
+    start_sea: Tile,
+    home: &HashSet<Tile>,
+    explore_cap: usize,
+) -> Vec<Tile> {
+    use crate::world::Tile as WTile;
+    world.ensure(start_sea.0.div_euclid(CHUNK), start_sea.1.div_euclid(CHUNK));
+    if world.tile(start_sea.0, start_sea.1) != WTile::Water {
+        return Vec::new();
+    }
+    let mut seen: HashSet<Tile> = HashSet::new();
+    let mut q: VecDeque<Tile> = VecDeque::new();
+    seen.insert(start_sea);
+    q.push_back(start_sea);
+    let mut coasts: Vec<Tile> = Vec::new();
+    let mut coast_seen: HashSet<Tile> = HashSet::new();
+    while let Some((x, y)) = q.pop_front() {
+        if seen.len() > explore_cap {
+            break;
+        }
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let n = (x + dx, y + dy);
+            world.ensure(n.0.div_euclid(CHUNK), n.1.div_euclid(CHUNK));
+            match world.tile(n.0, n.1) {
+                WTile::Water => {
+                    if seen.insert(n) {
+                        q.push_back(n);
+                    }
+                }
+                WTile::Grass => {
+                    if !home.contains(&n)
+                        && world.is_open_grass(n.0, n.1)
+                        && coast_seen.insert(n)
+                    {
+                        coasts.push(n);
+                    }
+                }
+            }
+        }
+    }
+    coasts
+}
+
+/// The open-water tile nearest `(cx, cy)` within radius `r` (Chebyshev).
+fn nearest_water(world: &mut World, cx: i32, cy: i32, r: i32) -> Option<Tile> {
+    world.ensure_region(cx - r, cy - r, cx + r, cy + r);
+    let mut best: Option<(Tile, i32)> = None;
+    for y in (cy - r)..=(cy + r) {
+        for x in (cx - r)..=(cx + r) {
+            if world.tile(x, y) == crate::world::Tile::Water {
+                let d = (x - cx).abs() + (y - cy).abs();
+                if best.map_or(true, |(_, bd)| d < bd) {
+                    best = Some(((x, y), d));
+                }
+            }
+        }
+    }
+    best.map(|(t, _)| t)
+}
+
+/// Flood the connected water body containing `(sx, sy)`, up to `cap` tiles.
+/// Returns whether it reached the cap (i.e. it is open sea, not a small lake)
+/// and the tiles visited.
+fn flood_water(world: &mut World, sx: i32, sy: i32, cap: usize) -> (bool, HashSet<Tile>) {
+    use crate::world::Tile as WTile;
+    let mut seen: HashSet<Tile> = HashSet::new();
+    world.ensure(sx.div_euclid(CHUNK), sy.div_euclid(CHUNK));
+    if world.tile(sx, sy) != WTile::Water {
+        return (false, seen);
+    }
+    let mut q: VecDeque<Tile> = VecDeque::new();
+    seen.insert((sx, sy));
+    q.push_back((sx, sy));
+    while let Some((x, y)) = q.pop_front() {
+        if seen.len() >= cap {
+            return (true, seen);
+        }
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let n = (x + dx, y + dy);
+            world.ensure(n.0.div_euclid(CHUNK), n.1.div_euclid(CHUNK));
+            if !seen.contains(&n) && world.tile(n.0, n.1) == WTile::Water {
+                seen.insert(n);
+                q.push_back(n);
+            }
+        }
+    }
+    (false, seen)
+}
+
+/// If the water body at `seed` is a small inland lake, dig a one-tile-wide river
+/// from it to the nearest open sea, so cargo ships launched on the lake can
+/// still sail out to the coast. Routes around the tiles in `avoid` (the player's
+/// houses). A no-op when the water is already the sea.
+fn carve_river_to_sea(world: &mut World, seed: Tile, avoid: &[Tile]) {
+    use crate::world::Tile as WTile;
+    let (is_sea, body) = flood_water(world, seed.0, seed.1, OCEAN_MIN_SIZE);
+    if is_sea || body.is_empty() {
+        return;
+    }
+    let blocked: HashSet<Tile> = avoid.iter().copied().collect();
+    // BFS out from the lake (4-connected). Passable = land or water; the lake's
+    // own water seeds the search, land tiles become river candidates, and any
+    // *other* water body large enough to be the sea is the goal. Only the land
+    // tiles on the chosen path are carved — existing water already connects.
+    let mut came: HashMap<Tile, Tile> = HashMap::new();
+    let mut visited: HashSet<Tile> = body.clone();
+    let mut q: VecDeque<Tile> = body.iter().copied().collect();
+    let mut mouth: Option<Tile> = None;
+    'bfs: while let Some(t) = q.pop_front() {
+        if visited.len() > RIVER_BUDGET {
+            break;
+        }
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let n = (t.0 + dx, t.1 + dy);
+            world.ensure(n.0.div_euclid(CHUNK), n.1.div_euclid(CHUNK));
+            if visited.contains(&n) || blocked.contains(&n) {
+                continue;
+            }
+            let tile = world.tile(n.0, n.1);
+            if tile == WTile::Water {
+                // A different water body — is it the open sea?
+                if flood_water(world, n.0, n.1, OCEAN_MIN_SIZE).0 {
+                    came.insert(n, t);
+                    mouth = Some(n);
+                    break 'bfs;
+                }
+                // Another lake: pass through it (it is already water).
+                visited.insert(n);
+                came.insert(n, t);
+                q.push_back(n);
+            } else if tile == WTile::Grass {
+                visited.insert(n);
+                came.insert(n, t);
+                q.push_back(n);
+            }
+        }
+    }
+    // Walk back from the sea to the lake, carving the land tiles into a channel.
+    let mut cur = match mouth {
+        Some(m) => m,
+        None => return,
+    };
+    while let Some(&prev) = came.get(&cur) {
+        if world.tile(prev.0, prev.1) == WTile::Grass {
+            world.carve_water(prev.0, prev.1);
+        }
+        cur = prev;
+    }
+}
+
 fn adjacent_walkable(world: &World, x: i32, y: i32) -> Option<Tile> {
     for (dx, dy) in [
         (1, 0),
@@ -1856,7 +2657,7 @@ fn open_tiles_near(world: &World, cx: i32, cy: i32, r: i32) -> Vec<Tile> {
 // ---------------------------------------------------------------------------
 
 const MAGIC: &[u8; 4] = b"KGDM";
-const VERSION: u8 = 7;
+const VERSION: u8 = 9;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
     b.push(v);
@@ -1902,6 +2703,7 @@ fn faction_u8(f: Faction) -> u8 {
     match f {
         Faction::Player => 0,
         Faction::Enemy => 1,
+        Faction::Ally => 2,
     }
 }
 fn job_u8(j: Job) -> u8 {
@@ -1934,6 +2736,9 @@ impl Game {
         wi32(&mut b, self.world.seed());
         wu32(&mut b, self.wood);
         wu32(&mut b, self.stone);
+        wu32(&mut b, self.money);
+        wu32(&mut b, self.ship_wood);
+        wu32(&mut b, self.ship_stone);
         wu32(&mut b, self.enemies_defeated);
         wu32(&mut b, self.units_lost);
         wu8(
@@ -1982,6 +2787,22 @@ impl Game {
             wi32(&mut b, y);
         }
 
+        wu32(&mut b, self.ships.len() as u32);
+        for s in &self.ships {
+            wf32(&mut b, s.pos.x);
+            wf32(&mut b, s.pos.y);
+            wu32(&mut b, s.wood);
+            wu32(&mut b, s.stone);
+            wu32(&mut b, s.reward);
+            wf32(&mut b, s.bob);
+            wu32(&mut b, s.path_cursor as u32);
+            wu32(&mut b, s.path.len() as u32);
+            for &(tx, ty) in &s.path {
+                wi32(&mut b, tx);
+                wi32(&mut b, ty);
+            }
+        }
+
         let chunks: Vec<_> = self.world.chunks_iter().collect();
         wu32(&mut b, chunks.len() as u32);
         for (coord, chunk) in chunks {
@@ -2006,6 +2827,9 @@ impl Game {
                 wu8(&mut b, h as u8);
             }
             for &h in &chunk.enemy_houses {
+                wu8(&mut b, h as u8);
+            }
+            for &h in &chunk.ally_houses {
                 wu8(&mut b, h as u8);
             }
             for &h in &chunk.bridges {
@@ -2056,6 +2880,9 @@ impl Game {
         let seed = r.i32()?;
         let wood = r.u32()?;
         let stone = r.u32()?;
+        let money = r.u32()?;
+        let ship_wood = r.u32()?;
+        let ship_stone = r.u32()?;
         let enemies_defeated = r.u32()?;
         let units_lost = r.u32()?;
         let build_mode = if r.u8()? == 1 {
@@ -2082,11 +2909,7 @@ impl Game {
         let ecount = r.u32()? as usize;
         let mut entities = Vec::with_capacity(ecount);
         for _ in 0..ecount {
-            let faction = if r.u8()? == 1 {
-                Faction::Enemy
-            } else {
-                Faction::Player
-            };
+            let faction = faction_of(r.u8()?);
             let job = if r.u8()? == 1 {
                 Job::Knight
             } else {
@@ -2133,6 +2956,31 @@ impl Game {
             player_bridges.push((r.i32()?, r.i32()?));
         }
 
+        let scount = r.u32()? as usize;
+        let mut ships = Vec::with_capacity(scount);
+        for _ in 0..scount {
+            let pos = Vec2::new(r.f32()?, r.f32()?);
+            let wood = r.u32()?;
+            let stone = r.u32()?;
+            let reward = r.u32()?;
+            let bob = r.f32()?;
+            let path_cursor = r.u32()? as usize;
+            let plen = r.u32()? as usize;
+            let mut path = Vec::with_capacity(plen);
+            for _ in 0..plen {
+                path.push((r.i32()?, r.i32()?));
+            }
+            ships.push(Ship {
+                pos,
+                path,
+                path_cursor,
+                wood,
+                stone,
+                reward,
+                bob,
+            });
+        }
+
         let ccount = r.u32()? as usize;
         let mut chunks = Vec::with_capacity(ccount);
         let n_tiles = (CHUNK * CHUNK) as usize;
@@ -2144,6 +2992,7 @@ impl Game {
                 nodes: Vec::with_capacity(n_tiles),
                 houses: Vec::with_capacity(n_tiles),
                 enemy_houses: Vec::with_capacity(n_tiles),
+                ally_houses: Vec::with_capacity(n_tiles),
                 bridges: Vec::with_capacity(n_tiles),
                 walls: Vec::with_capacity(n_tiles),
                 caves: Vec::with_capacity(n_tiles),
@@ -2176,6 +3025,9 @@ impl Game {
             }
             for _ in 0..n_tiles {
                 chunk.enemy_houses.push(r.u8()? != 0);
+            }
+            for _ in 0..n_tiles {
+                chunk.ally_houses.push(r.u8()? != 0);
             }
             for _ in 0..n_tiles {
                 chunk.bridges.push(r.u8()? != 0);
@@ -2232,11 +3084,28 @@ impl Game {
         }
 
         let world = World::from_saved(seed, chunks);
+        // Continue the founding frontier outward from wherever the saved
+        // settlements already reach, so new villages keep spreading rather than
+        // piling onto the existing ones.
+        let frontier = |tiles: &[Tile]| {
+            let far = tiles
+                .iter()
+                .map(|&(x, y)| x.abs().max(y.abs()))
+                .max()
+                .unwrap_or(0);
+            (((far - FOUND_BASE_RADIUS).max(0) / FOUND_RADIUS_STEP) as u32) + 1
+        };
+        let enemy_villages_founded = frontier(&world.enemy_house_tiles);
+        let ally_villages_founded = frontier(&world.ally_house_tiles);
         let game = Game {
             world,
             entities,
             wood,
             stone,
+            money,
+            ship_wood,
+            ship_stone,
+            ships,
             build_mode,
             priority,
             gather_priority,
@@ -2251,10 +3120,193 @@ impl Game {
             player_bridges,
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
             player_spawn_timer: PLAYER_SPAWN_INTERVAL,
+            ally_spawn_timer: ALLY_SPAWN_INTERVAL,
             player_spawn_cycle: 0,
             enemy_spawn_cycle: 0,
+            ally_spawn_cycle: 0,
+            enemy_found_timer: ENEMY_FOUND_INTERVAL,
+            ally_found_timer: ALLY_FOUND_INTERVAL,
+            enemy_villages_founded,
+            ally_villages_founded,
+            home_continent: None,
             rng: Rng::new(seed as u64 ^ 0xD1B54A32D192ED03),
         };
         Some((game, cam))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CAM: CamState = CamState {
+        cx: 0.0,
+        cy: 0.0,
+        view_height: 28.0,
+    };
+
+    /// Find a water tile touching an allied house — the destination coast a ship
+    /// sails to. Returns `None` if no allied coast exists.
+    fn find_ally_port(game: &Game) -> Option<Tile> {
+        for &(hx, hy) in &game.world.ally_house_tiles {
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (wx, wy) = (hx + dx, hy + dy);
+                if game.world.is_open_water(wx, wy) {
+                    return Some((wx, wy));
+                }
+            }
+        }
+        None
+    }
+
+    /// A launchable home port: open water within the player's harbour that has a
+    /// sea route to an allied coast. `None` if the village can't ship anywhere.
+    fn find_player_port(game: &Game) -> Option<Tile> {
+        for &(hx, hy) in &game.player_house_tiles {
+            for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                    let (wx, wy) = (hx + dx, hy + dy);
+                    if game.world.is_open_water(wx, wy)
+                        && plan_sea_route(&game.world, (wx, wy), &game.world.ally_house_tiles)
+                            .is_some()
+                    {
+                        return Some((wx, wy));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn allies_settle_on_reachable_coasts() {
+        // At least one seed should plant an allied village with a coast a ship
+        // can dock at (otherwise trade would be impossible).
+        let ok = (0..8).any(|seed| find_ally_port(&Game::new(seed)).is_some());
+        assert!(ok, "no seed produced an allied port");
+    }
+
+    #[test]
+    fn ship_delivers_gold_at_the_allied_coast() {
+        for seed in 0..16 {
+            let mut game = Game::new(seed);
+            let Some(port) = find_player_port(&game) else {
+                continue;
+            };
+
+            let (wood0, stone0, money0) = (game.wood, game.stone, game.money);
+            let (lw, ls) = (game.ship_wood.min(wood0), game.ship_stone.min(stone0));
+            let expected = lw * WOOD_PRICE + ls * STONE_PRICE;
+            assert!(expected > 0, "seed {seed}: nothing worth shipping");
+
+            game.build_mode = BuildMode::Ship;
+            assert!(
+                game.try_build(tile_center(port)),
+                "seed {seed}: failed to launch a ship toward the allied coast",
+            );
+            // Cargo is deducted from the stockpile immediately; gold isn't paid
+            // until the ship actually docks.
+            assert_eq!(game.wood, wood0 - lw);
+            assert_eq!(game.stone, stone0 - ls);
+            assert_eq!(game.ships().len(), 1);
+            assert_eq!(game.money, money0, "reward paid before delivery");
+
+            // The voyage from the home port is long; remove the player's
+            // villagers so the treasury doesn't drift (idle knights cost gold),
+            // isolating the ship's payout as the only change to `money`.
+            game.entities.retain(|e| e.faction != Faction::Player);
+
+            let sim = (port.0 - 6, port.1 - 6, port.0 + 6, port.1 + 6);
+            let mut steps = 0;
+            while !game.ships().is_empty() && steps < 20_000 {
+                game.update(0.1, sim);
+                steps += 1;
+            }
+            assert!(game.ships().is_empty(), "seed {seed}: ship never docked");
+            assert_eq!(
+                game.money,
+                money0 + expected,
+                "seed {seed}: wrong payout banked",
+            );
+            return;
+        }
+        panic!("no test seed had an allied coast");
+    }
+
+    #[test]
+    fn ship_refuses_to_launch_with_no_allied_coast() {
+        // Strip out the allies: with no coast to sail to, a launch must fail and
+        // leave the cargo untouched. (Land-locked water also can't reach one.)
+        let mut game = Game::new(3);
+        game.world.ally_house_tiles.clear();
+        // Open water in the village's own harbour, so the launch is refused for
+        // want of a route rather than for being too far from home.
+        let mut water = None;
+        'find: for &(hx, hy) in &game.player_house_tiles {
+            for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                    if game.world.is_open_water(hx + dx, hy + dy) {
+                        water = Some((hx + dx, hy + dy));
+                        break 'find;
+                    }
+                }
+            }
+        }
+        let Some(water) = water else { return };
+        let (wood0, stone0) = (game.wood, game.stone);
+        game.build_mode = BuildMode::Ship;
+        assert!(!game.try_build(tile_center(water)));
+        assert_eq!(game.ships().len(), 0);
+        assert_eq!((game.wood, game.stone), (wood0, stone0));
+    }
+
+    #[test]
+    fn knight_spawn_needs_gold() {
+        // Directly assert the treasury gates knight production: with gold a
+        // knight is affordable; drained, the village must fall back to farmers.
+        let game = Game::new(1);
+        assert!(game.money >= KNIGHT_GOLD_COST);
+    }
+
+    #[test]
+    fn allies_are_friendly_but_fight_the_enemy() {
+        assert!(hostile(Faction::Player, Faction::Enemy));
+        assert!(hostile(Faction::Ally, Faction::Enemy));
+        assert!(!hostile(Faction::Player, Faction::Ally));
+        assert!(!hostile(Faction::Ally, Faction::Ally));
+    }
+
+    #[test]
+    fn save_round_trips_money_ally_houses_and_ships() {
+        for seed in 0..16 {
+            let mut game = Game::new(seed);
+            let Some(port) = find_player_port(&game) else {
+                continue;
+            };
+            let ally_houses = game.world.ally_house_tiles.len();
+            game.money = 321;
+            game.ship_wood = 15;
+            game.ship_stone = 35;
+            game.build_mode = BuildMode::Ship;
+            assert!(game.try_build(tile_center(port)));
+            assert_eq!(game.ships().len(), 1);
+
+            let bytes = game.to_bytes(CAM);
+            let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+            assert_eq!(loaded.money, game.money);
+            assert_eq!(loaded.ship_wood, 15);
+            assert_eq!(loaded.ship_stone, 35);
+            assert_eq!(loaded.world.ally_house_tiles.len(), ally_houses);
+            assert_eq!(loaded.ships().len(), 1);
+            assert_eq!(loaded.ships()[0].reward, game.ships()[0].reward);
+            assert_eq!(loaded.ships()[0].pos, game.ships()[0].pos);
+            assert_eq!(
+                loaded.ships()[0].path.len(),
+                game.ships()[0].path.len(),
+                "ship route lost across save",
+            );
+            return;
+        }
+        panic!("no test seed had an allied coast");
     }
 }

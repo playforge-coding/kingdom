@@ -33,14 +33,33 @@ Scattered elsewhere on the island are **four enemy villages**, each with its own
 units. They aren't idle: enemy soldiers stream out to hunt your units, so you're
 on a clock from the start.
 
+## Factions
+
+Three factions share the island:
+
+- **You** (blue) — the settlement you grow and command.
+- **The enemy** (red) — hostile to everyone. Their villages raid you *and* the
+  allies, and you capture ground by clearing their villages of defenders.
+- **The allies** (green) — a friendly faction on far-off coasts. They are your
+  **trade partners**: cargo ships sail to their shores to sell goods for gold.
+  Allied knights **attack the enemy** on their own, which quietly takes pressure
+  off you — but they **never join your battles**, can't be rallied, and you and
+  the allies never fight. Allied villages can't be captured by anyone, so they
+  make dependable, permanent trade destinations.
+
 ## The core loop
 
 1. **Gather.** Farmers walk to the nearest reachable resource and chop wood or
    mine stone. Everything lands in your shared **stockpile**.
-2. **Build.** Spend wood and stone on [houses, bridges, mines, walls, and huts](building.md).
+2. **Trade.** Load surplus wood and stone onto a [cargo ship](building.md#-ship-goods)
+   and sail it to the nearest **allied coast** to sell for **🪙 gold** (stone sells
+   for more).
+3. **Build.** Spend wood, stone, and gold on [houses, bridges, mines, walls, and huts](building.md).
    Houses raise your population cap and periodically spawn new workers.
-3. **Grow.** More houses → more population → more farmers and knights.
-4. **Defend & expand.** Keep knights around to fend off raids, then push into
+4. **Grow.** More houses → more population → more farmers and knights. You start
+   with some **seed gold**, but every new **knight** costs gold to arm — a broke
+   village raises a (free) farmer instead, so keep the trade routes running.
+5. **Defend & expand.** Keep knights around to fend off raids, then push into
    enemy territory and take their villages.
 
 Use the **Priority** and **Gather** toggles in the HUD to steer this loop:

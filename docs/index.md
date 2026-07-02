@@ -53,6 +53,7 @@ runs both natively and in the browser (via WebGL) using **[Trunk](https://trunkr
 | **World**          | Infinite, seeded, generated in 32×32-tile chunks                 |
 | **You control**    | The whole settlement — units act on their own AI                 |
 | **Opponents**      | Four enemy villages scattered around the island                  |
+| **Allies**         | Two coastal trade partners that fight the enemy, not you         |
 | **Persistence**    | Custom binary `.dat` blob (native file / web IndexedDB)          |
 | **Platforms**      | Native (Windows/macOS/Linux) and web (WebAssembly)               |
 

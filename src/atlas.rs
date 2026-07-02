@@ -98,6 +98,7 @@ pub fn build() -> Atlas {
     let water = load(include_bytes!("../assets/textures/tiles/water.png"));
     let houses = load(include_bytes!("../assets/textures/tiles/houses.png"));
     let enemy_houses = load(include_bytes!("../assets/textures/tiles/enemy_houses.png"));
+    let ally_houses = load(include_bytes!("../assets/textures/tiles/ally_houses.png"));
     let bridge = load(include_bytes!("../assets/textures/tiles/bridge.png"));
     let wall = load(include_bytes!("../assets/textures/tiles/wall.png"));
     let tree = load(include_bytes!("../assets/textures/tiles/tree.png"));
@@ -106,6 +107,7 @@ pub fn build() -> Atlas {
     let cave = load(include_bytes!("../assets/textures/tiles/cave.png"));
     let hut = load(include_bytes!("../assets/textures/tiles/hut.png"));
     let enemy_hut = load(include_bytes!("../assets/textures/tiles/enemy_hut.png"));
+    let ally_hut = load(include_bytes!("../assets/textures/tiles/ally_hut.png"));
 
     let farmer = load(include_bytes!("../assets/textures/entities/farmer.png"));
     let knight = load(include_bytes!("../assets/textures/entities/swordsman.png"));
@@ -115,6 +117,13 @@ pub fn build() -> Atlas {
     let enemy_knight = load(include_bytes!(
         "../assets/textures/entities/enemy_swordsman.png"
     ));
+    let ally_farmer = load(include_bytes!(
+        "../assets/textures/entities/ally_farmer.png"
+    ));
+    let ally_knight = load(include_bytes!(
+        "../assets/textures/entities/ally_swordsman.png"
+    ));
+    let cargo_ship = load(include_bytes!("../assets/textures/entities/cargo_ship.png"));
 
     let sources = vec![
         Source::sprite("white", white_pixel()),
@@ -123,6 +132,7 @@ pub fn build() -> Atlas {
         // 3x3 grids of 16x16 buildings; use the top-left one.
         Source::sprite("house", crop(&houses, 0, 0, 16, 16)),
         Source::sprite("enemy_house", crop(&enemy_houses, 0, 0, 16, 16)),
+        Source::sprite("ally_house", crop(&ally_houses, 0, 0, 16, 16)),
         Source::sprite("bridge", bridge),
         Source::sprite("wall", wall),
         Source::sprite("tree", pad_to_tile(&tree)),
@@ -131,11 +141,16 @@ pub fn build() -> Atlas {
         Source::sprite("cave", cave),
         Source::sprite("hut", hut),
         Source::sprite("enemy_hut", enemy_hut),
+        Source::sprite("ally_hut", ally_hut),
         // Character sheets: 5 columns x 12 rows of 16x16 frames.
         Source::sheet("farmer", farmer, 5, 12),
         Source::sheet("knight", knight, 5, 12),
         Source::sheet("enemy_farmer", enemy_farmer, 5, 12),
         Source::sheet("enemy_knight", enemy_knight, 5, 12),
+        Source::sheet("ally_farmer", ally_farmer, 5, 12),
+        Source::sheet("ally_knight", ally_knight, 5, 12),
+        // Cargo ship: 3 columns x 1 row of 32x32 frames (a gentle bob).
+        Source::sheet("cargo_ship", cargo_ship, 3, 1),
     ];
 
     pack(sources)
