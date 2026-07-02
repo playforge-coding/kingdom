@@ -231,6 +231,8 @@ impl State {
         let enemy_house = self.atlas.uv("enemy_house");
         let wall = self.atlas.uv("wall");
         let cave = self.atlas.uv("cave");
+        let hut = self.atlas.uv("hut");
+        let enemy_hut = self.atlas.uv("enemy_hut");
         let white = self.atlas.uv("white");
 
         let (minx, miny, maxx, maxy) = self.visible_bounds();
@@ -264,6 +266,9 @@ impl State {
                     out.push(quad(p, [1.0, 1.0], enemy_house));
                 } else if world.is_cave(x, y) {
                     out.push(quad(p, [1.0, 1.0], cave));
+                } else if let Some(h) = world.hut(x, y) {
+                    let uv = if h.owner == 0 { hut } else { enemy_hut };
+                    out.push(quad(p, [1.0, 1.0], uv));
                 } else if let Some(w) = world.wall(x, y) {
                     // Tint enemy walls red so the two factions read apart.
                     let tint = if w.owner == 0 {
@@ -330,6 +335,16 @@ impl State {
                 };
                 out.push(tinted([bx, by], [bw * ratio, bh], white, col));
             }
+        }
+
+        // Pending hut orders: a ghostly hut on each tree awaiting a builder.
+        for &(ox, oy) in game.hut_orders() {
+            out.push(tinted(
+                [ox as f32, oy as f32],
+                [1.0, 1.0],
+                hut,
+                [1.0, 1.0, 1.0, 0.4],
+            ));
         }
 
         // Rally flag: the player's knight waypoint, drawn on top of everything.

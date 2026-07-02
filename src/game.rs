@@ -95,6 +95,10 @@ pub struct Entity {
     /// Cave (mine) tile a farmer has claimed to mine — capacity-limited so only
     /// a handful work one at a time.
     mine_target: Option<Tile>,
+    /// Tree a knight is currently turning into a hut.
+    build_site: Option<Tile>,
+    /// Set when a farmer has ducked into a hut this tick (removed afterwards).
+    sheltered: bool,
 }
 
 fn max_hp_for(faction: Faction, job: Job) -> f32 {
@@ -123,6 +127,8 @@ impl Entity {
             harvest_timer: 0.0,
             repath: 0.0,
             mine_target: None,
+            build_site: None,
+            sheltered: false,
         }
     }
 
@@ -153,6 +159,8 @@ pub const HOUSE_WOOD_COST: u32 = 8;
 pub const HOUSE_STONE_COST: u32 = 8;
 pub const BRIDGE_WOOD_COST: u32 = 3;
 pub const MINE_STONE_COST: u32 = 12;
+pub const WALL_WOOD_COST: u32 = 2;
+pub const WALL_STONE_COST: u32 = 4;
 /// A new house must be within this many tiles of one you already own.
 pub const BUILD_NEAR_RADIUS: i32 = 5;
 
@@ -178,6 +186,16 @@ const ATTACK_DPS: f32 = 16.0;
 /// Walls are tough, so breaking one takes several seconds of hacking.
 const WALL_MAX_HP: f32 = 220.0;
 const WALL_DPS: f32 = 18.0;
+/// Huts are sturdier than walls — attackers need a good while to break in.
+const HUT_MAX_HP: f32 = 400.0;
+/// Seconds a knight spends turning a tree into a hut.
+const HUT_BUILD_TIME: f32 = 4.0;
+/// Most farmers that can shelter in a single hut.
+const HUT_CAPACITY: u8 = 4;
+/// A farmer flees to a hut when an enemy comes within this range.
+const DANGER_RADIUS: f32 = 6.0;
+/// A hut lets its occupants back out once no enemy is within this range.
+const HUT_SAFE_RADIUS: f32 = 9.0;
 
 fn owner_of(f: Faction) -> u8 {
     match f {
@@ -196,6 +214,10 @@ enum StepEvent {
     Plant(Tile),
     /// A farmer pulled a unit of stone from a mine (bottomless).
     MineStone,
+    /// A knight finished turning a tree into a hut at this tile.
+    BuildHut(Tile),
+    /// A farmer reached a hut and ducked inside to shelter.
+    Hide(Tile),
 }
 
 const ENEMY_CAP: usize = 16;
@@ -233,6 +255,10 @@ pub enum BuildMode {
     Bridge,
     /// Build a mine (cave): a bottomless stone source farmers can work.
     Mine,
+    /// Craft a defensive wall from wood + stone.
+    Wall,
+    /// Order a tree turned into a hut: an idle knight walks over and builds it.
+    Hut,
     /// Left-click plants a rally flag: player knights drop everything (even a
     /// fight) and rush to it. The flag clears once they arrive.
     Rally,
@@ -296,6 +322,10 @@ pub struct Game {
     player_house_tiles: Vec<Tile>,
     /// Player-built mines (caves); farmers mine these for endless stone.
     cave_tiles: Vec<Tile>,
+    /// Every hut tile in the world (both factions), for shelter lookup.
+    hut_tiles: Vec<Tile>,
+    /// Trees the player has ordered turned into huts, awaiting a free knight.
+    hut_orders: Vec<Tile>,
     /// Saplings mid-growth (transient — not persisted across saves).
     saplings: Vec<Sapling>,
     /// Bridges the player has placed (anchors for extending spans).
@@ -383,6 +413,7 @@ impl Game {
             }
         }
 
+        let hut_tiles = world.all_hut_tiles();
         Game {
             world,
             entities,
@@ -396,6 +427,8 @@ impl Game {
             rally_point: None,
             player_house_tiles,
             cave_tiles: Vec::new(),
+            hut_tiles,
+            hut_orders: Vec::new(),
             saplings: Vec::new(),
             player_bridges: Vec::new(),
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
@@ -477,11 +510,12 @@ impl Game {
         let pref = self.gather_priority.preferred();
 
         // Combat: knights damage the nearest opponent in range, or hack at an
-        // adjacent enemy wall if no opponent is close.
+        // adjacent enemy wall or hut if no opponent is close.
         let mut damage = vec![0f32; n];
         let mut acting = vec![false; n];
         let mut wall_damage: std::collections::HashMap<Tile, f32> =
             std::collections::HashMap::new();
+        let mut hut_damage: std::collections::HashMap<Tile, f32> = std::collections::HashMap::new();
         for i in 0..n {
             if self.entities[i].job != Job::Knight || !in_sim(self.entities[i].tile()) {
                 continue;
@@ -509,6 +543,12 @@ impl Game {
                 *wall_damage.entry(wall).or_insert(0.0) += WALL_DPS * dt;
                 acting[i] = true;
                 self.entities[i].facing = dir_from_vec(tile_center(wall) - pi);
+            } else if let Some(hut) =
+                adjacent_enemy_hut(&self.world, owner_of(fi), self.entities[i].tile())
+            {
+                *hut_damage.entry(hut).or_insert(0.0) += WALL_DPS * dt;
+                acting[i] = true;
+                self.entities[i].facing = dir_from_vec(tile_center(hut) - pi);
             }
         }
         for i in 0..n {
@@ -516,6 +556,25 @@ impl Game {
         }
         for (tile, dmg) in wall_damage {
             self.world.damage_wall(tile.0, tile.1, dmg);
+        }
+        for (tile, dmg) in hut_damage {
+            // A hut under attack with farmers inside rallies the knights to save
+            // them (overriding any manual rally flag).
+            if let Some(h) = self.world.hut(tile.0, tile.1) {
+                if h.owner == owner_of(Faction::Player) && h.occupants > 0 {
+                    self.rally_point = Some(tile_center(tile));
+                }
+            }
+            if let Some(hut) = self.world.damage_hut(tile.0, tile.1, dmg) {
+                // Razed with farmers still inside — they're lost with it.
+                let trapped = hut.occupants as u32;
+                if hut.owner == owner_of(Faction::Player) {
+                    self.units_lost += trapped;
+                } else {
+                    self.enemies_defeated += trapped;
+                }
+                self.hut_tiles.retain(|&t| t != tile);
+            }
         }
 
         // AI + movement.
@@ -534,6 +593,7 @@ impl Game {
                         caves: &self.cave_tiles,
                         cave_use: &mut cave_use,
                         saplings: &sapling_tiles,
+                        huts: &self.hut_tiles,
                     };
                     ai_step(
                         &self.world,
@@ -545,6 +605,8 @@ impl Game {
                         &self.player_house_tiles,
                         pref,
                         self.rally_point,
+                        &self.hut_tiles,
+                        &self.hut_orders,
                         Some(&mut farm),
                         dt,
                     )
@@ -559,6 +621,8 @@ impl Game {
                     &self.player_house_tiles,
                     pref,
                     self.rally_point,
+                    &self.hut_tiles,
+                    &self.hut_orders,
                     None,
                     dt,
                 ),
@@ -572,6 +636,8 @@ impl Game {
                     &self.world.enemy_house_tiles,
                     None,
                     None,
+                    &self.hut_tiles,
+                    &[],
                     None,
                     dt,
                 ),
@@ -600,11 +666,25 @@ impl Game {
                 Some(StepEvent::Demolish(t)) => {
                     self.world.clear_node(t.0, t.1);
                 }
+                Some(StepEvent::BuildHut(t)) => {
+                    self.world.set_hut(t.0, t.1, owner_of(faction), HUT_MAX_HP);
+                    self.hut_tiles.push(t);
+                    self.hut_orders.retain(|&o| o != t);
+                }
+                Some(StepEvent::Hide(t)) => {
+                    let has_room = self
+                        .world
+                        .hut(t.0, t.1)
+                        .is_some_and(|h| h.occupants < HUT_CAPACITY);
+                    if has_room && self.world.add_hut_occupant(t.0, t.1) {
+                        self.entities[i].sheltered = true;
+                    }
+                }
                 None => {}
             }
         }
 
-        // Remove the dead, tallying the score.
+        // Remove the dead (tallying score) and any farmers who ducked into huts.
         let mut i = 0;
         while i < self.entities.len() {
             if self.entities[i].hp <= 0.0 {
@@ -613,13 +693,49 @@ impl Game {
                     Faction::Player => self.units_lost += 1,
                 }
                 self.entities.swap_remove(i);
+            } else if self.entities[i].sheltered {
+                self.entities.swap_remove(i);
             } else {
                 i += 1;
             }
         }
 
+        self.emerge_from_huts();
         self.clear_reached_rally();
         self.resolve_captures();
+    }
+
+    /// Let sheltering farmers back out of any hut the enemy has left alone.
+    fn emerge_from_huts(&mut self) {
+        let huts = self.hut_tiles.clone();
+        for (hx, hy) in huts {
+            let Some(h) = self.world.hut(hx, hy) else {
+                continue;
+            };
+            if h.occupants == 0 {
+                continue;
+            }
+            let faction = if h.owner == owner_of(Faction::Player) {
+                Faction::Player
+            } else {
+                Faction::Enemy
+            };
+            let center = tile_center((hx, hy));
+            let r2 = HUT_SAFE_RADIUS * HUT_SAFE_RADIUS;
+            let danger = self
+                .entities
+                .iter()
+                .any(|e| e.faction != faction && e.pos.distance_squared(center) <= r2);
+            if danger {
+                continue;
+            }
+            let out = self.world.release_hut(hx, hy);
+            for _ in 0..out {
+                if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
+                    self.entities.push(Entity::new(faction, Job::Farmer, t));
+                }
+            }
+        }
     }
 
     /// Lift the rally flag once a knight has reached it, handing the group back
@@ -867,6 +983,34 @@ impl Game {
                 self.cave_tiles.push((x, y));
                 true
             }
+            BuildMode::Wall => {
+                // Craft a wall from wood + stone on open ground near your village.
+                if !self.world.is_open_grass(x, y)
+                    || !self.near_player_house(x, y)
+                    || self.wood < WALL_WOOD_COST
+                    || self.stone < WALL_STONE_COST
+                {
+                    return false;
+                }
+                self.wood -= WALL_WOOD_COST;
+                self.stone -= WALL_STONE_COST;
+                self.world
+                    .set_wall(x, y, owner_of(Faction::Player), WALL_MAX_HP);
+                true
+            }
+            BuildMode::Hut => {
+                // Order a tree turned into a hut. A free knight builds it; clicking
+                // the same tree again cancels the order.
+                if self.world.node(x, y).map(|n| n.kind) != Some(Resource::Wood) {
+                    return false;
+                }
+                if let Some(i) = self.hut_orders.iter().position(|&t| t == (x, y)) {
+                    self.hut_orders.remove(i);
+                } else {
+                    self.hut_orders.push((x, y));
+                }
+                true
+            }
             BuildMode::Rally => {
                 // Plant (or move) the rally flag. Knights head here until they
                 // pick up an enemy. Clicking the flagged tile again lifts it.
@@ -879,6 +1023,11 @@ impl Game {
                 true
             }
         }
+    }
+
+    /// Trees the player has ordered turned into huts, for rendering markers.
+    pub fn hut_orders(&self) -> &[Tile] {
+        &self.hut_orders
     }
 
     /// Lift the rally flag; knights resume defending on their own.
@@ -907,6 +1056,8 @@ fn ai_step(
     home: &[Tile],
     pref: Option<Resource>,
     rally: Option<Vec2>,
+    huts: &[Tile],
+    hut_orders: &[Tile],
     farm: Option<&mut FarmCtx>,
     dt: f32,
 ) -> Option<StepEvent> {
@@ -915,28 +1066,33 @@ fn ai_step(
     match (e.faction, e.job) {
         (Faction::Player, Job::Farmer) => {
             let farm = farm.expect("player farmers need farm context");
-            gather_behavior(world, e, owner, pref, home, farm, rng, dt)
+            gather_behavior(world, e, owner, pref, home, farm, snap, rng, dt)
         }
         (_, Job::Knight) => {
             if under_limit {
                 retreat_behavior(world, e, owner, home, dt)
             } else {
-                soldier_behavior(world, e, owner, rng, snap, rally, acting, dt)
+                soldier_behavior(world, e, owner, rng, snap, rally, hut_orders, acting, dt)
             }
         }
         (Faction::Enemy, Job::Farmer) => {
+            // Enemy farmers shelter in their own huts when the player's near.
+            if let Some(ev) = seek_shelter(world, e, owner, Faction::Enemy, snap, huts, dt) {
+                return ev;
+            }
             wander_behavior(world, e, owner, None, rng, dt);
             None
         }
     }
 }
 
-/// Shared, per-frame context the player's farmers reason over: where the mines
-/// are, how many farmers are already working each, and which tiles are saplings.
+/// Shared, per-frame context the player's farmers reason over: mines and their
+/// occupancy, sapling tiles, and every hut they might shelter in.
 struct FarmCtx<'a> {
     caves: &'a [Tile],
     cave_use: &'a mut std::collections::HashMap<Tile, u32>,
     saplings: &'a std::collections::HashSet<Tile>,
+    huts: &'a [Tile],
 }
 
 /// True when `(x, y)` is within the leash of some player house.
@@ -1035,6 +1191,58 @@ fn plan_plant(
     Some((path, spot))
 }
 
+/// Is an enemy of `faction` within `r` of `pos`?
+fn enemy_within(snap: &[(Vec2, Faction)], pos: Vec2, faction: Faction, r: f32) -> bool {
+    let r2 = r * r;
+    snap.iter()
+        .any(|&(p, f)| f != faction && p.distance_squared(pos) <= r2)
+}
+
+/// Nearest friendly hut (owned by `owner`) with room and a reachable doorway.
+fn nearest_shelter(world: &World, owner: u8, huts: &[Tile], start: Tile) -> Option<Tile> {
+    huts.iter()
+        .copied()
+        .filter(|&t| {
+            world
+                .hut(t.0, t.1)
+                .is_some_and(|h| h.owner == owner && h.occupants < HUT_CAPACITY)
+                && stand_tile(world, owner, t).is_some()
+        })
+        .min_by_key(|&t| (t.0 - start.0).abs() + (t.1 - start.1).abs())
+}
+
+/// When an enemy is close and a friendly hut has room, run for it. Returns
+/// `Some(_)` when the farmer is fleeing (the inner event is `Hide` on arrival,
+/// or `None` while still running); `None` means "no need to flee".
+fn seek_shelter(
+    world: &World,
+    e: &mut Entity,
+    owner: u8,
+    faction: Faction,
+    snap: &[(Vec2, Faction)],
+    huts: &[Tile],
+    dt: f32,
+) -> Option<Option<StepEvent>> {
+    if !enemy_within(snap, e.pos, faction, DANGER_RADIUS) {
+        return None;
+    }
+    let hut = nearest_shelter(world, owner, huts, e.tile())?;
+    if adjacent(e.tile(), hut) {
+        return Some(Some(StepEvent::Hide(hut)));
+    }
+    if let Some(stand) = stand_tile(world, owner, hut) {
+        if e.repath <= 0.0 || e.path_done() {
+            if let Some(p) = pathfind::path_to(world, owner, e.tile(), stand, PATH_BUDGET) {
+                e.set_path(p);
+            }
+            e.repath = 0.7;
+        }
+    }
+    let moved = follow_path(e, FARMER_SPEED, dt);
+    set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
+    Some(None)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn gather_behavior(
     world: &World,
@@ -1043,10 +1251,17 @@ fn gather_behavior(
     pref: Option<Resource>,
     home: &[Tile],
     farm: &mut FarmCtx,
+    snap: &[(Vec2, Faction)],
     rng: &mut Rng,
     dt: f32,
 ) -> Option<StepEvent> {
     let here = e.tile();
+
+    // Survival first: if the enemy's near, drop everything and hide in a hut.
+    if let Some(ev) = seek_shelter(world, e, owner, Faction::Player, snap, farm.huts, dt) {
+        release_cave(e, farm.cave_use);
+        return ev;
+    }
 
     // Hard leash: if we've somehow strayed past the home radius, abandon any
     // task and march straight back — farmers never leave the village.
@@ -1199,12 +1414,28 @@ fn soldier_behavior(
     rng: &mut Rng,
     snap: &[(Vec2, Faction)],
     rally: Option<Vec2>,
+    hut_orders: &[Tile],
     acting: bool,
     dt: f32,
 ) -> Option<StepEvent> {
-    // Finishing off a tree/rock we already started hacking (either mode).
+    // Mid-action: building a hut, or hacking a tree/rock we already started.
     if e.harvest_timer > 0.0 {
-        if let Some(node) = e.target_node {
+        if let Some(site) = e.build_site {
+            // Turning a tree into a hut.
+            if world.node(site.0, site.1).map(|n| n.kind) == Some(Resource::Wood) {
+                e.facing = dir_from_vec(tile_center(site) - e.pos);
+                set_anim(e, Anim::Act, dt);
+                e.harvest_timer -= dt;
+                if e.harvest_timer <= 0.0 {
+                    e.build_site = None;
+                    return Some(StepEvent::BuildHut(site));
+                }
+                return None;
+            }
+            // Tree's gone (chopped or already a hut) — abandon the build.
+            e.harvest_timer = 0.0;
+            e.build_site = None;
+        } else if let Some(node) = e.target_node {
             if world.node(node.0, node.1).is_some() {
                 e.facing = dir_from_vec(tile_center(node) - e.pos);
                 set_anim(e, Anim::Act, dt);
@@ -1215,9 +1446,11 @@ fn soldier_behavior(
                 }
                 return None;
             }
+            e.harvest_timer = 0.0;
+            e.target_node = None;
+        } else {
+            e.harvest_timer = 0.0;
         }
-        e.harvest_timer = 0.0;
-        e.target_node = None;
     }
 
     // A rally flag overrides combat: knights break off whatever they're doing and
@@ -1285,13 +1518,42 @@ fn soldier_behavior(
         }
     }
 
-    // Nothing to march toward: wander rather than hacking obstacles pointlessly.
+    // Nothing to fight: build a pending hut order if one's within reach…
     if e.path_done() {
+        if let Some(order) = pick_hut_order(world, owner, e.tile(), hut_orders) {
+            if adjacent(e.tile(), order) {
+                e.build_site = Some(order);
+                e.harvest_timer = HUT_BUILD_TIME;
+                e.facing = dir_from_vec(tile_center(order) - e.pos);
+                set_anim(e, Anim::Act, dt);
+                return None;
+            }
+            if let Some(stand) = stand_tile(world, owner, order) {
+                if let Some(p) = pathfind::path_to(world, owner, e.tile(), stand, PATH_BUDGET) {
+                    e.set_path(p);
+                    set_anim(e, Anim::Walk, dt);
+                    return None;
+                }
+            }
+        }
+        // …otherwise just potter about.
         wander_behavior(world, e, owner, None, rng, dt);
         return None;
     }
 
     advance_or_hack(world, e, dt)
+}
+
+/// The nearest ordered tree a knight can reach to build into a hut.
+fn pick_hut_order(world: &World, owner: u8, start: Tile, orders: &[Tile]) -> Option<Tile> {
+    orders
+        .iter()
+        .copied()
+        .filter(|&t| {
+            world.node(t.0, t.1).map(|n| n.kind) == Some(Resource::Wood)
+                && stand_tile(world, owner, t).is_some()
+        })
+        .min_by_key(|&t| (t.0 - start.0).abs() + (t.1 - start.1).abs())
 }
 
 /// Advance a knight along its path: if the next step is a tree/rock, start
@@ -1481,6 +1743,19 @@ fn adjacent_enemy_wall(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     None
 }
 
+/// An enemy-owned hut adjacent to `tile`, if any (which knights break into).
+fn adjacent_enemy_hut(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        let (nx, ny) = (tile.0 + dx, tile.1 + dy);
+        if let Some(h) = world.hut(nx, ny) {
+            if h.owner != owner {
+                return Some((nx, ny));
+            }
+        }
+    }
+    None
+}
+
 /// A fresh frontier tile to wall: open grass in a ring around `center` (the
 /// house the knight returned to), so walls hug that particular village.
 fn choose_wall_tile(world: &World, center: Tile) -> Option<Tile> {
@@ -1581,7 +1856,7 @@ fn open_tiles_near(world: &World, cx: i32, cy: i32, r: i32) -> Vec<Tile> {
 // ---------------------------------------------------------------------------
 
 const MAGIC: &[u8; 4] = b"KGDM";
-const VERSION: u8 = 6;
+const VERSION: u8 = 7;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
     b.push(v);
@@ -1751,6 +2026,20 @@ impl Game {
                     }
                 }
             }
+            for h in &chunk.huts {
+                match h {
+                    None => {
+                        wu8(&mut b, crate::world::NO_OWNER);
+                        wf32(&mut b, 0.0);
+                        wu8(&mut b, 0);
+                    }
+                    Some(hut) => {
+                        wu8(&mut b, hut.owner);
+                        wf32(&mut b, hut.hp);
+                        wu8(&mut b, hut.occupants);
+                    }
+                }
+            }
         }
         b
     }
@@ -1833,6 +2122,8 @@ impl Game {
                 harvest_timer: 0.0,
                 repath: 0.0,
                 mine_target: None,
+                build_site: None,
+                sheltered: false,
             });
         }
 
@@ -1856,6 +2147,7 @@ impl Game {
                 bridges: Vec::with_capacity(n_tiles),
                 walls: Vec::with_capacity(n_tiles),
                 caves: Vec::with_capacity(n_tiles),
+                huts: Vec::with_capacity(n_tiles),
             };
             for _ in 0..n_tiles {
                 chunk.tiles.push(if r.u8()? == 1 {
@@ -1900,12 +2192,27 @@ impl Game {
                     Some(Wall { owner, hp })
                 });
             }
+            for _ in 0..n_tiles {
+                let owner = r.u8()?;
+                let hp = r.f32()?;
+                let occupants = r.u8()?;
+                chunk.huts.push(if owner == crate::world::NO_OWNER {
+                    None
+                } else {
+                    Some(crate::world::Hut {
+                        owner,
+                        hp,
+                        occupants,
+                    })
+                });
+            }
             chunks.push(((cx, cy), chunk));
         }
 
-        // Rebuild the player-tile lists (houses, mines) by scanning saved chunks.
+        // Rebuild the player-tile lists (houses, mines, huts) by scanning chunks.
         let mut player_house_tiles = Vec::new();
         let mut cave_tiles = Vec::new();
+        let mut hut_tiles = Vec::new();
         for ((cx, cy), chunk) in &chunks {
             for ly in 0..CHUNK {
                 for lx in 0..CHUNK {
@@ -1916,6 +2223,9 @@ impl Game {
                     }
                     if chunk.caves[i] {
                         cave_tiles.push(tile);
+                    }
+                    if chunk.huts[i].is_some() {
+                        hut_tiles.push(tile);
                     }
                 }
             }
@@ -1935,6 +2245,8 @@ impl Game {
             rally_point: None,
             player_house_tiles,
             cave_tiles,
+            hut_tiles,
+            hut_orders: Vec::new(),
             saplings: Vec::new(),
             player_bridges,
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,

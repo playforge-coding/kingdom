@@ -37,6 +37,15 @@ pub struct Wall {
     pub hp: f32,
 }
 
+/// A hut: a sturdy shelter (built from a tree) that farmers hide inside. Takes a
+/// while to destroy; `occupants` is how many farmers are sheltering within.
+#[derive(Clone, Copy)]
+pub struct Hut {
+    pub owner: u8,
+    pub hp: f32,
+    pub occupants: u8,
+}
+
 /// Owner value used by faction-agnostic queries so that *any* wall blocks.
 pub const NO_OWNER: u8 = 255;
 
@@ -49,6 +58,8 @@ pub struct Chunk {
     pub walls: Vec<Option<Wall>>,
     /// Player-built mines: bottomless stone sources farmers work at.
     pub caves: Vec<bool>,
+    /// Huts (shelters) built from trees; farmers hide inside them.
+    pub huts: Vec<Option<Hut>>,
 }
 
 impl Chunk {
@@ -61,6 +72,7 @@ impl Chunk {
             bridges: vec![false; CHUNK_TILES],
             walls: vec![None; CHUNK_TILES],
             caves: vec![false; CHUNK_TILES],
+            huts: vec![None; CHUNK_TILES],
         }
     }
 }
@@ -110,6 +122,21 @@ impl World {
 
     pub fn chunks_iter(&self) -> impl Iterator<Item = (&(i32, i32), &Chunk)> {
         self.chunks.iter()
+    }
+
+    /// Every hut tile currently loaded, for rebuilding the shelter index.
+    pub fn all_hut_tiles(&self) -> Vec<(i32, i32)> {
+        let mut out = Vec::new();
+        for ((cx, cy), chunk) in self.chunks.iter() {
+            for ly in 0..CHUNK {
+                for lx in 0..CHUNK {
+                    if chunk.huts[li(lx, ly)].is_some() {
+                        out.push((cx * CHUNK + lx, cy * CHUNK + ly));
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn rescan_enemy_houses(&mut self) {
@@ -187,6 +214,10 @@ impl World {
         self.chunk_at(x, y)
             .and_then(|c| c.walls[li(local_of(x), local_of(y))])
     }
+    pub fn hut(&self, x: i32, y: i32) -> Option<Hut> {
+        self.chunk_at(x, y)
+            .and_then(|c| c.huts[li(local_of(x), local_of(y))])
+    }
 
     /// Faction-agnostic walkability (any wall blocks).
     pub fn walkable(&self, x: i32, y: i32) -> bool {
@@ -213,10 +244,11 @@ impl World {
             && !c.houses[i]
             && !c.enemy_houses[i]
             && !c.caves[i]
+            && c.huts[i].is_none()
     }
 
     /// Like `walkable_for`, but resource nodes don't block (a knight will smash
-    /// through them). Water, buildings, caves and enemy walls still block.
+    /// through them). Water, buildings, caves, huts and enemy walls still block.
     pub fn walkable_for_siege(&self, owner: u8, x: i32, y: i32) -> bool {
         let Some(c) = self.chunk_at(x, y) else {
             return false;
@@ -230,7 +262,11 @@ impl World {
         if c.bridges[i] {
             return true;
         }
-        c.tiles[i] == Tile::Grass && !c.houses[i] && !c.enemy_houses[i] && !c.caves[i]
+        c.tiles[i] == Tile::Grass
+            && !c.houses[i]
+            && !c.enemy_houses[i]
+            && !c.caves[i]
+            && c.huts[i].is_none()
     }
 
     pub fn is_open_grass(&self, x: i32, y: i32) -> bool {
@@ -245,6 +281,7 @@ impl World {
             && !c.bridges[i]
             && c.walls[i].is_none()
             && !c.caves[i]
+            && c.huts[i].is_none()
     }
 
     pub fn is_open_water(&self, x: i32, y: i32) -> bool {
@@ -303,6 +340,56 @@ impl World {
         if let Some(c) = self.chunk_at_mut(x, y) {
             c.caves[li(local_of(x), local_of(y))] = v;
         }
+    }
+
+    /// Raise a hut (clearing whatever node was on the tile).
+    pub fn set_hut(&mut self, x: i32, y: i32, owner: u8, hp: f32) {
+        self.ensure(chunk_of(x), chunk_of(y));
+        if let Some(c) = self.chunk_at_mut(x, y) {
+            let i = li(local_of(x), local_of(y));
+            c.nodes[i] = None;
+            c.huts[i] = Some(Hut {
+                owner,
+                hp,
+                occupants: 0,
+            });
+        }
+    }
+
+    /// Add a sheltering farmer to a hut. Returns false if the hut is gone.
+    pub fn add_hut_occupant(&mut self, x: i32, y: i32) -> bool {
+        if let Some(c) = self.chunk_at_mut(x, y) {
+            if let Some(h) = &mut c.huts[li(local_of(x), local_of(y))] {
+                h.occupants = h.occupants.saturating_add(1);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Empty a hut of shelterers, returning how many were inside.
+    pub fn release_hut(&mut self, x: i32, y: i32) -> u8 {
+        if let Some(c) = self.chunk_at_mut(x, y) {
+            if let Some(h) = &mut c.huts[li(local_of(x), local_of(y))] {
+                let n = h.occupants;
+                h.occupants = 0;
+                return n;
+            }
+        }
+        0
+    }
+
+    /// Damage a hut; returns the destroyed hut (with any trapped occupants) when
+    /// it falls, so the caller can tally the loss.
+    pub fn damage_hut(&mut self, x: i32, y: i32, dmg: f32) -> Option<Hut> {
+        let c = self.chunk_at_mut(x, y)?;
+        let i = li(local_of(x), local_of(y));
+        let h = c.huts[i].as_mut()?;
+        h.hp -= dmg;
+        if h.hp <= 0.0 {
+            return c.huts[i].take();
+        }
+        None
     }
 
     pub fn set_wall(&mut self, x: i32, y: i32, owner: u8, hp: f32) {
@@ -382,8 +469,32 @@ impl World {
                 }
             }
         }
+
+        // Give the camp a couple of huts for its farmers to shelter in.
+        let mut huts = 0;
+        'huts: for ry in -4..=4i32 {
+            for rx in -4..=4i32 {
+                if huts >= 2 {
+                    break 'huts;
+                }
+                let (x, y) = (cx0 + rx, cy0 + ry);
+                if self.tile(x, y) == Tile::Grass
+                    && !self.is_enemy_house(x, y)
+                    && self.hut(x, y).is_none()
+                    && (rx != 0 || ry != 0)
+                    && rx.rem_euclid(2) == 0
+                    && ry.rem_euclid(2) == 0
+                {
+                    self.set_hut(x, y, 1, ENEMY_HUT_HP);
+                    huts += 1;
+                }
+            }
+        }
     }
 }
+
+/// Starting HP of an enemy camp's huts (matches the player's hut toughness).
+const ENEMY_HUT_HP: f32 = 400.0;
 
 /// Generate one chunk deterministically from the seed and chunk coordinates.
 fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {

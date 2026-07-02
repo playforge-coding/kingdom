@@ -7,7 +7,7 @@ use winit::window::Window;
 
 use crate::game::{
     BuildMode, Game, GatherPriority, Priority, BRIDGE_WOOD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
-    MINE_STONE_COST,
+    MINE_STONE_COST, WALL_STONE_COST, WALL_WOOD_COST,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -211,6 +211,16 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 BuildMode::Mine,
                 format!("⛏ Mine  ({MINE_STONE_COST} stone)"),
             );
+            ui.radio_value(
+                &mut game.build_mode,
+                BuildMode::Wall,
+                format!("🧱 Wall  ({WALL_WOOD_COST} wood, {WALL_STONE_COST} stone)"),
+            );
+            ui.radio_value(
+                &mut game.build_mode,
+                BuildMode::Hut,
+                "🛖 Hut  (click a tree; a knight builds it)",
+            );
             ui.radio_value(&mut game.build_mode, BuildMode::Rally, "⚑ Rally knights");
             if game.rally_point.is_some() && ui.button("✖ Clear rally").clicked() {
                 game.clear_rally();
@@ -231,6 +241,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ui.small("Farmers gather • Knights defend.");
             ui.small("Farmers replant trees and mine caves once resources run dry.");
             ui.small("Mines never run out, but only 4 farmers can work one at a time.");
+            ui.small("Huts shelter farmers from raids; knights rush to defend an attacked one.");
             ui.small("Rally: knights drop combat and rush the flag; it clears on arrival.");
             ui.small("Right-click clears the rally flag.");
             ui.small("WASD / arrows to pan • scroll to zoom.");
