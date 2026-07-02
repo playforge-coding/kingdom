@@ -171,6 +171,9 @@ const CAVE_CAPACITY: u32 = 4;
 /// gain nothing — so they only bother when a node truly blocks their way.
 const KNIGHT_DEMOLISH_TIME: f32 = 5.0;
 const COMBAT_RANGE: f32 = 0.9;
+/// How close a knight must get to the rally flag to count as "arrived" (which
+/// then lifts the flag for the whole group).
+const RALLY_ARRIVE_RADIUS: f32 = 2.5;
 const ATTACK_DPS: f32 = 16.0;
 /// Walls are tough, so breaking one takes several seconds of hacking.
 const WALL_MAX_HP: f32 = 220.0;
@@ -230,8 +233,8 @@ pub enum BuildMode {
     Bridge,
     /// Build a mine (cave): a bottomless stone source farmers can work.
     Mine,
-    /// Left-click plants a rally flag: player knights march to it until they
-    /// pick up an enemy, then peel off to fight.
+    /// Left-click plants a rally flag: player knights drop everything (even a
+    /// fight) and rush to it. The flag clears once they arrive.
     Rally,
 }
 
@@ -286,7 +289,8 @@ pub struct Game {
     pub gather_priority: GatherPriority,
     pub enemies_defeated: u32,
     pub units_lost: u32,
-    /// Player-set waypoint that knights march toward while no enemy is in reach.
+    /// Player-set waypoint knights rush to (overriding combat); cleared once
+    /// they arrive. Also raised automatically when a village is lost.
     pub rally_point: Option<Vec2>,
 
     player_house_tiles: Vec<Tile>,
@@ -614,7 +618,24 @@ impl Game {
             }
         }
 
+        self.clear_reached_rally();
         self.resolve_captures();
+    }
+
+    /// Lift the rally flag once a knight has reached it, handing the group back
+    /// to normal combat AI right where they're needed.
+    fn clear_reached_rally(&mut self) {
+        if let Some(r) = self.rally_point {
+            let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
+            let arrived = self.entities.iter().any(|e| {
+                e.faction == Faction::Player
+                    && e.job == Job::Knight
+                    && e.pos.distance_squared(r) <= r2
+            });
+            if arrived {
+                self.rally_point = None;
+            }
+        }
     }
 
     /// Per-village capture: if a village has no defenders of its owner left but
@@ -641,6 +662,10 @@ impl Game {
                     self.world.convert_house(x, y, 1);
                     self.world.reown_walls_near(x, y, 4, 0, 1);
                 }
+                // Sound the alarm: rally every (simulated) knight to the fallen
+                // village to come to their allies' aid and retake it.
+                self.rally_point = Some(village_center(&village));
+                log::info!("village lost — knights rallying to retake it");
                 changed = true;
             }
         }
@@ -1177,12 +1202,7 @@ fn soldier_behavior(
     acting: bool,
     dt: f32,
 ) -> Option<StepEvent> {
-    if acting {
-        set_anim(e, Anim::Act, dt);
-        return None;
-    }
-
-    // Finishing off a tree/rock that blocks the way (target_node set).
+    // Finishing off a tree/rock we already started hacking (either mode).
     if e.harvest_timer > 0.0 {
         if let Some(node) = e.target_node {
             if world.node(node.0, node.1).is_some() {
@@ -1200,6 +1220,35 @@ fn soldier_behavior(
         e.target_node = None;
     }
 
+    // A rally flag overrides combat: knights break off whatever they're doing and
+    // rush the flag, punching through trees/rocks if that's the only way in. The
+    // flag is lifted the instant the group arrives (see `clear_reached_rally`).
+    if let Some(r) = rally {
+        if e.repath <= 0.0 || e.path_done() {
+            e.repath = 0.7;
+            let rt = (r.x.floor() as i32, r.y.floor() as i32);
+            let goal = |x: i32, y: i32| (x, y) == rt;
+            if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
+                world.walkable_for(owner, x, y)
+            }) {
+                e.set_path(p);
+            } else if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
+                world.walkable_for_siege(owner, x, y)
+            }) {
+                e.set_path(p);
+            } else {
+                e.set_path(Vec::new());
+            }
+        }
+        return advance_or_hack(world, e, dt);
+    }
+
+    // No rally: stop and fight when a foe is already in range.
+    if acting {
+        set_anim(e, Anim::Act, dt);
+        return None;
+    }
+
     // Target the nearest opponent we can actually *reach* — a multi-target BFS
     // that will happily route across bridges to another landmass, rather than
     // fixating on a straight-line-nearest foe that's stranded across water.
@@ -1212,9 +1261,8 @@ fn soldier_behavior(
     if e.repath <= 0.0 || e.path_done() {
         e.repath = 0.7;
         let goal = |x: i32, y: i32| foes.contains(&(x, y));
-        // Engage the nearest reachable foe first — this is a knight "picking up"
-        // an enemy. Prefer a clear route; only smash through trees/rocks when
-        // there's genuinely no clear way in.
+        // Engage the nearest reachable foe — prefer a clear route; only smash
+        // through trees/rocks when there's genuinely no clear way in.
         let engaged = !foes.is_empty() && {
             if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
                 world.walkable_for(owner, x, y)
@@ -1230,31 +1278,25 @@ fn soldier_behavior(
                 false
             }
         };
-
         if !engaged {
-            // No enemy in reach. Follow the player's rally order toward the
-            // flagged tile — clear routes only, so guiding knights across the
-            // map never levels forests. Otherwise (no order / unreachable) drop
-            // any stale path so we idle instead of grinding down trees.
-            let p = rally
-                .and_then(|r| {
-                    let rt = (r.x.floor() as i32, r.y.floor() as i32);
-                    pathfind::path_to(world, owner, e.tile(), rt, PATH_BUDGET)
-                })
-                .unwrap_or_default();
-            e.set_path(p);
+            // No reachable foe: drop any stale path so we idle rather than
+            // grinding down trees along a dead route.
+            e.set_path(Vec::new());
         }
     }
 
-    // Nothing to march toward (no reachable foe, no rally): wander rather than
-    // hacking obstacles along a dead route.
+    // Nothing to march toward: wander rather than hacking obstacles pointlessly.
     if e.path_done() {
         wander_behavior(world, e, owner, None, rng, dt);
         return None;
     }
 
-    // If the next step is onto a tree/rock, hack it down instead of walking in.
-    // Only combat routes ever step onto a node; rally marches use clear tiles.
+    advance_or_hack(world, e, dt)
+}
+
+/// Advance a knight along its path: if the next step is a tree/rock, start
+/// hacking it down; otherwise walk the step.
+fn advance_or_hack(world: &World, e: &mut Entity, dt: f32) -> Option<StepEvent> {
     if !e.path_done() {
         let (wx, wy) = e.path[e.path_cursor];
         if world.node(wx, wy).is_some() {
@@ -1265,7 +1307,6 @@ fn soldier_behavior(
             return None;
         }
     }
-
     let moved = follow_path(e, KNIGHT_SPEED, dt);
     set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
     None
@@ -1457,6 +1498,14 @@ fn choose_wall_tile(world: &World, center: Tile) -> Option<Tile> {
         }
     }
     None
+}
+
+/// World-space centre of a village (the mean of its house tiles).
+fn village_center(village: &[Tile]) -> Vec2 {
+    let n = village.len().max(1) as f32;
+    let sx: i32 = village.iter().map(|t| t.0).sum();
+    let sy: i32 = village.iter().map(|t| t.1).sum();
+    Vec2::new(sx as f32 / n + 0.5, sy as f32 / n + 0.5)
 }
 
 /// Group house tiles into villages: tiles within `CLUSTER_GAP` chain together.
