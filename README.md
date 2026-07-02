@@ -2,10 +2,13 @@
 
 A small single-player kingdom-builder written in Rust. You don't control a
 character — you watch your settlement from a top-down view, grow it, and defend
-it against a rival camp. It renders tiles and entities with **wgpu** and runs
+it against rival camps. It renders tiles and entities with **wgpu** and runs
 both natively and in the browser (via WebGL) using **Trunk**.
 
 ![tiles rendered with wgpu, egui overlay](assets/textures/tiles/houses.png)
+
+> 📖 **Documentation:** <https://playforge-coding.github.io/kingdom/>
+> · 🎮 **Play in your browser:** <https://playforge-coding.github.io/kingdom/play/>
 
 ## Gameplay
 
@@ -26,16 +29,26 @@ both natively and in the browser (via WebGL) using **Trunk**.
   **mine stone** (with a swing animation). Everything they gather goes into your
   shared stockpile.
 - **Knights** seek out and **attack** the enemy faction. Both sides take damage
-  in melee; HP bars appear above wounded units.
-- **Enemies** stream out of a red encampment on the far side of the island —
-  enemy soldiers hunt your units, so keep some knights around to defend.
-- **Your village.** You begin controlling a single village near the origin — the
-  only settlement you own. Expand outward from it.
+  in melee; HP bars appear above wounded units. Set a **rally flag** (left-click
+  in rally mode; right-click to clear) to pull them to a point.
+- **Enemies** hold **four villages** scattered around the island; their soldiers
+  stream out to hunt your units, so keep some knights around to defend.
+- **Your village.** You begin controlling a single village near the origin.
+  Villages change hands per-camp: leave one undefended with an enemy inside and
+  you lose it (your knights auto-rally to retake it); strip an enemy village of
+  its defenders and stand a unit in it to capture it.
+- **Priorities.** Toggle **Agriculture / Military** to bias which workers your
+  houses raise, and **Balanced / Wood / Stone** to steer what farmers gather.
 - **Building.** Left-click to build:
-  - a **House** on open grass (costs wood + stone) — but only *next to your
-    existing village/houses*, so your territory grows organically. Houses raise
-    your population cap and periodically spawn new workers.
-  - a **Bridge** on open water (costs wood) — makes that tile walkable.
+  - a **House** on open grass (wood + stone) — only *next to your existing
+    village*, so your territory grows organically. Houses raise your population
+    cap and spawn new workers (while you have 4+ farmers).
+  - a **Bridge** on open water (wood) — makes that tile walkable.
+  - a **Mine** on open ground (stone) — a bottomless stone source, worked by up
+    to four farmers at once.
+  - a **Wall** (wood + stone) — a defensive blocker units path around.
+  - a **Hut** (click a tree) — a knight builds it; it shelters farmers from
+    raids, and knights rush to defend an attacked one.
 - Units navigate with grid **pathfinding** (BFS) and treat water, buildings and
   resource nodes as obstacles, routing around them or across bridges.
 
@@ -45,11 +58,12 @@ both natively and in the browser (via WebGL) using **Trunk**.
 |-------|--------|
 | `WASD` / arrow keys | Pan the camera |
 | Mouse scroll | Zoom in / out |
-| Left-click | Build (house or bridge, per the panel) |
+| Left-click | Perform the current build action / place the rally flag |
+| Right-click | Clear the rally flag |
 | `Esc` | Return to menu (from the menu: quit on native) |
 
 The **egui** panel in the top-left shows your stockpile, population, score, and
-the current build mode, plus **Save** and **Menu** buttons.
+the current build mode, plus priority toggles and **Save** and **Menu** buttons.
 
 ## Running
 
@@ -91,8 +105,36 @@ native WebGPU support.
 | `src/ui.rs` | egui menu + in-game panel |
 | `src/shader.wgsl` | Instanced textured-quad shader |
 | `assets/textures/` | Tile, building and character-sheet PNGs |
+| `docs/` | Documentation site sources (Zensical / Material for MkDocs) |
+| `scripts/fetch-fonts.py` | Downloads the docs' self-hosted webfonts |
 
-## Notes on the art
+## Documentation
+
+The docs live in `docs/` and are built with
+[Zensical](https://zensical.org) (Material for MkDocs). Fonts are self-hosted
+rather than loaded from the Google Fonts CDN, so fetch them once before building:
+
+```sh
+pip install zensical
+python scripts/fetch-fonts.py   # downloads docs/fonts/ + docs/stylesheets/fonts.css
+zensical serve                  # live preview
+zensical build --strict         # static site into site/
+```
+
+Pushing to the default branch builds the docs **and** the WebAssembly game and
+publishes both to GitHub Pages (see [`.github/workflows/docs.yml`](.github/workflows/docs.yml)):
+
+- 📖 Docs — <https://playforge-coding.github.io/kingdom/>
+- 🎮 Play — <https://playforge-coding.github.io/kingdom/play/>
+
+Pushing a `v*` tag builds native binaries for Windows, macOS and Linux and
+attaches them to a GitHub Release (see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
+
+## Art
+
+The sprites are [MiniWorld Sprites](https://opengameart.org/content/miniworld-sprites)
+by [Shade](https://opengameart.org/users/shade-1) on OpenGameArt.org, released
+under **CC0** — thanks to Shade, who appreciates the credit.
 
 Character art is stored as 5×12 grids of 16×16 frames; the renderer slices out
 walk and action (chop / mine / attack) frames per entity. Trees and rocks are

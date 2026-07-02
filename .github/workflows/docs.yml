@@ -1,0 +1,91 @@
+name: Docs
+
+# Build the documentation site (Zensical) plus the playable WebAssembly build
+# (Trunk), then publish both to GitHub Pages on every push to the default
+# branch. The web build is served under /play so the docs site and the game
+# live at the same origin. Also runnable on demand from the Actions tab.
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "src/**"
+      - "assets/**"
+      - "index.html"
+      - "Trunk.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Allow this workflow to publish to GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; let an in-progress run finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with LFS assets)
+        uses: actions/checkout@v4
+        with:
+          # The textures are embedded via `include_bytes!`; without the real
+          # LFS files the web build would compile pointer files instead.
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Zensical
+        run: pip install zensical==0.0.46
+
+      - name: Download self-hosted fonts
+        run: python scripts/fetch-fonts.py
+
+      - name: Build docs site
+        run: zensical build --strict
+
+      - name: Install Rust toolchain (wasm)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      - name: Build web bundle
+        # Served from https://<user>.github.io/kingdom/play/, so asset URLs must
+        # be rooted there.
+        run: trunk build --release --public-url /kingdom/play/ --dist site/play
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,2 +1,8 @@
 target/
 dist/
+/site
+
+# Self-hosted webfonts, downloaded from Google Fonts at build time by
+# scripts/fetch-fonts.py (run before `zensical build`).
+/docs/fonts/
+/docs/stylesheets/fonts.css
