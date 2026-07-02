@@ -32,8 +32,10 @@ both natively and in the browser (via WebGL) using **Trunk**.
   **mine stone** (with a swing animation). Everything they gather goes into your
   shared stockpile.
 - **Knights** seek out and **attack** the enemy faction. Both sides take damage
-  in melee; HP bars appear above wounded units. Set a **rally flag** (left-click
-  in rally mode; right-click to clear) to pull them to a point.
+  in melee; HP bars appear above wounded units. With no foe left in the field
+  they **press the assault on enemy huts and walls** instead of idling. Set a
+  **rally flag** (left-click in rally mode; right-click to clear) to pull them to
+  a point.
 - **Three factions** (you = blue, enemy = red, allies = green). The **enemy** is
   hostile to everyone; their soldiers stream out to hunt you. The **allies** hold
   villages on coasts across the sea: they trade with you and attack the enemy on
@@ -47,6 +49,10 @@ both natively and in the browser (via WebGL) using **Trunk**.
   and stand a unit in it to capture it. (Allied villages can't be captured.)
 - **Priorities.** Toggle **Agriculture / Military** to bias which workers your
   houses raise, and **Balanced / Wood / Stone** to steer what farmers gather.
+- **Proclaim a draft.** Need soldiers now? Declare a draft and, for a short
+  spell, your **farmers spontaneously take up arms as knights** — each still paid
+  for in gold, so your treasury caps the call-up while a core of farmers is
+  always spared.
 - **Economy.** Alongside wood and stone you keep a purse of **gold**. You start
   with some seed gold; every new **knight** costs gold to arm (a broke village
   raises a free farmer instead), and most structures cost gold too.

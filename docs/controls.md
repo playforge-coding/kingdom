@@ -48,6 +48,14 @@ Everything you build is paid for out of this pool.
 - **Gather: Balanced / 🪵 Wood / 🪨 Stone** — biases which resource idle farmers
   seek out. *Balanced* lets them pick the nearest.
 
+### Proclamations
+
+- **📜 Proclaim draft** — declares a draft for a short spell. While it runs,
+  your farmers may spontaneously **take up arms as knights** — each still costs
+  the usual gold, and an empty treasury stops the call-ups. The button is
+  replaced by a countdown while a draft is in force. See
+  **[Units & Combat](units.md#the-draft)**.
+
 ### Build (left-click)
 
 Radio buttons selecting what a left-click does, with costs shown:

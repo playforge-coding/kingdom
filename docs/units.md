@@ -30,11 +30,30 @@ Knights are your military. They:
 - Seek out and **attack the enemy faction** wherever they find them.
 - Fight in melee — both sides take damage, and HP bars appear above wounded
   units.
+- **Press the assault on enemy settlements** once the field is clear: with no
+  foe left to chase, knights march on the nearest enemy **huts and walls** and
+  hack them down rather than idling at home.
 - **Rush to defend** an occupied hut or a village that comes under attack.
 - Follow the **rally flag** when you set one.
 
 Lean on the **⚔ Military priority** to raise more of them when you're under
 pressure.
+
+## The draft
+
+Need soldiers *now* rather than waiting on new spawns? **Proclaim a draft** from
+the HUD (see **[Controls](controls.md#proclamations)**). For a short spell:
+
+- Your **farmers may spontaneously take up arms**, converting into knights at
+  random over the course of the draft.
+- Each call-up **still costs gold**, exactly like raising a knight normally — so
+  the size of your treasury, not the number of farmers, is the real limit. When
+  the coffers run dry, the call-ups stop.
+- A **working core of farmers is always spared**, so a draft can't hollow out
+  your economy (or trip your knights into retreating home).
+
+It's a burst of military muscle when a raid is bearing down — at the price of
+gold and a thinner workforce until you rebuild it.
 
 ## Enemies
 

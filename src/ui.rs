@@ -197,6 +197,17 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             });
             ui.separator();
 
+            ui.heading("Proclamations");
+            if let Some(secs) = game.draft_remaining() {
+                ui.label(format!("📜 Draft in force — {:.0}s left", secs.ceil()));
+            } else if ui.button("📜 Proclaim draft").clicked() {
+                game.proclaim_draft();
+            }
+            ui.small(format!(
+                "Draft: farmers may take up arms as knights ({KNIGHT_GOLD_COST} gold each)."
+            ));
+            ui.separator();
+
             ui.heading("Build (left-click)");
             ui.radio_value(
                 &mut game.build_mode,

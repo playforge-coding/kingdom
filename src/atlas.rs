@@ -124,7 +124,9 @@ pub fn build() -> Atlas {
         "../assets/textures/entities/ally_swordsman.png"
     ));
     let cargo_ship = load(include_bytes!("../assets/textures/entities/cargo_ship.png"));
-    let pirate_ship = load(include_bytes!("../assets/textures/entities/pirate_ship.png"));
+    let pirate_ship = load(include_bytes!(
+        "../assets/textures/entities/pirate_ship.png"
+    ));
     let cannonball = load(include_bytes!("../assets/textures/entities/cannonball.png"));
 
     let sources = vec![

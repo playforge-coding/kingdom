@@ -314,6 +314,14 @@ const MIN_FARMERS_TO_GROW: usize = 3;
 /// Shortest possible spawn interval, however many farmers there are.
 const MIN_SPAWN_INTERVAL: f32 = 1.5;
 
+/// Seconds a proclaimed **draft** stays in force. While it runs, the player's
+/// farmers may be called up as knights (see `run_draft`).
+const DRAFT_DURATION: f32 = 15.0;
+/// Per-farmer, per-second chance of being conscripted during a draft. The real
+/// brake is gold, though: every call-up still costs `KNIGHT_GOLD_COST`, and a
+/// core of farmers is always left behind to keep the village running.
+const DRAFT_CHANCE_PER_SEC: f32 = 0.2;
+
 /// Spawn interval scaled by farmer count: each farmer beyond the minimum
 /// shortens the wait, so a larger workforce raises new units faster.
 fn spawn_interval(base: f32, farmers: usize) -> f32 {
@@ -488,6 +496,10 @@ pub struct Game {
     /// Player-set waypoint knights rush to (overriding combat); cleared once
     /// they arrive. Also raised automatically when a village is lost.
     pub rally_point: Option<Vec2>,
+    /// Seconds left on a proclaimed draft (0 when none is in force). While it
+    /// counts down, farmers are conscripted into knights (see `run_draft`).
+    /// Transient — a proclamation doesn't survive a save/load.
+    draft_timer: f32,
 
     player_house_tiles: Vec<Tile>,
     /// Player-built mines (caves); farmers mine these for endless stone.
@@ -690,6 +702,7 @@ impl Game {
             enemies_defeated: 0,
             units_lost: 0,
             rally_point: None,
+            draft_timer: 0.0,
             player_house_tiles,
             cave_tiles: Vec::new(),
             hut_tiles,
@@ -791,6 +804,7 @@ impl Game {
         // Keep chunks generated around the simulated (on-screen) entities.
         self.ensure_around_entities(sim);
         self.handle_spawns(dt);
+        self.run_draft(dt);
         self.grow_saplings(dt);
 
         let snap: Vec<(Vec2, Faction)> = self.entities.iter().map(|e| (e.pos, e.faction)).collect();
@@ -1524,9 +1538,15 @@ impl Game {
                 continue;
             }
             self.enemy_villages_founded += 1;
-            for (k, &job) in [Job::Farmer, Job::Farmer, Job::Farmer, Job::Knight, Job::Knight]
-                .iter()
-                .enumerate()
+            for (k, &job) in [
+                Job::Farmer,
+                Job::Farmer,
+                Job::Farmer,
+                Job::Knight,
+                Job::Knight,
+            ]
+            .iter()
+            .enumerate()
             {
                 let (hx, hy) = houses[k % houses.len()];
                 if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
@@ -1727,6 +1747,57 @@ impl Game {
         self.rally_point = None;
     }
 
+    /// Proclaim a draft: for the next `DRAFT_DURATION` seconds, farmers may be
+    /// conscripted into knights (each still paid for). Re-proclaiming refreshes
+    /// the clock.
+    pub fn proclaim_draft(&mut self) {
+        self.draft_timer = DRAFT_DURATION;
+    }
+
+    /// Seconds left on the active draft, or `None` when none is in force.
+    pub fn draft_remaining(&self) -> Option<f32> {
+        (self.draft_timer > 0.0).then_some(self.draft_timer)
+    }
+
+    /// While a draft is in force, call up the player's farmers as knights at
+    /// random. Every call-up still costs `KNIGHT_GOLD_COST`, so an empty
+    /// treasury halts it; a working core of farmers is always spared so the
+    /// economy — and knight upkeep — doesn't collapse. The floor is kept just
+    /// *above* `MIN_FARMERS_TO_GROW` so the draft never trips the low-farmer
+    /// retreat that would march the very knights it just raised back home.
+    fn run_draft(&mut self, dt: f32) {
+        if self.draft_timer <= 0.0 {
+            return;
+        }
+        self.draft_timer -= dt;
+        for i in 0..self.entities.len() {
+            if self.money < KNIGHT_GOLD_COST
+                || self.farmer_count(Faction::Player) <= MIN_FARMERS_TO_GROW + 1
+            {
+                break;
+            }
+            let e = &self.entities[i];
+            if e.faction != Faction::Player || e.job != Job::Farmer {
+                continue;
+            }
+            // A small per-farmer chance each tick to be called up.
+            if (self.rng.next_u32() as f32) / (u32::MAX as f32) >= DRAFT_CHANCE_PER_SEC * dt {
+                continue;
+            }
+            self.money -= KNIGHT_GOLD_COST;
+            let e = &mut self.entities[i];
+            e.job = Job::Knight;
+            e.max_hp = max_hp_for(Faction::Player, Job::Knight);
+            e.hp = e.max_hp;
+            // Shed any farming state so the fresh recruit acts as a soldier.
+            e.mine_target = None;
+            e.build_site = None;
+            e.target_node = None;
+            e.harvest_timer = 0.0;
+            e.set_path(Vec::new());
+        }
+    }
+
     /// Saplings mid-growth as `(x, y, grow)` for rendering (grow runs 0 → 1).
     pub fn saplings_iter(&self) -> impl Iterator<Item = (i32, i32, f32)> + '_ {
         self.saplings.iter().map(|s| (s.tile.0, s.tile.1, s.grow))
@@ -1764,7 +1835,9 @@ fn ai_step(
             if under_limit {
                 retreat_behavior(world, e, owner, home, dt)
             } else {
-                soldier_behavior(world, e, owner, rng, snap, rally, hut_orders, acting, dt)
+                soldier_behavior(
+                    world, e, owner, rng, snap, rally, huts, hut_orders, acting, dt,
+                )
             }
         }
         (_, Job::Farmer) => {
@@ -2108,6 +2181,7 @@ fn soldier_behavior(
     rng: &mut Rng,
     snap: &[(Vec2, Faction)],
     rally: Option<Vec2>,
+    huts: &[Tile],
     hut_orders: &[Tile],
     acting: bool,
     dt: f32,
@@ -2179,18 +2253,27 @@ fn soldier_behavior(
     // Target the nearest opponent we can actually *reach* — a multi-target BFS
     // that will happily route across bridges to another landmass, rather than
     // fixating on a straight-line-nearest foe that's stranded across water.
+    // With no foe in the field, knights stay on the offensive: they march on
+    // the enemy's own huts and walls, routing to a tile from which the combat
+    // step can start hacking the structure down.
     let foes: std::collections::HashSet<Tile> = snap
         .iter()
         .filter(|&&(_, f)| hostile(f, e.faction))
         .map(|&(p, _)| (p.x.floor() as i32, p.y.floor() as i32))
         .collect();
+    let siege = any_hostile_hut(world, owner, huts);
 
     if e.repath <= 0.0 || e.path_done() {
         e.repath = 0.7;
-        let goal = |x: i32, y: i32| foes.contains(&(x, y));
-        // Engage the nearest reachable foe — prefer a clear route; only smash
-        // through trees/rocks when there's genuinely no clear way in.
-        let engaged = !foes.is_empty() && {
+        let goal = |x: i32, y: i32| {
+            foes.contains(&(x, y))
+                || adjacent_enemy_wall(world, owner, (x, y)).is_some()
+                || adjacent_enemy_hut(world, owner, (x, y)).is_some()
+        };
+        // Engage the nearest reachable foe or enemy structure — prefer a clear
+        // route; only smash through trees/rocks when there's genuinely no clear
+        // way in.
+        let engaged = (!foes.is_empty() || siege) && {
             if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
                 world.walkable_for(owner, x, y)
             }) {
@@ -2206,8 +2289,8 @@ fn soldier_behavior(
             }
         };
         if !engaged {
-            // No reachable foe: drop any stale path so we idle rather than
-            // grinding down trees along a dead route.
+            // Nothing reachable to fight or raze: drop any stale path so we idle
+            // rather than grinding down trees along a dead route.
             e.set_path(Vec::new());
         }
     }
@@ -2477,6 +2560,16 @@ fn adjacent_enemy_wall(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     None
 }
 
+/// Does the enemy still hold any hut? Cheap gate before a knight commits to a
+/// full-budget assault BFS when no foe is on the field.
+fn any_hostile_hut(world: &World, owner: u8, huts: &[Tile]) -> bool {
+    huts.iter().any(|&(x, y)| {
+        world
+            .hut(x, y)
+            .is_some_and(|h| owner_hostile(h.owner, owner))
+    })
+}
+
 /// A hostile-owned hut adjacent to `tile`, if any (which knights break into).
 fn adjacent_enemy_hut(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -2561,7 +2654,12 @@ fn find_land_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile> {
 /// hard tile cap so a freak mega-continent can't stall world creation. Used to
 /// keep allied villages *off* the home continent, so reaching them means a sea
 /// voyage — the whole point of the cargo ships.
-fn home_continent_tiles(world: &mut World, seed: Tile, max_radius: i32, cap: usize) -> HashSet<Tile> {
+fn home_continent_tiles(
+    world: &mut World,
+    seed: Tile,
+    max_radius: i32,
+    cap: usize,
+) -> HashSet<Tile> {
     let mut seen: HashSet<Tile> = HashSet::new();
     let mut queue: VecDeque<Tile> = VecDeque::new();
     let passable = |world: &mut World, x: i32, y: i32| {
@@ -2695,10 +2793,7 @@ fn reachable_overseas_coasts(
                     }
                 }
                 WTile::Grass => {
-                    if !home.contains(&n)
-                        && world.is_open_grass(n.0, n.1)
-                        && coast_seen.insert(n)
-                    {
+                    if !home.contains(&n) && world.is_open_grass(n.0, n.1) && coast_seen.insert(n) {
                         coasts.push(n);
                     }
                 }
@@ -3333,6 +3428,7 @@ impl Game {
             enemies_defeated,
             units_lost,
             rally_point: None,
+            draft_timer: 0.0,
             player_house_tiles,
             cave_tiles,
             hut_tiles,
@@ -3487,6 +3583,45 @@ mod tests {
         // knight is affordable; drained, the village must fall back to farmers.
         let game = Game::new(1);
         assert!(game.money >= KNIGHT_GOLD_COST);
+    }
+
+    #[test]
+    fn draft_conscripts_farmers_but_is_gated_by_gold() {
+        let mut game = Game::new(1);
+        // Give the draft a healthy pool of farmers to call up.
+        let home = game.start_center();
+        let tile = (home.x as i32, home.y as i32);
+        for _ in 0..10 {
+            game.entities
+                .push(Entity::new(Faction::Player, Job::Farmer, tile));
+        }
+        let farmers0 = game.farmer_count(Faction::Player);
+        assert!(farmers0 > MIN_FARMERS_TO_GROW + 1, "need bodies to draft");
+
+        // Fund exactly two call-ups, then proclaim and run the draft to its end.
+        // Drive `run_draft` directly so spawns and combat can't muddy the count.
+        game.money = KNIGHT_GOLD_COST * 2;
+        game.proclaim_draft();
+        assert!(game.draft_remaining().is_some());
+        for _ in 0..1000 {
+            game.run_draft(0.1);
+            if game.draft_remaining().is_none() {
+                break;
+            }
+        }
+
+        // Gold is the brake: at most two farmers were called up, and the spend
+        // matches exactly one knight per missing farmer.
+        let converted = (farmers0 - game.farmer_count(Faction::Player)) as u32;
+        assert!(converted <= 2, "gold must cap conscription at two");
+        assert_eq!(game.money, KNIGHT_GOLD_COST * (2 - converted));
+        assert!(
+            converted >= 1,
+            "a funded draft with bodies should call some up"
+        );
+        // A working core of farmers is always spared, and the draft expires.
+        assert!(game.farmer_count(Faction::Player) > MIN_FARMERS_TO_GROW);
+        assert!(game.draft_remaining().is_none(), "draft must expire");
     }
 
     #[test]
