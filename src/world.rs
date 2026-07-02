@@ -47,6 +47,8 @@ pub struct Chunk {
     pub enemy_houses: Vec<bool>,
     pub bridges: Vec<bool>,
     pub walls: Vec<Option<Wall>>,
+    /// Player-built mines: bottomless stone sources farmers work at.
+    pub caves: Vec<bool>,
 }
 
 impl Chunk {
@@ -58,6 +60,7 @@ impl Chunk {
             enemy_houses: vec![false; CHUNK_TILES],
             bridges: vec![false; CHUNK_TILES],
             walls: vec![None; CHUNK_TILES],
+            caves: vec![false; CHUNK_TILES],
         }
     }
 }
@@ -176,6 +179,10 @@ impl World {
         self.chunk_at(x, y)
             .map_or(false, |c| c.bridges[li(local_of(x), local_of(y))])
     }
+    pub fn is_cave(&self, x: i32, y: i32) -> bool {
+        self.chunk_at(x, y)
+            .map_or(false, |c| c.caves[li(local_of(x), local_of(y))])
+    }
     pub fn wall(&self, x: i32, y: i32) -> Option<Wall> {
         self.chunk_at(x, y)
             .and_then(|c| c.walls[li(local_of(x), local_of(y))])
@@ -201,11 +208,15 @@ impl World {
         if c.bridges[i] {
             return true;
         }
-        c.tiles[i] == Tile::Grass && c.nodes[i].is_none() && !c.houses[i] && !c.enemy_houses[i]
+        c.tiles[i] == Tile::Grass
+            && c.nodes[i].is_none()
+            && !c.houses[i]
+            && !c.enemy_houses[i]
+            && !c.caves[i]
     }
 
     /// Like `walkable_for`, but resource nodes don't block (a knight will smash
-    /// through them). Water, buildings and enemy walls still block.
+    /// through them). Water, buildings, caves and enemy walls still block.
     pub fn walkable_for_siege(&self, owner: u8, x: i32, y: i32) -> bool {
         let Some(c) = self.chunk_at(x, y) else {
             return false;
@@ -219,7 +230,7 @@ impl World {
         if c.bridges[i] {
             return true;
         }
-        c.tiles[i] == Tile::Grass && !c.houses[i] && !c.enemy_houses[i]
+        c.tiles[i] == Tile::Grass && !c.houses[i] && !c.enemy_houses[i] && !c.caves[i]
     }
 
     pub fn is_open_grass(&self, x: i32, y: i32) -> bool {
@@ -233,6 +244,7 @@ impl World {
             && !c.enemy_houses[i]
             && !c.bridges[i]
             && c.walls[i].is_none()
+            && !c.caves[i]
     }
 
     pub fn is_open_water(&self, x: i32, y: i32) -> bool {
@@ -286,6 +298,13 @@ impl World {
         }
     }
 
+    pub fn set_cave(&mut self, x: i32, y: i32, v: bool) {
+        self.ensure(chunk_of(x), chunk_of(y));
+        if let Some(c) = self.chunk_at_mut(x, y) {
+            c.caves[li(local_of(x), local_of(y))] = v;
+        }
+    }
+
     pub fn set_wall(&mut self, x: i32, y: i32, owner: u8, hp: f32) {
         self.ensure(chunk_of(x), chunk_of(y));
         if let Some(c) = self.chunk_at_mut(x, y) {
@@ -306,6 +325,14 @@ impl World {
             }
         }
         false
+    }
+
+    /// Place a resource node (a grown tree or a freshly pulled rock).
+    pub fn set_node(&mut self, x: i32, y: i32, kind: Resource, amount: u32) {
+        self.ensure(chunk_of(x), chunk_of(y));
+        if let Some(c) = self.chunk_at_mut(x, y) {
+            c.nodes[li(local_of(x), local_of(y))] = Some(Node { kind, amount });
+        }
     }
 
     /// Remove a resource node outright (no yield) — a knight smashing through.

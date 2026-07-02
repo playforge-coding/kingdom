@@ -7,6 +7,7 @@ use winit::window::Window;
 
 use crate::game::{
     BuildMode, Game, GatherPriority, Priority, BRIDGE_WOOD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
+    MINE_STONE_COST,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -205,6 +206,11 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 BuildMode::Bridge,
                 format!("Bridge  ({BRIDGE_WOOD_COST} wood)"),
             );
+            ui.radio_value(
+                &mut game.build_mode,
+                BuildMode::Mine,
+                format!("⛏ Mine  ({MINE_STONE_COST} stone)"),
+            );
             ui.radio_value(&mut game.build_mode, BuildMode::Rally, "⚑ Rally knights");
             if game.rally_point.is_some() && ui.button("✖ Clear rally").clicked() {
                 game.clear_rally();
@@ -223,6 +229,8 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ui.small("Houses must be built next to your village.");
             ui.small("Houses raise new workers only while you have 4+ farmers.");
             ui.small("Farmers gather • Knights defend.");
+            ui.small("Farmers replant trees and mine caves once resources run dry.");
+            ui.small("Mines never run out, but only 4 farmers can work one at a time.");
             ui.small("Rally: knights march to the flag until they meet an enemy.");
             ui.small("Right-click clears the rally flag.");
             ui.small("WASD / arrows to pan • scroll to zoom.");

@@ -29,6 +29,12 @@ enum Scene {
 }
 
 const DEFAULT_VIEW_HEIGHT: f32 = 28.0;
+/// Tiles beyond the visible rectangle that are still simulated, so units walking
+/// on/off screen behave seamlessly.
+const SIM_MARGIN: i32 = 24;
+/// Most same-type units drawn on a single tile; caps overdraw from huge stacks
+/// without hiding ordinary crowds.
+const STACK_DRAW_CAP: u32 = 8;
 
 fn now_secs() -> f64 {
     #[cfg(target_arch = "wasm32")]
@@ -132,8 +138,17 @@ impl State {
             self.camera.center += d.normalize() * pan;
         }
 
+        // Simulate a generous rectangle around the view; entities outside it are
+        // frozen so unwatched crowds don't cost anything.
+        let (minx, miny, maxx, maxy) = self.visible_bounds();
+        let sim = (
+            minx - SIM_MARGIN,
+            miny - SIM_MARGIN,
+            maxx + SIM_MARGIN,
+            maxy + SIM_MARGIN,
+        );
         if let Some(game) = &mut self.game {
-            game.update(dt);
+            game.update(dt, sim);
         }
     }
 
@@ -215,6 +230,7 @@ impl State {
         let house = self.atlas.uv("house");
         let enemy_house = self.atlas.uv("enemy_house");
         let wall = self.atlas.uv("wall");
+        let cave = self.atlas.uv("cave");
         let white = self.atlas.uv("white");
 
         let (minx, miny, maxx, maxy) = self.visible_bounds();
@@ -246,6 +262,8 @@ impl State {
                     out.push(quad(p, [1.0, 1.0], house));
                 } else if world.is_enemy_house(x, y) {
                     out.push(quad(p, [1.0, 1.0], enemy_house));
+                } else if world.is_cave(x, y) {
+                    out.push(quad(p, [1.0, 1.0], cave));
                 } else if let Some(w) = world.wall(x, y) {
                     // Tint enemy walls red so the two factions read apart.
                     let tint = if w.owner == 0 {
@@ -264,8 +282,32 @@ impl State {
             }
         }
 
-        // Entities: pick an animation frame and draw an HP bar when hurt.
+        // Saplings: a young tree that scales up from a sprout as it matures.
+        for (sx, sy, grow) in game.saplings_iter() {
+            let s = 0.3 + 0.7 * grow.clamp(0.0, 1.0);
+            let px = sx as f32 + (1.0 - s) * 0.5;
+            let py = sy as f32 + (1.0 - s);
+            out.push(quad([px, py], [s, s], tree));
+        }
+
+        // Entities: pick an animation frame and draw an HP bar when hurt. We cap
+        // how many same-type units are drawn on any one tile — small crowds show
+        // fully (so you see newcomers arrive), but a pathological pile-up of
+        // hundreds costs a handful of quads instead of hundreds.
+        let mut stack: std::collections::HashMap<(i32, i32, bool, bool), u32> =
+            std::collections::HashMap::new();
         for e in &game.entities {
+            let key = (
+                e.pos.x.floor() as i32,
+                e.pos.y.floor() as i32,
+                matches!(e.faction, Faction::Player),
+                matches!(e.job, Job::Knight),
+            );
+            let count = stack.entry(key).or_insert(0);
+            *count += 1;
+            if *count > STACK_DRAW_CAP {
+                continue;
+            }
             let (sheet, col, row) = sprite_frame(e);
             let uv = self.atlas.frame_uv(sheet, col, row);
             out.push(tinted(

@@ -92,6 +92,9 @@ pub struct Entity {
     target_node: Option<Tile>,
     harvest_timer: f32,
     repath: f32,
+    /// Cave (mine) tile a farmer has claimed to mine — capacity-limited so only
+    /// a handful work one at a time.
+    mine_target: Option<Tile>,
 }
 
 fn max_hp_for(faction: Faction, job: Job) -> f32 {
@@ -119,6 +122,7 @@ impl Entity {
             target_node: None,
             harvest_timer: 0.0,
             repath: 0.0,
+            mine_target: None,
         }
     }
 
@@ -148,12 +152,21 @@ fn set_anim(e: &mut Entity, a: Anim, dt: f32) {
 pub const HOUSE_WOOD_COST: u32 = 8;
 pub const HOUSE_STONE_COST: u32 = 8;
 pub const BRIDGE_WOOD_COST: u32 = 3;
+pub const MINE_STONE_COST: u32 = 12;
 /// A new house must be within this many tiles of one you already own.
 pub const BUILD_NEAR_RADIUS: i32 = 5;
 
 const FARMER_SPEED: f32 = 2.4;
 const KNIGHT_SPEED: f32 = 2.9;
 const HARVEST_TIME: f32 = 2.0;
+/// Farmers never roam further than this from their nearest house — a hard leash
+/// that keeps them tending the village instead of wandering off after resources.
+const FARMER_HOME_RADIUS: i32 = 16;
+/// Seconds a sown sapling takes to mature into a harvestable tree.
+const SAPLING_GROW_TIME: f32 = 6.0;
+/// A cave (mine) is a bottomless stone source, but only so many farmers can
+/// work one at once.
+const CAVE_CAPACITY: u32 = 4;
 /// Knights hack through trees/rocks much slower than a farmer harvests, and
 /// gain nothing — so they only bother when a node truly blocks their way.
 const KNIGHT_DEMOLISH_TIME: f32 = 5.0;
@@ -176,6 +189,10 @@ enum StepEvent {
     RaiseWall(Tile),
     /// A knight has smashed through a blocking tree/rock (no resources gained).
     Demolish(Tile),
+    /// A farmer has sown a sapling on a bare tile (grows into a tree).
+    Plant(Tile),
+    /// A farmer pulled a unit of stone from a mine (bottomless).
+    MineStone,
 }
 
 const ENEMY_CAP: usize = 16;
@@ -211,9 +228,17 @@ const PATH_BUDGET: usize = 4000;
 pub enum BuildMode {
     House,
     Bridge,
+    /// Build a mine (cave): a bottomless stone source farmers can work.
+    Mine,
     /// Left-click plants a rally flag: player knights march to it until they
     /// pick up an enemy, then peel off to fight.
     Rally,
+}
+
+/// A sown sapling growing toward a harvestable tree (`grow` runs 0 → 1).
+struct Sapling {
+    tile: Tile,
+    grow: f32,
 }
 
 /// Which kind of villager the player's houses favour raising.
@@ -265,6 +290,10 @@ pub struct Game {
     pub rally_point: Option<Vec2>,
 
     player_house_tiles: Vec<Tile>,
+    /// Player-built mines (caves); farmers mine these for endless stone.
+    cave_tiles: Vec<Tile>,
+    /// Saplings mid-growth (transient — not persisted across saves).
+    saplings: Vec<Sapling>,
     /// Bridges the player has placed (anchors for extending spans).
     player_bridges: Vec<Tile>,
     enemy_spawn_timer: f32,
@@ -362,6 +391,8 @@ impl Game {
             units_lost: 0,
             rally_point: None,
             player_house_tiles,
+            cave_tiles: Vec::new(),
+            saplings: Vec::new(),
             player_bridges: Vec::new(),
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
             player_spawn_timer: PLAYER_SPAWN_INTERVAL,
@@ -409,15 +440,31 @@ impl Game {
             .any(|&(bx, by)| (bx - x).abs() <= 2 && (by - y).abs() <= 2)
     }
 
-    pub fn update(&mut self, dt: f32) {
+    pub fn update(&mut self, dt: f32, sim: (i32, i32, i32, i32)) {
         let dt = dt.min(0.1);
 
-        // Keep chunks around every entity generated.
-        self.ensure_around_entities();
+        // Only entities near the player's view are simulated — a distant, unwatched
+        // corner of the map is frozen so huge populations don't tank the frame rate.
+        let (sx0, sy0, sx1, sy1) = sim;
+        let in_sim = |t: Tile| t.0 >= sx0 && t.0 <= sx1 && t.1 >= sy0 && t.1 <= sy1;
+
+        // Keep chunks generated around the simulated (on-screen) entities.
+        self.ensure_around_entities(sim);
         self.handle_spawns(dt);
+        self.grow_saplings(dt);
 
         let snap: Vec<(Vec2, Faction)> = self.entities.iter().map(|e| (e.pos, e.faction)).collect();
         let n = self.entities.len();
+
+        // How many farmers are already working each mine, so we can cap the crowd.
+        let mut cave_use: std::collections::HashMap<Tile, u32> = std::collections::HashMap::new();
+        let sapling_tiles: std::collections::HashSet<Tile> =
+            self.saplings.iter().map(|s| s.tile).collect();
+        for e in &self.entities {
+            if let Some(c) = e.mine_target {
+                *cave_use.entry(c).or_insert(0) += 1;
+            }
+        }
 
         // When a faction drops to the farmer floor, its knights fall back to
         // the village to become farmers again (and wall it up on the way).
@@ -432,7 +479,7 @@ impl Game {
         let mut wall_damage: std::collections::HashMap<Tile, f32> =
             std::collections::HashMap::new();
         for i in 0..n {
-            if self.entities[i].job != Job::Knight {
+            if self.entities[i].job != Job::Knight || !in_sim(self.entities[i].tile()) {
                 continue;
             }
             let (pi, fi) = snap[i];
@@ -469,13 +516,36 @@ impl Game {
 
         // AI + movement.
         for i in 0..n {
+            if !in_sim(self.entities[i].tile()) {
+                continue;
+            }
             let faction = self.entities[i].faction;
             let under = match faction {
                 Faction::Player => player_under,
                 Faction::Enemy => enemy_under,
             };
-            let event = match faction {
-                Faction::Player => ai_step(
+            let event = match (faction, self.entities[i].job) {
+                (Faction::Player, Job::Farmer) => {
+                    let mut farm = FarmCtx {
+                        caves: &self.cave_tiles,
+                        cave_use: &mut cave_use,
+                        saplings: &sapling_tiles,
+                    };
+                    ai_step(
+                        &self.world,
+                        &mut self.entities[i],
+                        &mut self.rng,
+                        &snap,
+                        acting[i],
+                        under,
+                        &self.player_house_tiles,
+                        pref,
+                        self.rally_point,
+                        Some(&mut farm),
+                        dt,
+                    )
+                }
+                (Faction::Player, _) => ai_step(
                     &self.world,
                     &mut self.entities[i],
                     &mut self.rng,
@@ -485,9 +555,10 @@ impl Game {
                     &self.player_house_tiles,
                     pref,
                     self.rally_point,
+                    None,
                     dt,
                 ),
-                Faction::Enemy => ai_step(
+                (Faction::Enemy, _) => ai_step(
                     &self.world,
                     &mut self.entities[i],
                     &mut self.rng,
@@ -495,6 +566,7 @@ impl Game {
                     acting[i],
                     under,
                     &self.world.enemy_house_tiles,
+                    None,
                     None,
                     None,
                     dt,
@@ -507,6 +579,14 @@ impl Game {
                             Resource::Wood => self.wood += 1,
                             Resource::Stone => self.stone += 1,
                         }
+                    }
+                }
+                Some(StepEvent::MineStone) => self.stone += 1,
+                Some(StepEvent::Plant(t)) => {
+                    if self.world.is_open_grass(t.0, t.1)
+                        && !self.saplings.iter().any(|s| s.tile == t)
+                    {
+                        self.saplings.push(Sapling { tile: t, grow: 0.0 });
                     }
                 }
                 Some(StepEvent::RaiseWall(t)) => {
@@ -607,17 +687,24 @@ impl Game {
         }
     }
 
-    fn ensure_around_entities(&mut self) {
-        if self.entities.is_empty() {
-            return;
-        }
+    fn ensure_around_entities(&mut self, sim: (i32, i32, i32, i32)) {
+        let (sx0, sy0, sx1, sy1) = sim;
         let (mut minx, mut miny, mut maxx, mut maxy) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        let mut any = false;
         for e in &self.entities {
             let (tx, ty) = e.tile();
+            // Only bother generating land around entities we're actually simulating.
+            if tx < sx0 || tx > sx1 || ty < sy0 || ty > sy1 {
+                continue;
+            }
+            any = true;
             minx = minx.min(tx);
             miny = miny.min(ty);
             maxx = maxx.max(tx);
             maxy = maxy.max(ty);
+        }
+        if !any {
+            return;
         }
         self.world.ensure_region(
             minx - ENSURE_MARGIN,
@@ -625,6 +712,26 @@ impl Game {
             maxx + ENSURE_MARGIN,
             maxy + ENSURE_MARGIN,
         );
+    }
+
+    /// Advance sown saplings; a mature one becomes a real tree (wood node).
+    fn grow_saplings(&mut self, dt: f32) {
+        let step = dt / SAPLING_GROW_TIME;
+        let mut i = 0;
+        while i < self.saplings.len() {
+            self.saplings[i].grow += step;
+            let t = self.saplings[i].tile;
+            let grown = self.saplings[i].grow >= 1.0;
+            if !self.world.is_open_grass(t.0, t.1) {
+                // Something took the tile (a build, or it was cleared) — abandon it.
+                self.saplings.swap_remove(i);
+            } else if grown {
+                self.world.set_node(t.0, t.1, Resource::Wood, 5);
+                self.saplings.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     fn handle_spawns(&mut self, dt: f32) {
@@ -721,6 +828,20 @@ impl Game {
                 self.player_bridges.push((x, y));
                 true
             }
+            BuildMode::Mine => {
+                // A mine is a cave dug into open ground near your village. It's a
+                // bottomless stone source (but only a few farmers fit at once).
+                if !self.world.is_open_grass(x, y)
+                    || !self.near_player_house(x, y)
+                    || self.stone < MINE_STONE_COST
+                {
+                    return false;
+                }
+                self.stone -= MINE_STONE_COST;
+                self.world.set_cave(x, y, true);
+                self.cave_tiles.push((x, y));
+                true
+            }
             BuildMode::Rally => {
                 // Plant (or move) the rally flag. Knights head here until they
                 // pick up an enemy. Clicking the flagged tile again lifts it.
@@ -739,6 +860,11 @@ impl Game {
     pub fn clear_rally(&mut self) {
         self.rally_point = None;
     }
+
+    /// Saplings mid-growth as `(x, y, grow)` for rendering (grow runs 0 → 1).
+    pub fn saplings_iter(&self) -> impl Iterator<Item = (i32, i32, f32)> + '_ {
+        self.saplings.iter().map(|s| (s.tile.0, s.tile.1, s.grow))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -756,13 +882,15 @@ fn ai_step(
     home: &[Tile],
     pref: Option<Resource>,
     rally: Option<Vec2>,
+    farm: Option<&mut FarmCtx>,
     dt: f32,
 ) -> Option<StepEvent> {
     e.repath -= dt;
     let owner = owner_of(e.faction);
     match (e.faction, e.job) {
         (Faction::Player, Job::Farmer) => {
-            gather_behavior(world, e, owner, pref, rng, dt).map(StepEvent::Harvest)
+            let farm = farm.expect("player farmers need farm context");
+            gather_behavior(world, e, owner, pref, home, farm, rng, dt)
         }
         (_, Job::Knight) => {
             if under_limit {
@@ -772,50 +900,218 @@ fn ai_step(
             }
         }
         (Faction::Enemy, Job::Farmer) => {
-            wander_behavior(world, e, owner, rng, dt);
+            wander_behavior(world, e, owner, None, rng, dt);
             None
         }
     }
 }
 
+/// Shared, per-frame context the player's farmers reason over: where the mines
+/// are, how many farmers are already working each, and which tiles are saplings.
+struct FarmCtx<'a> {
+    caves: &'a [Tile],
+    cave_use: &'a mut std::collections::HashMap<Tile, u32>,
+    saplings: &'a std::collections::HashSet<Tile>,
+}
+
+/// True when `(x, y)` is within the leash of some player house.
+fn within_home(home: &[Tile], x: i32, y: i32, r: i32) -> bool {
+    home.iter()
+        .any(|&(hx, hy)| (hx - x).abs() <= r && (hy - y).abs() <= r)
+}
+
+fn nearest_house(home: &[Tile], t: Tile) -> Option<Tile> {
+    home.iter()
+        .copied()
+        .min_by_key(|&(hx, hy)| (hx - t.0).abs() + (hy - t.1).abs())
+}
+
+/// A 4-neighbour of `t` a farmer can stand on to work it.
+fn stand_tile(world: &World, owner: u8, t: Tile) -> Option<Tile> {
+    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .into_iter()
+        .map(|(dx, dy)| (t.0 + dx, t.1 + dy))
+        .find(|&(nx, ny)| world.walkable_for(owner, nx, ny))
+}
+
+/// Release a farmer's claim on a mine, freeing its slot for someone else.
+fn release_cave(e: &mut Entity, cave_use: &mut std::collections::HashMap<Tile, u32>) {
+    if let Some(c) = e.mine_target.take() {
+        if let Some(n) = cave_use.get_mut(&c) {
+            *n = n.saturating_sub(1);
+        }
+    }
+}
+
+/// Claim a slot at the nearest mine with room, returning the cave tile.
+fn claim_cave(
+    world: &World,
+    owner: u8,
+    start: Tile,
+    home: &[Tile],
+    farm: &mut FarmCtx,
+) -> Option<Tile> {
+    let mut best: Option<(Tile, i32)> = None;
+    for &c in farm.caves {
+        if !world.is_cave(c.0, c.1)
+            || farm.cave_use.get(&c).copied().unwrap_or(0) >= CAVE_CAPACITY
+            || !within_home(home, c.0, c.1, FARMER_HOME_RADIUS + 1)
+            || stand_tile(world, owner, c).is_none()
+        {
+            continue;
+        }
+        let d = (c.0 - start.0).abs() + (c.1 - start.1).abs();
+        if best.map_or(true, |(_, bd)| d < bd) {
+            best = Some((c, d));
+        }
+    }
+    let (c, _) = best?;
+    *farm.cave_use.entry(c).or_insert(0) += 1;
+    Some(c)
+}
+
+/// A bare tile next to `stand` fit to sow a sapling on (open grass, in the
+/// leash, not already a sapling).
+fn plantable_neighbor(
+    world: &World,
+    home: &[Tile],
+    saplings: &std::collections::HashSet<Tile>,
+    stand: Tile,
+) -> Option<Tile> {
+    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .into_iter()
+        .map(|(dx, dy)| (stand.0 + dx, stand.1 + dy))
+        .find(|&(nx, ny)| {
+            world.is_open_grass(nx, ny)
+                && within_home(home, nx, ny, FARMER_HOME_RADIUS)
+                && !saplings.contains(&(nx, ny))
+        })
+}
+
+/// Route to a spot where the farmer can sow a fresh sapling.
+fn plan_plant(
+    world: &World,
+    owner: u8,
+    start: Tile,
+    home: &[Tile],
+    saplings: &std::collections::HashSet<Tile>,
+) -> Option<(Vec<Tile>, Tile)> {
+    let path = pathfind::bfs(
+        start,
+        PATH_BUDGET,
+        |x, y| {
+            world.walkable_for(owner, x, y)
+                && plantable_neighbor(world, home, saplings, (x, y)).is_some()
+        },
+        |x, y| within_home(home, x, y, FARMER_HOME_RADIUS) && world.walkable_for(owner, x, y),
+    )?;
+    let dest = path.last().copied().unwrap_or(start);
+    let spot = plantable_neighbor(world, home, saplings, dest)?;
+    Some((path, spot))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn gather_behavior(
     world: &World,
     e: &mut Entity,
     owner: u8,
     pref: Option<Resource>,
+    home: &[Tile],
+    farm: &mut FarmCtx,
     rng: &mut Rng,
     dt: f32,
-) -> Option<Tile> {
+) -> Option<StepEvent> {
+    let here = e.tile();
+
+    // Hard leash: if we've somehow strayed past the home radius, abandon any
+    // task and march straight back — farmers never leave the village.
+    if !within_home(home, here.0, here.1, FARMER_HOME_RADIUS) {
+        release_cave(e, farm.cave_use);
+        e.target_node = None;
+        if let Some(h) = nearest_house(home, here) {
+            if e.repath <= 0.0 || e.path_done() {
+                if let Some(p) = pathfind::path_to(world, owner, here, h, PATH_BUDGET) {
+                    e.set_path(p);
+                }
+                e.repath = 0.7;
+            }
+        }
+        let moved = follow_path(e, FARMER_SPEED, dt);
+        set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
+        return None;
+    }
+
+    // Working: mining a cave, harvesting a node, or tending a sapling.
     if e.harvest_timer > 0.0 {
-        if let Some(node) = e.target_node {
-            e.facing = dir_from_vec(tile_center(node) - e.pos);
+        if let Some(t) = e.mine_target.or(e.target_node) {
+            e.facing = dir_from_vec(tile_center(t) - e.pos);
         }
         set_anim(e, Anim::Act, dt);
         e.harvest_timer -= dt;
         if e.harvest_timer <= 0.0 {
-            let node = e.target_node.take();
-            e.set_path(Vec::new());
-            return node;
+            if let Some(c) = e.mine_target {
+                // A mine never runs dry: bank the stone and keep swinging.
+                if world.is_cave(c.0, c.1) && adjacent(here, c) {
+                    e.harvest_timer = HARVEST_TIME;
+                    return Some(StepEvent::MineStone);
+                }
+                release_cave(e, farm.cave_use);
+                return None;
+            }
+            if let Some(t) = e.target_node.take() {
+                e.set_path(Vec::new());
+                return Some(if world.node(t.0, t.1).is_some() {
+                    StepEvent::Harvest(t)
+                } else {
+                    StepEvent::Plant(t)
+                });
+            }
         }
         return None;
     }
 
+    // Walking somewhere.
     if !e.path_done() {
         let moved = follow_path(e, FARMER_SPEED, dt);
         set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
         return None;
     }
 
-    if let Some(node) = e.target_node {
-        if world.node(node.0, node.1).is_some() && adjacent(e.tile(), node) {
+    // Hold a mine claim? Work it (walk in, then mine).
+    if let Some(c) = e.mine_target {
+        if world.is_cave(c.0, c.1) {
+            if adjacent(here, c) {
+                e.harvest_timer = HARVEST_TIME;
+                e.facing = dir_from_vec(tile_center(c) - e.pos);
+                set_anim(e, Anim::Act, dt);
+                return None;
+            }
+            if let Some(stand) = stand_tile(world, owner, c) {
+                if let Some(p) = pathfind::path_to(world, owner, here, stand, PATH_BUDGET) {
+                    e.set_path(p);
+                    set_anim(e, Anim::Walk, dt);
+                    return None;
+                }
+            }
+        }
+        release_cave(e, farm.cave_use);
+    }
+
+    // Reached our work tile? Start swinging — either a resource node to harvest
+    // or a bare tile to sow. Otherwise the target is stale; drop it and re-plan.
+    if let Some(t) = e.target_node {
+        let workable = world.node(t.0, t.1).is_some() || world.is_open_grass(t.0, t.1);
+        if workable && adjacent(here, t) {
             e.harvest_timer = HARVEST_TIME;
+            e.facing = dir_from_vec(tile_center(t) - e.pos);
             set_anim(e, Anim::Act, dt);
             return None;
         }
         e.target_node = None;
     }
 
-    if let Some((path, node)) = plan_gather(world, owner, e.tile(), pref) {
+    // Gather the nearest reachable rock/tree within the leash.
+    if let Some((path, node)) = plan_gather(world, owner, here, pref, home) {
         e.target_node = Some(node);
         if path.is_empty() {
             e.harvest_timer = HARVEST_TIME;
@@ -824,12 +1120,53 @@ fn gather_behavior(
             e.set_path(path);
             set_anim(e, Anim::Walk, dt);
         }
-    } else {
-        wander_behavior(world, e, owner, rng, dt);
+        return None;
     }
+
+    // Nothing left to harvest nearby: replenish instead of wandering off.
+    let want_stone = match pref {
+        Some(Resource::Stone) => true,
+        Some(Resource::Wood) => false,
+        // Balanced: split the idle workforce between mining and planting.
+        None => (here.0 + here.1).rem_euclid(2) == 0,
+    };
+
+    if want_stone {
+        if let Some(c) = claim_cave(world, owner, here, home, farm) {
+            e.mine_target = Some(c);
+            if adjacent(here, c) {
+                e.harvest_timer = HARVEST_TIME;
+                set_anim(e, Anim::Act, dt);
+            } else if let Some(stand) = stand_tile(world, owner, c) {
+                if let Some(p) = pathfind::path_to(world, owner, here, stand, PATH_BUDGET) {
+                    e.set_path(p);
+                    set_anim(e, Anim::Walk, dt);
+                }
+            }
+            return None;
+        }
+        // No mine with a free slot: fall through and make ourselves useful sowing.
+    }
+
+    // Sow a sapling on fresh ground to regrow the forest.
+    if let Some((path, spot)) = plan_plant(world, owner, here, home, farm.saplings) {
+        e.target_node = Some(spot);
+        if path.is_empty() {
+            e.harvest_timer = HARVEST_TIME;
+            set_anim(e, Anim::Act, dt);
+        } else {
+            e.set_path(path);
+            set_anim(e, Anim::Walk, dt);
+        }
+        return None;
+    }
+
+    // Truly idle: potter about, but stay on the leash.
+    wander_behavior(world, e, owner, Some((home, FARMER_HOME_RADIUS)), rng, dt);
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn soldier_behavior(
     world: &World,
     e: &mut Entity,
@@ -912,7 +1249,7 @@ fn soldier_behavior(
     // Nothing to march toward (no reachable foe, no rally): wander rather than
     // hacking obstacles along a dead route.
     if e.path_done() {
-        wander_behavior(world, e, owner, rng, dt);
+        wander_behavior(world, e, owner, None, rng, dt);
         return None;
     }
 
@@ -974,7 +1311,16 @@ fn retreat_behavior(
     None
 }
 
-fn wander_behavior(world: &World, e: &mut Entity, owner: u8, rng: &mut Rng, dt: f32) {
+/// Idle roaming. When `home` is set (player farmers), wandering is confined to
+/// the leash so they never drift out of the village.
+fn wander_behavior(
+    world: &World,
+    e: &mut Entity,
+    owner: u8,
+    home: Option<(&[Tile], i32)>,
+    rng: &mut Rng,
+    dt: f32,
+) {
     if !e.path_done() {
         let moved = follow_path(e, FARMER_SPEED, dt);
         set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
@@ -988,6 +1334,11 @@ fn wander_behavior(world: &World, e: &mut Entity, owner: u8, rng: &mut Rng, dt: 
     for _ in 0..12 {
         let tx = cx + rng.range(-6, 7);
         let ty = cy + rng.range(-6, 7);
+        if let Some((h, r)) = home {
+            if !within_home(h, tx, ty, r) {
+                continue;
+            }
+        }
         if world.walkable_for(owner, tx, ty) {
             if let Some(p) = pathfind::path_to(world, owner, (cx, cy), (tx, ty), 512) {
                 if !p.is_empty() {
@@ -1047,13 +1398,14 @@ fn plan_gather(
     owner: u8,
     start: Tile,
     pref: Option<Resource>,
+    home: &[Tile],
 ) -> Option<(Vec<Tile>, Tile)> {
     if pref.is_some() {
-        if let Some(found) = plan_gather_kind(world, owner, start, pref) {
+        if let Some(found) = plan_gather_kind(world, owner, start, pref, home) {
             return Some(found);
         }
     }
-    plan_gather_kind(world, owner, start, None)
+    plan_gather_kind(world, owner, start, None, home)
 }
 
 fn plan_gather_kind(
@@ -1061,12 +1413,14 @@ fn plan_gather_kind(
     owner: u8,
     start: Tile,
     kind: Option<Resource>,
+    home: &[Tile],
 ) -> Option<(Vec<Tile>, Tile)> {
+    // Search stays inside the leash so a farmer never chases a node out of town.
     let path = pathfind::bfs(
         start,
         PATH_BUDGET,
         |x, y| world.walkable_for(owner, x, y) && neighbor_node(world, x, y, kind).is_some(),
-        |x, y| world.walkable_for(owner, x, y),
+        |x, y| within_home(home, x, y, FARMER_HOME_RADIUS) && world.walkable_for(owner, x, y),
     )?;
     let dest = path.last().copied().unwrap_or(start);
     let node = neighbor_node(world, dest.0, dest.1, kind)?;
@@ -1178,7 +1532,7 @@ fn open_tiles_near(world: &World, cx: i32, cy: i32, r: i32) -> Vec<Tile> {
 // ---------------------------------------------------------------------------
 
 const MAGIC: &[u8; 4] = b"KGDM";
-const VERSION: u8 = 5;
+const VERSION: u8 = 6;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
     b.push(v);
@@ -1333,6 +1687,9 @@ impl Game {
             for &h in &chunk.bridges {
                 wu8(&mut b, h as u8);
             }
+            for &h in &chunk.caves {
+                wu8(&mut b, h as u8);
+            }
             for w in &chunk.walls {
                 match w {
                     None => {
@@ -1426,6 +1783,7 @@ impl Game {
                 target_node: None,
                 harvest_timer: 0.0,
                 repath: 0.0,
+                mine_target: None,
             });
         }
 
@@ -1448,6 +1806,7 @@ impl Game {
                 enemy_houses: Vec::with_capacity(n_tiles),
                 bridges: Vec::with_capacity(n_tiles),
                 walls: Vec::with_capacity(n_tiles),
+                caves: Vec::with_capacity(n_tiles),
             };
             for _ in 0..n_tiles {
                 chunk.tiles.push(if r.u8()? == 1 {
@@ -1481,6 +1840,9 @@ impl Game {
                 chunk.bridges.push(r.u8()? != 0);
             }
             for _ in 0..n_tiles {
+                chunk.caves.push(r.u8()? != 0);
+            }
+            for _ in 0..n_tiles {
                 let owner = r.u8()?;
                 let hp = r.f32()?;
                 chunk.walls.push(if owner == crate::world::NO_OWNER {
@@ -1492,13 +1854,19 @@ impl Game {
             chunks.push(((cx, cy), chunk));
         }
 
-        // Rebuild player house tiles by scanning saved chunks.
+        // Rebuild the player-tile lists (houses, mines) by scanning saved chunks.
         let mut player_house_tiles = Vec::new();
+        let mut cave_tiles = Vec::new();
         for ((cx, cy), chunk) in &chunks {
             for ly in 0..CHUNK {
                 for lx in 0..CHUNK {
-                    if chunk.houses[(ly * CHUNK + lx) as usize] {
-                        player_house_tiles.push((cx * CHUNK + lx, cy * CHUNK + ly));
+                    let i = (ly * CHUNK + lx) as usize;
+                    let tile = (cx * CHUNK + lx, cy * CHUNK + ly);
+                    if chunk.houses[i] {
+                        player_house_tiles.push(tile);
+                    }
+                    if chunk.caves[i] {
+                        cave_tiles.push(tile);
                     }
                 }
             }
@@ -1517,6 +1885,8 @@ impl Game {
             units_lost,
             rally_point: None,
             player_house_tiles,
+            cave_tiles,
+            saplings: Vec::new(),
             player_bridges,
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
             player_spawn_timer: PLAYER_SPAWN_INTERVAL,
