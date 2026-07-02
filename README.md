@@ -18,9 +18,12 @@ both natively and in the browser (via WebGL) using **Trunk**.
 - **Infinite, chunked world.** The map is divided into 32×32 tile chunks
   generated on demand from the seed as you explore, so the world is effectively
   endless. Terrain uses [FastNoise Lite](https://crates.io/crates/fastnoise-lite):
-  an elevation field decides land vs. water and a second noise field scatters
-  forests (wood) and ore (stone). Narrow water channels are automatically
-  spanned with **bridges** so landmasses stay connected.
+  a low-frequency continental field carves broad **continents** out of wide
+  **oceans** (with a guaranteed home continent at the origin), a finer field
+  roughens the coastlines, and another scatters forests (wood) and ore (stone).
+  Occasional inland **lakes** dot the land, and the starting village's lake is
+  linked to the sea by a carved **river**. Narrow water channels are auto-spanned
+  with **bridges** so landmasses stay connected.
 - **Saving.** Save any time to a custom binary `.dat` blob (magic `KGDM`) that
   captures the seed, stockpile, stats, every unit, and all edited chunks
   (buildings, bridges, depleted resources). Native builds write a file
@@ -31,25 +34,29 @@ both natively and in the browser (via WebGL) using **Trunk**.
 - **Knights** seek out and **attack** the enemy faction. Both sides take damage
   in melee; HP bars appear above wounded units. Set a **rally flag** (left-click
   in rally mode; right-click to clear) to pull them to a point.
-- **Three factions** (you = blue, enemy = red, allies = green). The **enemy**
-  holds **four villages** and is hostile to everyone; their soldiers stream out
-  to hunt you. The **allies** hold villages on far-off coasts: they trade with
-  you and attack the enemy on their own, but never join your battles and never
-  fight you.
-- **Your village.** You begin controlling a single village near the origin.
-  Villages change hands per-camp: leave one undefended with an enemy inside and
-  you lose it (your knights auto-rally to retake it); strip an enemy village of
-  its defenders and stand a unit in it to capture it. (Allied villages can't be
-  captured.)
+- **Three factions** (you = blue, enemy = red, allies = green). The **enemy** is
+  hostile to everyone; their soldiers stream out to hunt you. The **allies** hold
+  villages on coasts across the sea: they trade with you and attack the enemy on
+  their own, but never join your battles and never fight you. Both start with a
+  few villages, and **more enemy and allied villages keep being founded over
+  time**, spreading ever farther out across the endless map.
+- **Your village.** You begin controlling a single village on the **coast** near
+  the origin — right by the sea, giving your cargo ships a home port. Villages
+  change hands per-camp: leave one undefended with an enemy inside and you lose it
+  (your knights auto-rally to retake it); strip an enemy village of its defenders
+  and stand a unit in it to capture it. (Allied villages can't be captured.)
 - **Priorities.** Toggle **Agriculture / Military** to bias which workers your
   houses raise, and **Balanced / Wood / Stone** to steer what farmers gather.
 - **Economy.** Alongside wood and stone you keep a purse of **gold**. You start
   with some seed gold; every new **knight** costs gold to arm (a broke village
   raises a free farmer instead), and most structures cost gold too.
 - **Trade.** Load wood and stone onto a **cargo ship** and left-click open water
-  to launch it. It charts a water route to the **nearest allied coast** (never
-  crossing land) and sells the goods for gold on arrival — **stone fetches more
-  than wood**.
+  **in your harbour** (ships launch only from near your village) to send it off.
+  It charts a water route to the **nearest allied coast** (never crossing land)
+  and sells the goods for gold on arrival — **stone fetches more than wood**.
+- **Pirates.** Rare **pirate ships** roam the open ocean, hunt your cargo ships,
+  and fire **cannonballs**; a hit **sinks the ship and its cargo**. They keep to
+  the deep sea and never enter rivers or lakes.
 - **Building.** Left-click to build:
   - a **House** on open grass (wood + stone + gold) — only *next to your existing
     village*, so your territory grows organically. Houses raise your population

@@ -4,9 +4,9 @@ comments: true
 
 # The World
 
-Every island is generated from a single **seed**, so the same seed always
+Every world is generated from a single **seed**, so the same seed always
 produces the same map. The world is effectively **endless** — it's built lazily
-as you explore.
+as you explore, a sprawl of **continents** scattered across open **ocean**.
 
 ## Chunks
 
@@ -19,10 +19,20 @@ depleted resources) are remembered and saved.
 
 Terrain comes from [FastNoise Lite](https://crates.io/crates/fastnoise-lite):
 
-- An **elevation** noise field decides **land versus water**.
-- A second noise field scatters **resources** across the land:
+- A low-frequency **continental** noise field shapes the big picture — broad
+  **continents** separated by wide **oceans** — while a finer field roughens the
+  coastlines into ragged, natural shores. A **home continent** is always raised
+  around the origin, so you never start adrift at sea.
+- A separate noise field scatters **resources** across the land:
     - **Forests** — trees, your source of 🪵 **wood**.
     - **Ore** — rocks, your source of 🪨 **stone**.
+
+## Lakes and rivers
+
+Occasional small **lakes** dot the interior of the larger landmasses. When your
+starting village happens to sit beside one, a **river** is carved from that lake
+out to the open sea — so a cargo ship launched in your harbour can always reach
+the coast, even from an inland pool.
 
 ## Bridges
 
@@ -44,10 +54,17 @@ to cross wider water.
 
 At world creation the generator places:
 
-- **Your village** near the origin — the settlement you start controlling.
-- **Four enemy villages** scattered around the island, each with its own units.
-- **Two allied villages** planted on far-off coasts — friendly [trade
+- **Your village** on the **coast** nearest the origin — the settlement you start
+  controlling, right by the water so your cargo ships have a home port.
+- A handful of **enemy villages** on your home continent, each with its own units.
+- A couple of **allied villages** across the sea — friendly [trade
   partners](gameplay.md#factions) your cargo ships sail to.
+
+Because the map is endless, it keeps filling in: **new enemy and allied villages
+are founded over time**, each planted farther out on an ever-widening frontier
+and spaced apart, so the world never runs out of rivals to fight or partners to
+trade with. Allied villages are always raised on coasts **across open water** from
+you — the only way to reach them is by [ship](building.md#ship-goods).
 
 How these change hands is covered in
 [Capturing villages](gameplay.md#capturing-villages).

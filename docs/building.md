@@ -13,7 +13,7 @@ anywhere on the map.
 !!! note "Most things cost gold"
     Alongside wood and stone, most structures now also cost **gold**, and every
     new **knight** does too. Gold is earned by shipping goods off to a far-away
-    village — see **[Trade](#-ship-goods)**. Bridges are the one exception: they
+    village — see **[Trade](#ship-goods)**. Bridges are the one exception: they
     stay gold-free, so you can always reach the coast to trade even when broke.
 
 ## House
@@ -82,21 +82,28 @@ Clicking a pending order again cancels it and refunds the gold.
 | | |
 | --- | --- |
 | **Cost** | the wood + stone you load |
-| **Where** | Open water |
+| **Where** | Open water next to your village |
 
 Trade is your gold engine. Set how much **wood** and **stone** to load in the
 HUD's **Trade** section — the panel shows the projected **payout** — then pick
-**Ship goods** mode and **left-click open water** to launch a laden cargo ship.
+**Ship goods** mode and **left-click open water in your harbour** to launch a laden
+cargo ship. Ships can only set sail from **near your own village**, not from any
+far-off stretch of coast.
 
 The ship charts a course **over water to the nearest allied coast** (see
 **[Factions](gameplay.md#factions)**) and never sails through land. When it docks
 there the goods are sold and the gold is banked. **Stone fetches more than wood**
 (5 vs 2 gold per unit), so a stone-heavy hold pays best.
 
+!!! warning "Pirates raid the shipping lanes"
+    Rare **pirate ships** patrol the open ocean and fire cannonballs at any cargo
+    ship they catch. A ship that's hit is **sunk with its cargo** — no gold, no
+    refund. See **[Units & Combat](units.md#pirates)**.
+
 !!! note "You need a sea route to an ally"
     If there's no water path from the launch tile to any allied shore, the ship
-    won't set off and your cargo stays in the hold. Build **bridges** toward the
-    open sea, or launch from a different stretch of coast.
+    won't set off and your cargo stays in the hold. (Your village always sits on
+    the sea — via a coast or a river to it — so a route out is normally at hand.)
 
 ## ⚑ Rally
 

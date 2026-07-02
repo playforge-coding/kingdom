@@ -354,6 +354,25 @@ impl State {
             out.push(quad([s.pos.x - 1.0, s.pos.y - 1.0], [2.0, 2.0], uv));
         }
 
+        // Pirate ships: a 32x32 directional sprite (columns face left, up, down,
+        // right), drawn over a 2x2-tile footprint.
+        for p in game.pirates() {
+            let col = match p.facing {
+                Dir::Left => 0,
+                Dir::Up => 1,
+                Dir::Down => 2,
+                Dir::Right => 3,
+            };
+            let uv = self.atlas.frame_uv("pirate_ship", col, 0);
+            out.push(quad([p.pos.x - 1.0, p.pos.y - 1.0], [2.0, 2.0], uv));
+        }
+
+        // Cannonballs in flight: a small sprite centred on the shot.
+        let cannonball = self.atlas.uv("cannonball");
+        for b in game.cannonballs() {
+            out.push(quad([b.pos.x - 0.2, b.pos.y - 0.2], [0.4, 0.4], cannonball));
+        }
+
         // Pending hut orders: a ghostly hut on each tree awaiting a builder.
         for &(ox, oy) in game.hut_orders() {
             out.push(tinted(

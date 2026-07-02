@@ -201,6 +201,31 @@ pub const WOOD_PRICE: u32 = 2;
 pub const STONE_PRICE: u32 = 5;
 /// How fast a laden cargo ship sails out to sea (tiles/second).
 const SHIP_SPEED: f32 = 3.2;
+
+// Pirates: a rare hazard that patrols the open ocean and shells cargo ships.
+/// Most pirate ships prowling at once — kept small so they stay a rare menace.
+const MAX_PIRATES: usize = 3;
+/// Seconds between chances to spawn another pirate (long — they are uncommon).
+const PIRATE_SPAWN_INTERVAL: f32 = 75.0;
+/// A water tile counts as open ocean (where pirates spawn and sail) only if at
+/// least this many of its 8 neighbours are also water — which excludes narrow
+/// rivers and lake mouths, keeping pirates out on the true sea.
+const OPEN_SEA_NEIGHBOURS: i32 = 6;
+/// Pirate sailing speed (tiles/second) — a touch slower than a laden cargo ship,
+/// so a ship that slips past has a chance to outrun the guns.
+const PIRATE_SPEED: f32 = 2.6;
+/// A pirate steers toward a cargo ship within this range, else it wanders.
+const PIRATE_DETECT_RANGE: f32 = 26.0;
+/// A pirate fires once a cargo ship is within this range.
+const PIRATE_FIRE_RANGE: f32 = 9.0;
+/// Seconds between a pirate's cannon shots.
+const PIRATE_RELOAD: f32 = 2.2;
+/// Cannonball flight speed (tiles/second).
+const CANNONBALL_SPEED: f32 = 8.0;
+/// Seconds a cannonball flies before splashing down.
+const CANNONBALL_LIFE: f32 = 2.5;
+/// A cannonball this close to a cargo ship's hull sinks it.
+const CANNONBALL_HIT_RADIUS: f32 = 0.8;
 /// Water tiles a ship's route search may explore before giving up. Generous, as
 /// allied coasts can be far across open ocean; the search runs once, on launch.
 /// Sized to comfortably reach the nearest overseas ally (a disc of ~200-tile
@@ -378,6 +403,29 @@ pub struct Ship {
     pub bob: f32,
 }
 
+/// A pirate ship: a rare raider that prowls the open ocean and lobs cannonballs
+/// at the player's passing cargo ships. Purely transient — not saved.
+pub struct Pirate {
+    pub pos: Vec2,
+    /// Heading, for both movement and which directional sprite frame to draw.
+    pub facing: Dir,
+    vel: Vec2,
+    /// Countdown to the next random change of course while wandering.
+    wander: f32,
+    /// Cannon cooldown.
+    reload: f32,
+    /// Seconds afloat, for the sprite's gentle bob.
+    pub bob: f32,
+}
+
+/// A cannonball in flight, fired by a pirate at a cargo ship. Transient.
+pub struct Cannonball {
+    pub pos: Vec2,
+    vel: Vec2,
+    /// Seconds before it splashes down harmlessly.
+    life: f32,
+}
+
 /// Which kind of villager the player's houses favour raising.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
@@ -427,6 +475,11 @@ pub struct Game {
     pub ship_stone: u32,
     /// Cargo ships currently at sea, sailing out to sell their goods.
     ships: Vec<Ship>,
+    /// Pirate raiders prowling the open ocean (transient — not saved).
+    pirates: Vec<Pirate>,
+    /// Cannonballs in flight (transient — not saved).
+    cannonballs: Vec<Cannonball>,
+    pirate_spawn_timer: f32,
     pub build_mode: BuildMode,
     pub priority: Priority,
     pub gather_priority: GatherPriority,
@@ -628,6 +681,9 @@ impl Game {
             ship_wood: 20,
             ship_stone: 20,
             ships: Vec::new(),
+            pirates: Vec::new(),
+            cannonballs: Vec::new(),
+            pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
             build_mode: BuildMode::House,
             priority: Priority::Agriculture,
             gather_priority: GatherPriority::Balanced,
@@ -969,6 +1025,7 @@ impl Game {
         self.clear_reached_rally();
         self.resolve_captures();
         self.update_ships(dt);
+        self.update_pirates(dt);
     }
 
     /// Sail cargo ships along their water route. A ship is always simulated (even
@@ -998,6 +1055,142 @@ impl Game {
     /// Ships currently at sea, for rendering.
     pub fn ships(&self) -> &[Ship] {
         &self.ships
+    }
+
+    /// Pirate ships prowling the ocean, for rendering.
+    pub fn pirates(&self) -> &[Pirate] {
+        &self.pirates
+    }
+
+    /// Cannonballs in flight, for rendering.
+    pub fn cannonballs(&self) -> &[Cannonball] {
+        &self.cannonballs
+    }
+
+    /// Spawn (rarely) and sail the pirates: they hunt any cargo ship they can
+    /// see, keep to the open ocean, shell ships in range, and fly cannonballs
+    /// that sink a hull on contact.
+    fn update_pirates(&mut self, dt: f32) {
+        self.pirate_spawn_timer -= dt;
+        if self.pirate_spawn_timer <= 0.0 {
+            self.pirate_spawn_timer = PIRATE_SPAWN_INTERVAL;
+            if self.pirates.len() < MAX_PIRATES {
+                self.try_spawn_pirate();
+            }
+        }
+
+        for i in 0..self.pirates.len() {
+            let pp = self.pirates[i].pos;
+            let (px, py) = (pp.x.floor() as i32, pp.y.floor() as i32);
+            // Keep the sea around the pirate real, so tile reads aren't the
+            // default-water of ungenerated chunks.
+            self.world.ensure_region(px - 4, py - 4, px + 4, py + 4);
+
+            // Steer toward the nearest cargo ship in sight, else wander.
+            let mut target: Option<Vec2> = None;
+            let mut best = PIRATE_DETECT_RANGE;
+            for s in &self.ships {
+                let d = (s.pos - pp).length();
+                if d < best {
+                    best = d;
+                    target = Some(s.pos);
+                }
+            }
+            if let Some(t) = target {
+                self.pirates[i].vel = (t - pp).normalize_or_zero() * PIRATE_SPEED;
+            } else {
+                self.pirates[i].wander -= dt;
+                if self.pirates[i].wander <= 0.0 {
+                    self.pirates[i].vel = rand_unit(&mut self.rng) * PIRATE_SPEED;
+                    self.pirates[i].wander = 2.0 + self.rng.range(0, 300) as f32 / 100.0;
+                }
+            }
+
+            // Move, but only onto open sea — this is what keeps pirates out of
+            // rivers and lakes; blocked, they turn onto a fresh heading.
+            let cand = self.pirates[i].pos + self.pirates[i].vel * dt;
+            if open_sea(&self.world, cand.x.floor() as i32, cand.y.floor() as i32) {
+                self.pirates[i].pos = cand;
+            } else {
+                self.pirates[i].vel = rand_unit(&mut self.rng) * PIRATE_SPEED;
+                self.pirates[i].wander = 0.5;
+            }
+            if self.pirates[i].vel.length_squared() > 1e-4 {
+                self.pirates[i].facing = dir_from_vec(self.pirates[i].vel);
+            }
+            self.pirates[i].bob += dt;
+
+            // Fire on a ship in range.
+            self.pirates[i].reload -= dt;
+            if self.pirates[i].reload <= 0.0 {
+                let pp = self.pirates[i].pos;
+                let mut aim: Option<Vec2> = None;
+                let mut best = PIRATE_FIRE_RANGE;
+                for s in &self.ships {
+                    let d = (s.pos - pp).length();
+                    if d < best {
+                        best = d;
+                        aim = Some(s.pos);
+                    }
+                }
+                if let Some(t) = aim {
+                    let dir = (t - pp).normalize_or_zero();
+                    self.cannonballs.push(Cannonball {
+                        pos: pp,
+                        vel: dir * CANNONBALL_SPEED,
+                        life: CANNONBALL_LIFE,
+                    });
+                    self.pirates[i].reload = PIRATE_RELOAD;
+                }
+            }
+        }
+
+        // Fly the cannonballs; a hit sinks the cargo ship (its goods are lost).
+        let mut ci = 0;
+        while ci < self.cannonballs.len() {
+            self.cannonballs[ci].life -= dt;
+            let step = self.cannonballs[ci].vel * dt;
+            self.cannonballs[ci].pos += step;
+            let bp = self.cannonballs[ci].pos;
+            let hit = self
+                .ships
+                .iter()
+                .position(|s| (s.pos - bp).length() < CANNONBALL_HIT_RADIUS);
+            if let Some(si) = hit {
+                log::info!("a cargo ship was sunk by pirates — its cargo lost at sea!");
+                self.ships.swap_remove(si);
+                self.cannonballs.swap_remove(ci);
+            } else if self.cannonballs[ci].life <= 0.0 {
+                self.cannonballs.swap_remove(ci);
+            } else {
+                ci += 1;
+            }
+        }
+    }
+
+    /// Try to drop a new pirate onto an open-ocean tile out beyond the player's
+    /// home shore, where the shipping lanes run. Gives up quietly if no open sea
+    /// turns up in a handful of tries.
+    fn try_spawn_pirate(&mut self) {
+        let center = self.start_center();
+        for _ in 0..14 {
+            let a = self.rng.range(0, 62832) as f32 / 10000.0;
+            let r = 45.0 + self.rng.range(0, 95) as f32; // 45..140 tiles out
+            let x = (center.x + a.cos() * r).floor() as i32;
+            let y = (center.y + a.sin() * r).floor() as i32;
+            self.world.ensure_region(x - 2, y - 2, x + 2, y + 2);
+            if open_sea(&self.world, x, y) {
+                self.pirates.push(Pirate {
+                    pos: tile_center((x, y)),
+                    facing: Dir::Down,
+                    vel: rand_unit(&mut self.rng) * PIRATE_SPEED,
+                    wander: 1.0 + self.rng.range(0, 200) as f32 / 100.0,
+                    reload: PIRATE_RELOAD,
+                    bob: 0.0,
+                });
+                return;
+            }
+        }
     }
 
     /// Gold the next dispatched ship would fetch, given the current load and
@@ -2515,6 +2708,31 @@ fn reachable_overseas_coasts(
     coasts
 }
 
+/// Is `(x, y)` open ocean — water (and not a bridge) with enough water around it
+/// to be the true sea rather than a river or lake mouth? Pirates only spawn on
+/// and sail across such tiles, so they never wander up rivers into the interior.
+fn open_sea(world: &World, x: i32, y: i32) -> bool {
+    use crate::world::Tile as WTile;
+    if world.tile(x, y) != WTile::Water || world.is_bridge(x, y) {
+        return false;
+    }
+    let mut water = 0;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            if (dx, dy) != (0, 0) && world.tile(x + dx, y + dy) == WTile::Water {
+                water += 1;
+            }
+        }
+    }
+    water >= OPEN_SEA_NEIGHBOURS
+}
+
+/// A random unit vector, for pirate wandering.
+fn rand_unit(rng: &mut Rng) -> Vec2 {
+    let a = rng.range(0, 62832) as f32 / 10000.0;
+    Vec2::new(a.cos(), a.sin())
+}
+
 /// The open-water tile nearest `(cx, cy)` within radius `r` (Chebyshev).
 fn nearest_water(world: &mut World, cx: i32, cy: i32, r: i32) -> Option<Tile> {
     world.ensure_region(cx - r, cy - r, cx + r, cy + r);
@@ -3106,6 +3324,9 @@ impl Game {
             ship_wood,
             ship_stone,
             ships,
+            pirates: Vec::new(),
+            cannonballs: Vec::new(),
+            pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
             build_mode,
             priority,
             gather_priority,

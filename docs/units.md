@@ -38,10 +38,29 @@ pressure.
 
 ## Enemies
 
-The four enemy villages each field their own units. Enemy soldiers **stream out
-to hunt your units**, so an undefended settlement won't stay yours for long.
-Enemy villages can be **captured** the same way yours can be lost — see
+The enemy villages each field their own units, and **more are founded over time**
+as the map expands. Enemy soldiers **stream out to hunt your units**, so an
+undefended settlement won't stay yours for long. Enemy villages can be
+**captured** the same way yours can be lost — see
 [Capturing villages](gameplay.md#capturing-villages).
+
+## Pirates
+
+Out on the **open ocean** lurk rare **pirate ships** — a hazard to your trade
+rather than a faction you fight on land. They:
+
+- **Keep to the open sea.** Pirates never enter rivers or lakes, so they can't
+  reach inland water or come ashore — they haunt the deep water your shipping
+  lanes cross.
+- **Hunt cargo ships.** A pirate that spots one of your
+  [cargo ships](building.md#ship-goods) gives chase and, once in range, opens
+  fire with **cannonballs**.
+- **Sink on a hit.** A cannonball that strikes a cargo ship **sinks it, cargo and
+  all** — the goods are lost at sea and no gold is paid.
+
+They're uncommon, but a laden ship is a tempting target. Losing a stone-heavy
+hold to pirates stings, so time your shipments rather than sending everything at
+once.
 
 ## Combat resolution
 

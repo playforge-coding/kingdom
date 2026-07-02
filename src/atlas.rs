@@ -124,6 +124,8 @@ pub fn build() -> Atlas {
         "../assets/textures/entities/ally_swordsman.png"
     ));
     let cargo_ship = load(include_bytes!("../assets/textures/entities/cargo_ship.png"));
+    let pirate_ship = load(include_bytes!("../assets/textures/entities/pirate_ship.png"));
+    let cannonball = load(include_bytes!("../assets/textures/entities/cannonball.png"));
 
     let sources = vec![
         Source::sprite("white", white_pixel()),
@@ -151,6 +153,11 @@ pub fn build() -> Atlas {
         Source::sheet("ally_knight", ally_knight, 5, 12),
         // Cargo ship: 3 columns x 1 row of 32x32 frames (a gentle bob).
         Source::sheet("cargo_ship", cargo_ship, 3, 1),
+        // Pirate ship: 4 columns x 1 row of 32x32 frames, facing left, up,
+        // down, right (in that column order).
+        Source::sheet("pirate_ship", pirate_ship, 4, 1),
+        // Cannonball: a single small sprite.
+        Source::sprite("cannonball", cannonball),
     ];
 
     pack(sources)
