@@ -71,15 +71,33 @@ rather than a faction you fight on land. They:
 - **Keep to the open sea.** Pirates never enter rivers or lakes, so they can't
   reach inland water or come ashore — they haunt the deep water your shipping
   lanes cross.
-- **Hunt cargo ships.** A pirate that spots one of your
-  [cargo ships](building.md#ship-goods) gives chase and, once in range, opens
-  fire with **cannonballs**.
-- **Sink on a hit.** A cannonball that strikes a cargo ship **sinks it, cargo and
-  all** — the goods are lost at sea and no gold is paid.
+- **Hunt your vessels.** A pirate that spots one of your
+  [cargo ships](building.md#ship-goods) — or a [warship](building.md#warship-the-navy) —
+  gives chase and, once in range, opens fire with **cannonballs**. It holds a
+  short **standoff** and shells from there rather than piling onto the hull.
+- **Sink cargo on a hit.** A cannonball that strikes a cargo ship **sinks it,
+  cargo and all** — the goods are lost at sea and no gold is paid. Warships are
+  armoured and instead lose **hull** with each hit, sinking only when it runs out.
 
 They're uncommon, but a laden ship is a tempting target. Losing a stone-heavy
-hold to pirates stings, so time your shipments rather than sending everything at
-once.
+hold to pirates stings, so time your shipments — or send a warship escort.
+
+## The navy
+
+Build a **[warship](building.md#warship-the-navy)** and the player gains a
+seafaring military that fights on its own:
+
+- **Attacks pirates.** A warship hunts the nearest pirate, closes to a standoff,
+  and **shells it with cannonballs**. It's tougher and quicker-firing than a
+  pirate, so it wins a straight duel and keeps the shipping lanes clear.
+- **Shells enemies ashore.** It also fires on enemy land units, holding position
+  **out in the water** — it never leaves the sea, so it bombards the coast from a
+  distance and can't reach foes far inland.
+- **Makes for the open ocean when idle.** With no quarry in sight, a warship
+  sails out to the **deep sea** and patrols there, so it's already on the shipping
+  lanes when the next raider appears.
+- **Has a hull bar** and can be **sunk by pirate fire**; pair up warships against
+  a pack of raiders.
 
 ## Combat resolution
 

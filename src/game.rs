@@ -214,18 +214,58 @@ const OPEN_SEA_NEIGHBOURS: i32 = 6;
 /// Pirate sailing speed (tiles/second) — a touch slower than a laden cargo ship,
 /// so a ship that slips past has a chance to outrun the guns.
 const PIRATE_SPEED: f32 = 2.6;
-/// A pirate steers toward a cargo ship within this range, else it wanders.
+/// A pirate steers toward a target within this range, else it wanders.
 const PIRATE_DETECT_RANGE: f32 = 26.0;
-/// A pirate fires once a cargo ship is within this range.
+/// A pirate fires once its quarry is within this range.
 const PIRATE_FIRE_RANGE: f32 = 9.0;
 /// Seconds between a pirate's cannon shots.
 const PIRATE_RELOAD: f32 = 2.2;
+/// A gunship holds *this* far off its quarry — close enough to shell it, far
+/// enough not to pile on top of it. Applies to both pirates and the navy, and
+/// is what stops raiders stacking on the hull they're firing at.
+const GUNSHIP_STANDOFF: f32 = 5.0;
+/// Hit points of a pirate ship; sunk by naval cannon fire once it hits zero.
+const PIRATE_MAX_HP: f32 = 60.0;
 /// Cannonball flight speed (tiles/second).
 const CANNONBALL_SPEED: f32 = 8.0;
 /// Seconds a cannonball flies before splashing down.
 const CANNONBALL_LIFE: f32 = 2.5;
-/// A cannonball this close to a cargo ship's hull sinks it.
+/// A cannonball this close to a cargo ship's hull sinks it (also its blast
+/// radius against warships, pirates, and land units).
 const CANNONBALL_HIT_RADIUS: f32 = 0.8;
+/// Damage a cannonball deals to an armed target (a warship, a pirate, or a
+/// land unit). Cargo ships are unarmed and sink from a single hit regardless.
+const CANNON_DAMAGE: f32 = 30.0;
+
+// The navy: player-built warships that patrol the coast, hunt pirates, and
+// bombard enemies ashore from the safety of the water.
+/// A warship costs wood, stone, and a good deal of gold to lay down.
+pub const WARSHIP_WOOD_COST: u32 = 20;
+pub const WARSHIP_STONE_COST: u32 = 10;
+pub const WARSHIP_GOLD_COST: u32 = 60;
+/// Warship hull strength — tougher than a pirate, so one wins a straight duel.
+const WARSHIP_MAX_HP: f32 = 130.0;
+/// Warship cruising speed (tiles/second).
+const WARSHIP_SPEED: f32 = 2.8;
+/// A warship engages any hostile — pirate or enemy ashore — within this range.
+const WARSHIP_DETECT_RANGE: f32 = 30.0;
+/// A warship opens fire once a target is within this range.
+const WARSHIP_FIRE_RANGE: f32 = 10.0;
+/// Seconds between a warship's cannon shots.
+const WARSHIP_RELOAD: f32 = 1.8;
+/// Water tiles a warship's route search may explore. Its quarry is always within
+/// `WARSHIP_DETECT_RANGE`, so a modest budget covers the local coastline while
+/// keeping the occasional re-planning cheap.
+const NAVY_PATH_BUDGET: usize = 8_000;
+/// A warship only re-plots its course when the target drifts this far from where
+/// it was when the route was laid — so it commits to a steady heading and only
+/// recomputes when a pirate has genuinely moved on.
+const WARSHIP_REPLAN_MOVE: f32 = 5.0;
+/// How far around an idle warship to generate the sea when planning a patrol, so
+/// its search for the open ocean has real tiles to find.
+const PATROL_SCAN: i32 = 48;
+/// How far an idle warship roams for its next waypoint once out on the open sea.
+const PATROL_WANDER: i32 = 20;
 /// Water tiles a ship's route search may explore before giving up. Generous, as
 /// allied coasts can be far across open ocean; the search runs once, on launch.
 /// Sized to comfortably reach the nearest overseas ally (a disc of ~200-tile
@@ -388,6 +428,9 @@ pub enum BuildMode {
     /// Left-click open water to launch a cargo ship laden with the configured
     /// wood/stone; it sails off to sell the goods at a far-away village.
     Ship,
+    /// Left-click open water by the village to lay down a warship: it patrols
+    /// the coast, hunts pirates, and shells enemies ashore.
+    Warship,
 }
 
 /// A sown sapling growing toward a harvestable tree (`grow` runs 0 → 1).
@@ -409,6 +452,8 @@ pub struct Ship {
     reward: u32,
     /// Seconds afloat, used to animate the gentle bob of the sprite.
     pub bob: f32,
+    /// Heading, picking which directional sprite frame to draw.
+    pub facing: Dir,
 }
 
 /// A pirate ship: a rare raider that prowls the open ocean and lobs cannonballs
@@ -424,14 +469,60 @@ pub struct Pirate {
     reload: f32,
     /// Seconds afloat, for the sprite's gentle bob.
     pub bob: f32,
+    /// Hull strength; the pirate sinks when naval fire drives it to zero.
+    hp: f32,
 }
 
-/// A cannonball in flight, fired by a pirate at a cargo ship. Transient.
+impl Pirate {
+    /// Remaining hull as a 0–1 fraction, for the HP bar.
+    pub fn hp_ratio(&self) -> f32 {
+        (self.hp / PIRATE_MAX_HP).clamp(0.0, 1.0)
+    }
+}
+
+/// A player-built warship — the navy. It cruises the water, hunts pirates, and
+/// bombards enemies ashore from a standoff, never leaving the sea. Persistent
+/// (saved) like the cargo fleet.
+pub struct Warship {
+    pub pos: Vec2,
+    /// Heading, driving both movement and the directional sprite frame.
+    pub facing: Dir,
+    /// Smoothed water route the ship is following — straight line-of-sight legs
+    /// to a firing position off a target, or to a patrol waypoint. Empty means
+    /// holding station.
+    path: Vec<Tile>,
+    path_cursor: usize,
+    /// Where the target was when the current route was planned; a big move from
+    /// here triggers a re-plan (a still target is never re-planned, so the ship
+    /// commits to a steady heading instead of twitching).
+    plan_pos: Vec2,
+    /// Fallback re-plan timer, so a stuck ship eventually tries a fresh course.
+    repath: f32,
+    /// Cannon cooldown.
+    reload: f32,
+    /// Seconds afloat, for the sprite's gentle bob.
+    pub bob: f32,
+    /// Hull strength; the warship sinks when pirate fire drives it to zero.
+    hp: f32,
+}
+
+impl Warship {
+    /// Remaining hull as a 0–1 fraction, for the HP bar.
+    pub fn hp_ratio(&self) -> f32 {
+        (self.hp / WARSHIP_MAX_HP).clamp(0.0, 1.0)
+    }
+}
+
+/// A cannonball in flight. `from_pirate` decides who it can hurt: a pirate's
+/// shot sinks player vessels, a warship's shot harms pirates and land enemies.
 pub struct Cannonball {
     pub pos: Vec2,
     vel: Vec2,
     /// Seconds before it splashes down harmlessly.
     life: f32,
+    /// True if fired by a pirate (targets the player's ships), false if fired
+    /// by a warship (targets pirates and enemies ashore).
+    from_pirate: bool,
 }
 
 /// Which kind of villager the player's houses favour raising.
@@ -483,6 +574,8 @@ pub struct Game {
     pub ship_stone: u32,
     /// Cargo ships currently at sea, sailing out to sell their goods.
     ships: Vec<Ship>,
+    /// The player's navy — warships patrolling the water.
+    warships: Vec<Warship>,
     /// Pirate raiders prowling the open ocean (transient — not saved).
     pirates: Vec<Pirate>,
     /// Cannonballs in flight (transient — not saved).
@@ -693,6 +786,7 @@ impl Game {
             ship_wood: 20,
             ship_stone: 20,
             ships: Vec::new(),
+            warships: Vec::new(),
             pirates: Vec::new(),
             cannonballs: Vec::new(),
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
@@ -1040,6 +1134,10 @@ impl Game {
         self.resolve_captures();
         self.update_ships(dt);
         self.update_pirates(dt);
+        // Sail the navy after the pirates so warships react to this frame's
+        // pirate positions, then fly every cannonball both sides fired.
+        self.update_navy(dt);
+        self.update_cannonballs(dt);
     }
 
     /// Sail cargo ships along their water route. A ship is always simulated (even
@@ -1071,6 +1169,11 @@ impl Game {
         &self.ships
     }
 
+    /// The player's warships, for rendering.
+    pub fn warships(&self) -> &[Warship] {
+        &self.warships
+    }
+
     /// Pirate ships prowling the ocean, for rendering.
     pub fn pirates(&self) -> &[Pirate] {
         &self.pirates
@@ -1100,18 +1203,19 @@ impl Game {
             // default-water of ungenerated chunks.
             self.world.ensure_region(px - 4, py - 4, px + 4, py + 4);
 
-            // Steer toward the nearest cargo ship in sight, else wander.
-            let mut target: Option<Vec2> = None;
-            let mut best = PIRATE_DETECT_RANGE;
-            for s in &self.ships {
-                let d = (s.pos - pp).length();
-                if d < best {
-                    best = d;
-                    target = Some(s.pos);
-                }
-            }
+            // Steer toward the nearest player vessel in sight — a cargo ship or
+            // a warship — else wander.
+            let target =
+                nearest_player_vessel(&self.ships, &self.warships, pp, PIRATE_DETECT_RANGE);
             if let Some(t) = target {
-                self.pirates[i].vel = (t - pp).normalize_or_zero() * PIRATE_SPEED;
+                // Close to a standoff, then hold: this is what stops a raider
+                // sailing straight onto the hull it's shelling.
+                let to = t - pp;
+                if to.length() > GUNSHIP_STANDOFF {
+                    self.pirates[i].vel = to.normalize_or_zero() * PIRATE_SPEED;
+                } else {
+                    self.pirates[i].vel = Vec2::ZERO;
+                }
             } else {
                 self.pirates[i].wander -= dt;
                 if self.pirates[i].wander <= 0.0 {
@@ -1131,55 +1235,113 @@ impl Game {
             }
             if self.pirates[i].vel.length_squared() > 1e-4 {
                 self.pirates[i].facing = dir_from_vec(self.pirates[i].vel);
+            } else if let Some(t) = target {
+                // Holding at the standoff: keep the guns trained on the quarry.
+                self.pirates[i].facing = dir_from_vec(t - pp);
             }
             self.pirates[i].bob += dt;
 
-            // Fire on a ship in range.
+            // Fire on the nearest vessel in range.
             self.pirates[i].reload -= dt;
             if self.pirates[i].reload <= 0.0 {
                 let pp = self.pirates[i].pos;
-                let mut aim: Option<Vec2> = None;
-                let mut best = PIRATE_FIRE_RANGE;
-                for s in &self.ships {
-                    let d = (s.pos - pp).length();
-                    if d < best {
-                        best = d;
-                        aim = Some(s.pos);
-                    }
-                }
-                if let Some(t) = aim {
+                if let Some(t) =
+                    nearest_player_vessel(&self.ships, &self.warships, pp, PIRATE_FIRE_RANGE)
+                {
                     let dir = (t - pp).normalize_or_zero();
                     self.cannonballs.push(Cannonball {
                         pos: pp,
                         vel: dir * CANNONBALL_SPEED,
                         life: CANNONBALL_LIFE,
+                        from_pirate: true,
                     });
                     self.pirates[i].reload = PIRATE_RELOAD;
                 }
             }
         }
+    }
 
-        // Fly the cannonballs; a hit sinks the cargo ship (its goods are lost).
+    /// Fly every cannonball a step and resolve hits. A pirate's shot sinks a
+    /// cargo ship outright or wears a warship down; a warship's shot wears a
+    /// pirate down or cuts down an enemy ashore.
+    fn update_cannonballs(&mut self, dt: f32) {
+        let r2 = CANNONBALL_HIT_RADIUS * CANNONBALL_HIT_RADIUS;
         let mut ci = 0;
         while ci < self.cannonballs.len() {
             self.cannonballs[ci].life -= dt;
             let step = self.cannonballs[ci].vel * dt;
             self.cannonballs[ci].pos += step;
             let bp = self.cannonballs[ci].pos;
-            let hit = self
-                .ships
-                .iter()
-                .position(|s| (s.pos - bp).length() < CANNONBALL_HIT_RADIUS);
-            if let Some(si) = hit {
-                log::info!("a cargo ship was sunk by pirates — its cargo lost at sea!");
-                self.ships.swap_remove(si);
-                self.cannonballs.swap_remove(ci);
-            } else if self.cannonballs[ci].life <= 0.0 {
+
+            let struck = if self.cannonballs[ci].from_pirate {
+                self.resolve_pirate_shot(bp, r2)
+            } else {
+                self.resolve_navy_shot(bp, r2)
+            };
+
+            if struck || self.cannonballs[ci].life <= 0.0 {
                 self.cannonballs.swap_remove(ci);
             } else {
                 ci += 1;
             }
         }
+    }
+
+    /// A pirate shell landing at `bp`: sinks a cargo ship outright, or chips a
+    /// warship's hull (sinking it at zero). Returns whether it struck something.
+    fn resolve_pirate_shot(&mut self, bp: Vec2, r2: f32) -> bool {
+        if let Some(si) = self
+            .ships
+            .iter()
+            .position(|s| (s.pos - bp).length_squared() < r2)
+        {
+            log::info!("a cargo ship was sunk by pirates — its cargo lost at sea!");
+            self.ships.swap_remove(si);
+            return true;
+        }
+        if let Some(wi) = self
+            .warships
+            .iter()
+            .position(|w| (w.pos - bp).length_squared() < r2)
+        {
+            self.warships[wi].hp -= CANNON_DAMAGE;
+            if self.warships[wi].hp <= 0.0 {
+                log::info!("a warship was sunk by pirates!");
+                self.warships.swap_remove(wi);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// A naval shell landing at `bp`: wears down a pirate (sinking it at zero),
+    /// or cuts down an enemy unit ashore. Returns whether it struck something.
+    fn resolve_navy_shot(&mut self, bp: Vec2, r2: f32) -> bool {
+        if let Some(pi) = self
+            .pirates
+            .iter()
+            .position(|p| (p.pos - bp).length_squared() < r2)
+        {
+            self.pirates[pi].hp -= CANNON_DAMAGE;
+            if self.pirates[pi].hp <= 0.0 {
+                log::info!("the navy sank a pirate ship!");
+                self.pirates.swap_remove(pi);
+            }
+            return true;
+        }
+        if let Some(ei) = self
+            .entities
+            .iter()
+            .position(|e| e.faction == Faction::Enemy && e.pos.distance_squared(bp) < r2)
+        {
+            self.entities[ei].hp -= CANNON_DAMAGE;
+            if self.entities[ei].hp <= 0.0 {
+                self.entities.swap_remove(ei);
+                self.enemies_defeated += 1;
+            }
+            return true;
+        }
+        false
     }
 
     /// Try to drop a new pirate onto an open-ocean tile out beyond the player's
@@ -1201,8 +1363,111 @@ impl Game {
                     wander: 1.0 + self.rng.range(0, 200) as f32 / 100.0,
                     reload: PIRATE_RELOAD,
                     bob: 0.0,
+                    hp: PIRATE_MAX_HP,
                 });
                 return;
+            }
+        }
+    }
+
+    /// Sail the navy. Each warship hunts the nearest hostile — a pirate or an
+    /// enemy ashore — closes to a standoff, and shells it, all without ever
+    /// leaving the water. With nothing to fight it makes for the open ocean and
+    /// patrols the deep sea.
+    fn update_navy(&mut self, dt: f32) {
+        for i in 0..self.warships.len() {
+            self.warships[i].bob += dt;
+            self.warships[i].reload -= dt;
+            self.warships[i].repath -= dt;
+            let wp = self.warships[i].pos;
+            let wt = (wp.x.floor() as i32, wp.y.floor() as i32);
+            // Keep the surrounding sea real so tile reads (and BFS) are accurate.
+            self.world
+                .ensure_region(wt.0 - 8, wt.1 - 8, wt.0 + 8, wt.1 + 8);
+
+            // Nearest hostile in detection range: pirate first, then any enemy
+            // land unit (the warship shells the shore from the water).
+            let mut target: Option<Vec2> = None;
+            let mut best = WARSHIP_DETECT_RANGE;
+            for p in &self.pirates {
+                let d = (p.pos - wp).length();
+                if d < best {
+                    best = d;
+                    target = Some(p.pos);
+                }
+            }
+            for e in &self.entities {
+                if e.faction != Faction::Enemy {
+                    continue;
+                }
+                let d = (e.pos - wp).length();
+                if d < best {
+                    best = d;
+                    target = Some(e.pos);
+                }
+            }
+
+            // Decide the route. Crucially this is real water pathfinding, not
+            // greedy steering: the ship BFS-routes *around* the coastline to a
+            // firing spot (then smooths the staircase into straight legs), so a
+            // target across an inlet no longer sends it circling the shore — and
+            // it commits to a heading instead of twitching every frame.
+            let holding = self.warships[i].path_cursor >= self.warships[i].path.len();
+            if let Some(t) = target {
+                // Hysteresis: hold a little past firing range once stopped, so the
+                // ship doesn't flip-flop between chasing and holding at the edge.
+                let hold_dist = if holding {
+                    WARSHIP_FIRE_RANGE + 2.5
+                } else {
+                    WARSHIP_FIRE_RANGE
+                };
+                if (t - wp).length() <= hold_dist {
+                    // In range — hold station and shell (don't ram the target).
+                    self.warships[i].path.clear();
+                    self.warships[i].path_cursor = 0;
+                } else {
+                    // Plan only when there's reason to: no course, arrived, the
+                    // quarry has moved a good way, or the stuck-timer fired.
+                    let moved_far = (t - self.warships[i].plan_pos).length() > WARSHIP_REPLAN_MOVE;
+                    if holding || moved_far || self.warships[i].repath <= 0.0 {
+                        self.warships[i].repath = 1.5;
+                        self.warships[i].plan_pos = t;
+                        let raw = plan_firing_position(&self.world, wt, t);
+                        self.warships[i].path = smooth_water_path(&self.world, wt, &raw);
+                        self.warships[i].path_cursor = 0;
+                    }
+                }
+            } else if holding || self.warships[i].repath <= 0.0 {
+                // No quarry: make for the open ocean, then wander it. Commit to
+                // one waypoint and only pick a new one on arrival (or the long
+                // stuck-timeout), so the ship holds a steady, readable heading.
+                self.warships[i].repath = 8.0;
+                let raw = plan_patrol(&mut self.world, &mut self.rng, wt);
+                self.warships[i].path = smooth_water_path(&self.world, wt, &raw);
+                self.warships[i].path_cursor = 0;
+            }
+
+            // Follow the current route. When holding (no path), face the target.
+            let moved = advance_warship(&mut self.warships[i], dt);
+            if !moved {
+                if let Some(t) = target {
+                    self.warships[i].facing = dir_from_vec(t - self.warships[i].pos);
+                }
+            }
+
+            // Fire on a target in range.
+            if self.warships[i].reload <= 0.0 {
+                let wp = self.warships[i].pos;
+                if let Some(t) = target.filter(|t| (*t - wp).length() <= WARSHIP_FIRE_RANGE) {
+                    let dir = (t - wp).normalize_or_zero();
+                    self.cannonballs.push(Cannonball {
+                        pos: wp,
+                        vel: dir * CANNONBALL_SPEED,
+                        life: CANNONBALL_LIFE,
+                        from_pirate: false,
+                    });
+                    self.warships[i].reload = WARSHIP_RELOAD;
+                }
             }
         }
     }
@@ -1723,14 +1988,46 @@ impl Game {
                 self.wood -= wood;
                 self.stone -= stone;
                 let reward = wood * WOOD_PRICE + stone * STONE_PRICE;
+                let start = tile_center((x, y));
+                let facing = path
+                    .first()
+                    .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
                 self.ships.push(Ship {
-                    pos: tile_center((x, y)),
+                    pos: start,
                     path,
                     path_cursor: 0,
                     wood,
                     stone,
                     reward,
                     bob: 0.0,
+                    facing,
+                });
+                true
+            }
+            BuildMode::Warship => {
+                // Lay down a warship in open water within the home harbour. No
+                // sea route is needed — it patrols rather than voyaging.
+                if !self.world.is_open_water(x, y)
+                    || !self.near_player_dock(x, y)
+                    || self.wood < WARSHIP_WOOD_COST
+                    || self.stone < WARSHIP_STONE_COST
+                    || self.money < WARSHIP_GOLD_COST
+                {
+                    return false;
+                }
+                self.wood -= WARSHIP_WOOD_COST;
+                self.stone -= WARSHIP_STONE_COST;
+                self.money -= WARSHIP_GOLD_COST;
+                self.warships.push(Warship {
+                    pos: tile_center((x, y)),
+                    facing: Dir::Down,
+                    path: Vec::new(),
+                    path_cursor: 0,
+                    plan_pos: Vec2::ZERO,
+                    repath: 0.0,
+                    reload: WARSHIP_RELOAD,
+                    bob: 0.0,
+                    hp: WARSHIP_MAX_HP,
                 });
                 true
             }
@@ -2481,6 +2778,9 @@ fn advance_ship(s: &mut Ship, dt: f32) -> bool {
     let to = goal - s.pos;
     let dist = to.length();
     let step = SHIP_SPEED * dt;
+    if dist > 0.0001 {
+        s.facing = dir_from_vec(to);
+    }
     if dist <= step.max(0.02) {
         s.pos = goal;
         s.path_cursor += 1;
@@ -2488,6 +2788,146 @@ fn advance_ship(s: &mut Ship, dt: f32) -> bool {
         s.pos += to / dist * step;
     }
     s.path_cursor >= s.path.len()
+}
+
+/// Steer a warship toward the current waypoint of its (smoothed) route, aiming
+/// several tiles ahead so it holds a straight, readable heading instead of
+/// staircasing tile-to-tile. Skips waypoints it has effectively reached. Returns
+/// whether it moved (false when the route is spent — i.e. holding station).
+fn advance_warship(w: &mut Warship, dt: f32) -> bool {
+    let step = WARSHIP_SPEED * dt;
+    while w.path_cursor < w.path.len() {
+        let goal = tile_center(w.path[w.path_cursor]);
+        let to = goal - w.pos;
+        let dist = to.length();
+        if dist < 0.4 {
+            // Close enough to this waypoint — lock onto the next one.
+            w.path_cursor += 1;
+            continue;
+        }
+        w.facing = dir_from_vec(to);
+        if dist <= step {
+            w.pos = goal;
+            w.path_cursor += 1;
+        } else {
+            w.pos += to / dist * step;
+        }
+        return true;
+    }
+    false
+}
+
+/// BFS a water route from `start` to a tile from which a warship can shell
+/// `target`: open water comfortably inside `WARSHIP_FIRE_RANGE`. Because it only
+/// travels open water, the ship rounds headlands and inlets instead of butting
+/// against the shore. Empty vec: already in a firing spot. Empty on failure too
+/// (target unreachable by water), which simply leaves the ship holding station.
+fn plan_firing_position(world: &World, start: Tile, target: Vec2) -> Vec<Tile> {
+    let reach2 = (WARSHIP_FIRE_RANGE - 1.0).powi(2);
+    let is_goal = |x: i32, y: i32| {
+        world.is_open_water(x, y) && (tile_center((x, y)) - target).length_squared() <= reach2
+    };
+    let passable = |x: i32, y: i32| world.is_open_water(x, y);
+    pathfind::bfs(start, NAVY_PATH_BUDGET, is_goal, passable).unwrap_or_default()
+}
+
+/// Collapse a tile-by-tile BFS route into a short list of waypoints joined by
+/// straight, all-water legs (string-pulling). The ship then sails each leg in a
+/// clean line rather than zig-zagging along the grid, which reads far better —
+/// and keeps its facing steady.
+fn smooth_water_path(world: &World, start: Tile, path: &[Tile]) -> Vec<Tile> {
+    if path.len() <= 1 {
+        return path.to_vec();
+    }
+    let mut out: Vec<Tile> = Vec::new();
+    let mut anchor = start;
+    let mut i = 0;
+    while i < path.len() {
+        // Reach as far along the route as an unbroken water sight-line allows.
+        let mut j = i;
+        while j + 1 < path.len() && water_line_of_sight(world, anchor, path[j + 1]) {
+            j += 1;
+        }
+        out.push(path[j]);
+        anchor = path[j];
+        i = j + 1;
+    }
+    out
+}
+
+/// Is every tile on the straight line from `a` to `b` open water? (Bresenham —
+/// used to straighten warship routes without cutting a corner across land.)
+fn water_line_of_sight(world: &World, a: Tile, b: Tile) -> bool {
+    let (mut x, mut y) = a;
+    let (x1, y1) = b;
+    let dx = (x1 - x).abs();
+    let dy = -(y1 - y).abs();
+    let sx = if x < x1 { 1 } else { -1 };
+    let sy = if y < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if !world.is_open_water(x, y) {
+            return false;
+        }
+        if (x, y) == (x1, y1) {
+            return true;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+/// Pick an idle warship's next route: it makes for the **open ocean** first, and
+/// only once out on the deep sea does it wander from one open-water spot to the
+/// next. Empty vec if nowhere handy is reachable (the ship then holds station).
+fn plan_patrol(world: &mut World, rng: &mut Rng, start: Tile) -> Vec<Tile> {
+    // Generate enough sea around the ship that the search for the ocean — and
+    // for open-sea neighbours — has real tiles to look at.
+    world.ensure_region(
+        start.0 - PATROL_SCAN,
+        start.1 - PATROL_SCAN,
+        start.0 + PATROL_SCAN,
+        start.1 + PATROL_SCAN,
+    );
+
+    if open_sea(world, start.0, start.1) {
+        // Already on the open ocean: wander to a nearby open-sea tile.
+        for _ in 0..16 {
+            let tx = start.0 + rng.range(-PATROL_WANDER, PATROL_WANDER + 1);
+            let ty = start.1 + rng.range(-PATROL_WANDER, PATROL_WANDER + 1);
+            if !open_sea(world, tx, ty) {
+                continue;
+            }
+            let goal = (tx, ty);
+            if let Some(p) = pathfind::bfs(
+                start,
+                NAVY_PATH_BUDGET,
+                |x, y| (x, y) == goal,
+                |x, y| world.is_open_water(x, y),
+            ) {
+                if !p.is_empty() {
+                    return p;
+                }
+            }
+        }
+        Vec::new()
+    } else {
+        // Not on the open ocean yet: sail to the nearest open-sea tile.
+        pathfind::bfs(
+            start,
+            NAVY_PATH_BUDGET,
+            |x, y| open_sea(world, x, y),
+            |x, y| world.is_open_water(x, y),
+        )
+        .unwrap_or_default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2631,21 +3071,56 @@ fn cluster(tiles: &[Tile]) -> Vec<Vec<Tile>> {
     clusters
 }
 
-/// Ensure a region and return the nearest open-grass tile to `near`.
+/// Ensure a region and return an open-grass tile to anchor a village on, near
+/// `near`. Villages **prefer to sit by the water**: a riverside or coastal spot
+/// (open water within `VILLAGE_WATER_RADIUS`) is chosen when one is available,
+/// falling back to the plain nearest land only where the area is landlocked. In
+/// a world now laced with rivers, this puts most settlements on a waterway — and
+/// squarely within reach of the navy.
 fn find_land_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile> {
-    world.ensure_region(near.0 - r, near.1 - r, near.0 + r, near.1 + r);
-    let mut best: Option<(Tile, i32)> = None;
+    // Generate a margin past `r` too, so the near-water test doesn't misread the
+    // default-water of ungenerated chunks just outside the search box as a shore.
+    world.ensure_region(
+        near.0 - r - VILLAGE_WATER_RADIUS,
+        near.1 - r - VILLAGE_WATER_RADIUS,
+        near.0 + r + VILLAGE_WATER_RADIUS,
+        near.1 + r + VILLAGE_WATER_RADIUS,
+    );
+    let mut best_waterside: Option<(Tile, i32)> = None;
+    let mut best_any: Option<(Tile, i32)> = None;
     for y in (near.1 - r)..=(near.1 + r) {
         for x in (near.0 - r)..=(near.0 + r) {
-            if world.is_open_grass(x, y) {
-                let d = (x - near.0).abs() + (y - near.1).abs();
-                if best.map_or(true, |(_, bd)| d < bd) {
-                    best = Some(((x, y), d));
-                }
+            if !world.is_open_grass(x, y) {
+                continue;
+            }
+            let d = (x - near.0).abs() + (y - near.1).abs();
+            if best_any.map_or(true, |(_, bd)| d < bd) {
+                best_any = Some(((x, y), d));
+            }
+            if has_water_within(world, x, y, VILLAGE_WATER_RADIUS)
+                && best_waterside.map_or(true, |(_, bd)| d < bd)
+            {
+                best_waterside = Some(((x, y), d));
             }
         }
     }
-    best.map(|(t, _)| t)
+    best_waterside.or(best_any).map(|(t, _)| t)
+}
+
+/// Distance (in tiles) from a village anchor within which a river or coast makes
+/// the spot "waterside" — close enough that the navy can reach it.
+const VILLAGE_WATER_RADIUS: i32 = 4;
+
+/// Is there open water within `rad` tiles (Chebyshev) of `(x, y)`?
+fn has_water_within(world: &World, x: i32, y: i32, rad: i32) -> bool {
+    for dy in -rad..=rad {
+        for dx in -rad..=rad {
+            if world.is_open_water(x + dx, y + dy) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Flood-fill the landmass the player starts on, returning every land tile
@@ -2822,6 +3297,33 @@ fn open_sea(world: &World, x: i32, y: i32) -> bool {
     water >= OPEN_SEA_NEIGHBOURS
 }
 
+/// Position of the nearest player vessel — cargo ship or warship — within `max`
+/// of `from`, if any. What a pirate hunts and shells.
+fn nearest_player_vessel(
+    ships: &[Ship],
+    warships: &[Warship],
+    from: Vec2,
+    max: f32,
+) -> Option<Vec2> {
+    let mut best = max;
+    let mut pos = None;
+    for s in ships {
+        let d = (s.pos - from).length();
+        if d < best {
+            best = d;
+            pos = Some(s.pos);
+        }
+    }
+    for w in warships {
+        let d = (w.pos - from).length();
+        if d < best {
+            best = d;
+            pos = Some(w.pos);
+        }
+    }
+    pos
+}
+
 /// A random unit vector, for pirate wandering.
 fn rand_unit(rng: &mut Rng) -> Vec2 {
     let a = rng.range(0, 62832) as f32 / 10000.0;
@@ -2970,7 +3472,7 @@ fn open_tiles_near(world: &World, cx: i32, cy: i32, r: i32) -> Vec<Tile> {
 // ---------------------------------------------------------------------------
 
 const MAGIC: &[u8; 4] = b"KGDM";
-const VERSION: u8 = 9;
+const VERSION: u8 = 10;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
     b.push(v);
@@ -3114,6 +3616,15 @@ impl Game {
                 wi32(&mut b, tx);
                 wi32(&mut b, ty);
             }
+        }
+
+        // The navy: position and remaining hull are enough; heading, patrol,
+        // and cannon state are re-derived on load.
+        wu32(&mut b, self.warships.len() as u32);
+        for w in &self.warships {
+            wf32(&mut b, w.pos.x);
+            wf32(&mut b, w.pos.y);
+            wf32(&mut b, w.hp);
         }
 
         let chunks: Vec<_> = self.world.chunks_iter().collect();
@@ -3283,6 +3794,10 @@ impl Game {
             for _ in 0..plen {
                 path.push((r.i32()?, r.i32()?));
             }
+            // Facing isn't persisted — recover it from the leg the ship is on.
+            let facing = path
+                .get(path_cursor)
+                .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - pos));
             ships.push(Ship {
                 pos,
                 path,
@@ -3291,6 +3806,25 @@ impl Game {
                 stone,
                 reward,
                 bob,
+                facing,
+            });
+        }
+
+        let wcount = r.u32()? as usize;
+        let mut warships = Vec::with_capacity(wcount);
+        for _ in 0..wcount {
+            let pos = Vec2::new(r.f32()?, r.f32()?);
+            let hp = r.f32()?;
+            warships.push(Warship {
+                pos,
+                facing: Dir::Down,
+                path: Vec::new(),
+                path_cursor: 0,
+                plan_pos: Vec2::ZERO,
+                repath: 0.0,
+                reload: WARSHIP_RELOAD,
+                bob: 0.0,
+                hp,
             });
         }
 
@@ -3419,6 +3953,7 @@ impl Game {
             ship_wood,
             ship_stone,
             ships,
+            warships,
             pirates: Vec::new(),
             cannonballs: Vec::new(),
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
@@ -3647,6 +4182,14 @@ mod tests {
             assert!(game.try_build(tile_center(port)));
             assert_eq!(game.ships().len(), 1);
 
+            // Also lay down a warship, so the navy round-trips too.
+            game.wood += WARSHIP_WOOD_COST;
+            game.stone += WARSHIP_STONE_COST;
+            game.money += WARSHIP_GOLD_COST;
+            game.build_mode = BuildMode::Warship;
+            assert!(game.try_build(tile_center(port)));
+            assert_eq!(game.warships().len(), 1);
+
             let bytes = game.to_bytes(CAM);
             let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
             assert_eq!(loaded.money, game.money);
@@ -3661,8 +4204,355 @@ mod tests {
                 game.ships()[0].path.len(),
                 "ship route lost across save",
             );
+            assert_eq!(loaded.warships().len(), 1, "navy lost across save");
+            assert_eq!(loaded.warships()[0].pos, game.warships()[0].pos);
+            assert_eq!(loaded.warships()[0].hp, game.warships()[0].hp);
             return;
         }
         panic!("no test seed had an allied coast");
+    }
+
+    #[test]
+    fn rivers_carve_the_interior() {
+        use crate::world::Tile as WTile;
+        // In the forced-land ring around the origin (where the home bias would
+        // otherwise leave dry ground), the river network should put a meaningful
+        // — but not drowning — amount of water on the map.
+        for seed in [1, 5, 9, 13] {
+            let mut world = World::new(seed);
+            let r = 100;
+            world.ensure_region(-r, -r, r, r);
+            let (mut land, mut water) = (0u32, 0u32);
+            for y in -r..=r {
+                for x in -r..=r {
+                    let d = ((x * x + y * y) as f32).sqrt();
+                    if !(34.0..=r as f32).contains(&d) {
+                        continue;
+                    }
+                    match world.tile(x, y) {
+                        WTile::Water => water += 1,
+                        WTile::Grass => land += 1,
+                    }
+                }
+            }
+            let frac = water as f32 / (land + water).max(1) as f32;
+            assert!(
+                frac > 0.08,
+                "seed {seed}: too few rivers ({:.1}% water)",
+                100.0 * frac
+            );
+            assert!(
+                frac < 0.6,
+                "seed {seed}: interior drowned ({:.1}% water)",
+                100.0 * frac
+            );
+        }
+    }
+
+    #[test]
+    fn villages_favour_the_waterside() {
+        // With rivers everywhere and anchors biased to the shore, the great
+        // majority of settlements should sit within reach of the water.
+        let (mut waterside, mut total) = (0u32, 0u32);
+        for seed in 0..12 {
+            let game = Game::new(seed);
+            for &(hx, hy) in &game.world.enemy_house_tiles {
+                total += 1;
+                let near = (-8..=8)
+                    .any(|dy| (-8..=8).any(|dx| game.world.is_open_water(hx + dx, hy + dy)));
+                if near {
+                    waterside += 1;
+                }
+            }
+        }
+        assert!(total > 0, "no enemy villages were founded");
+        let frac = waterside as f32 / total as f32;
+        assert!(
+            frac > 0.6,
+            "only {:.0}% of village houses are waterside",
+            100.0 * frac
+        );
+    }
+
+    #[test]
+    fn warship_needs_water_a_dock_and_the_resources() {
+        for seed in 0..16 {
+            let mut game = Game::new(seed);
+            let Some(port) = find_player_port(&game) else {
+                continue;
+            };
+            game.build_mode = BuildMode::Warship;
+
+            // Broke: the launch is refused and nothing is spent.
+            game.wood = WARSHIP_WOOD_COST;
+            game.stone = WARSHIP_STONE_COST;
+            game.money = WARSHIP_GOLD_COST - 1;
+            assert!(!game.try_build(tile_center(port)));
+            assert_eq!(game.warships().len(), 0);
+
+            // Funded: it lays down and the cost is deducted.
+            game.money = WARSHIP_GOLD_COST;
+            assert!(game.try_build(tile_center(port)));
+            assert_eq!(game.warships().len(), 1);
+            assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
+
+            // Dry land is no place for a warship.
+            game.wood = WARSHIP_WOOD_COST;
+            game.stone = WARSHIP_STONE_COST;
+            game.money = WARSHIP_GOLD_COST;
+            let land = game.player_house_tiles[0];
+            assert!(!game.try_build(tile_center(land)));
+            assert_eq!(game.warships().len(), 1);
+            return;
+        }
+        panic!("no test seed had a home port");
+    }
+
+    #[test]
+    fn naval_cannon_fire_hits_the_right_targets() {
+        let mut game = Game::new(1);
+        let at = |x: f32, y: f32| Vec2::new(x, y);
+        let warship = |pos| Warship {
+            pos,
+            facing: Dir::Down,
+            path: Vec::new(),
+            path_cursor: 0,
+            plan_pos: Vec2::ZERO,
+            repath: 0.0,
+            reload: 0.0,
+            bob: 0.0,
+            hp: WARSHIP_MAX_HP,
+        };
+        let pirate = |pos| Pirate {
+            pos,
+            facing: Dir::Down,
+            vel: Vec2::ZERO,
+            wander: 0.0,
+            reload: 0.0,
+            bob: 0.0,
+            hp: PIRATE_MAX_HP,
+        };
+        let ball = |pos, from_pirate| Cannonball {
+            pos,
+            vel: Vec2::ZERO,
+            life: 1.0,
+            from_pirate,
+        };
+
+        game.warships.push(warship(at(0.5, 0.5)));
+        game.pirates.push(pirate(at(20.5, 0.5)));
+
+        // A pirate's shell wears down a warship (it doesn't sink in one hit).
+        game.cannonballs.push(ball(at(0.5, 0.5), true));
+        game.update_cannonballs(0.01);
+        assert!(game.cannonballs.is_empty(), "shell should have struck");
+        assert_eq!(game.warships.len(), 1);
+        assert!(
+            game.warships[0].hp < WARSHIP_MAX_HP,
+            "warship took no damage"
+        );
+
+        // A navy shell wears down a pirate the same way.
+        game.cannonballs.push(ball(at(20.5, 0.5), false));
+        game.update_cannonballs(0.01);
+        assert!(game.cannonballs.is_empty());
+        assert_eq!(game.pirates.len(), 1);
+        assert!(game.pirates[0].hp < PIRATE_MAX_HP, "pirate took no damage");
+
+        // A navy shell cuts down an enemy ashore and tallies the kill.
+        let defeated0 = game.enemies_defeated;
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Farmer, (40, 0)));
+        let before = game.entities.len();
+        game.cannonballs.push(ball(tile_center((40, 0)), false));
+        game.update_cannonballs(0.01);
+        assert_eq!(game.entities.len(), before - 1, "enemy should be slain");
+        assert_eq!(game.enemies_defeated, defeated0 + 1);
+
+        // Friendly fire is impossible: a pirate's shell passes harmlessly over
+        // another pirate (it hits only the player's vessels), so it flies on.
+        let hp_before = game.pirates[0].hp;
+        game.cannonballs.push(ball(at(20.5, 0.5), true));
+        game.update_cannonballs(0.01);
+        assert_eq!(
+            game.pirates[0].hp, hp_before,
+            "pirates don't shell each other"
+        );
+        assert_eq!(
+            game.cannonballs.len(),
+            1,
+            "the shell struck nothing and flies on"
+        );
+    }
+
+    /// Carve an L-shaped water detour near the origin: the ship at (0,0) is
+    /// walled off from a target due north (the tile straight ahead is land), but
+    /// a channel runs east then north around to within firing range. Greedy
+    /// steering stalls against that wall; only real pathfinding gets through.
+    fn carve_detour(world: &mut World) {
+        world.ensure_region(-6, -22, 8, 6);
+        world.carve_water(0, 0);
+        world.carve_water(1, 0);
+        for y in 0..=16 {
+            world.carve_water(2, -y);
+        }
+    }
+
+    #[test]
+    fn warship_routes_are_smoothed_into_straight_legs() {
+        let mut world = World::new(1);
+        // A dead-straight east–west corridor collapses to a single far leg, so
+        // the ship sails it in one clean line instead of staircasing.
+        world.ensure_region(-2, -2, 24, 14);
+        for x in 0..=20 {
+            world.carve_water(x, 0);
+        }
+        let raw: Vec<Tile> = (1..=20).map(|x| (x, 0)).collect();
+        let smoothed = smooth_water_path(&world, (0, 0), &raw);
+        assert_eq!(smoothed, vec![(20, 0)], "straight run should be one leg");
+
+        // Add a right-angle bend; smoothing should keep only the corner and end.
+        for y in 1..=10 {
+            world.carve_water(20, y);
+        }
+        let mut raw2: Vec<Tile> = (1..=20).map(|x| (x, 0)).collect();
+        raw2.extend((1..=10).map(|y| (20, y)));
+        let s2 = smooth_water_path(&world, (0, 0), &raw2);
+        assert!(
+            s2.len() <= 3,
+            "an L-route should reduce to a couple of legs, got {}",
+            s2.len()
+        );
+        assert_eq!(*s2.last().unwrap(), (20, 10), "must still reach the end");
+    }
+
+    #[test]
+    fn warship_routes_around_land_to_a_firing_spot() {
+        let mut world = World::new(1);
+        carve_detour(&mut world);
+        let target = tile_center((0, -15)); // land, straight north of the ship
+
+        // The tile immediately toward the target is land, so a greedy step is
+        // blocked — the fix must route through open water instead.
+        assert!(
+            !world.is_open_water(0, -1),
+            "the straight-ahead tile is land"
+        );
+
+        let path = plan_firing_position(&world, (0, 0), target);
+        assert!(!path.is_empty(), "no water route found to a firing spot");
+        assert!(
+            path.iter().all(|&(x, y)| world.is_open_water(x, y)),
+            "route must stay on open water",
+        );
+        let end = *path.last().unwrap();
+        assert!(
+            (tile_center(end) - target).length() <= WARSHIP_FIRE_RANGE,
+            "route must end within firing range of the target",
+        );
+        // It genuinely detoured east first rather than heading straight at it.
+        assert!(path[0].0 > 0, "route should set off east around the wall");
+    }
+
+    #[test]
+    fn warship_navigates_an_inlet_and_shells_the_enemy() {
+        let mut game = Game::new(1);
+        // Strip the map to just our warship and one frozen enemy.
+        game.entities.clear();
+        game.pirates.clear();
+        game.warships.clear();
+        carve_detour(&mut game.world);
+
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Knight, (0, -15)));
+        let enemy_hp0 = game.entities[0].hp;
+
+        game.warships.push(Warship {
+            pos: tile_center((0, 0)),
+            facing: Dir::Down,
+            path: Vec::new(),
+            path_cursor: 0,
+            plan_pos: Vec2::ZERO,
+            repath: 0.0,
+            reload: WARSHIP_RELOAD,
+            bob: 0.0,
+            hp: WARSHIP_MAX_HP,
+        });
+
+        // Sim window far away, so the enemy's own AI never runs — only the navy
+        // (which updates every frame) and the shells it fires move.
+        let sim = (200, 200, 210, 210);
+        let mut shelled = false;
+        for _ in 0..500 {
+            game.update(0.1, sim);
+            if game.entities.is_empty() || game.entities[0].hp < enemy_hp0 {
+                shelled = true;
+                break;
+            }
+        }
+
+        assert!(!game.warships.is_empty(), "the warship should survive");
+        let d = (target_of(&game) - game.warships[0].pos).length();
+        assert!(
+            d <= WARSHIP_FIRE_RANGE + 1.5,
+            "warship never reached firing range (d={d:.1}) — it got stuck",
+        );
+        assert!(shelled, "warship navigated but never shelled the enemy");
+    }
+
+    /// The enemy's position for the inlet test (it may have been slain).
+    fn target_of(game: &Game) -> Vec2 {
+        game.entities
+            .first()
+            .map(|e| e.pos)
+            .unwrap_or_else(|| tile_center((0, -15)))
+    }
+
+    #[test]
+    fn idle_warship_makes_for_the_open_ocean() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        game.pirates.clear();
+        game.warships.clear();
+
+        // A broad open-water basin fed by a narrow channel, all near the origin
+        // (forced-land, so the surroundings are solid but for what we carve).
+        game.world.ensure_region(-2, -12, 30, 12);
+        for y in -8..=8 {
+            for x in 10..=25 {
+                game.world.carve_water(x, y);
+            }
+        }
+        for x in 0..=10 {
+            game.world.carve_water(x, 0);
+        }
+        // The ship starts in the narrow channel — not yet open sea — while the
+        // basin's middle is.
+        assert!(!open_sea(&game.world, 0, 0), "channel isn't open sea");
+        assert!(open_sea(&game.world, 17, 0), "basin centre is open sea");
+
+        game.warships.push(Warship {
+            pos: tile_center((0, 0)),
+            facing: Dir::Down,
+            path: Vec::new(),
+            path_cursor: 0,
+            plan_pos: Vec2::ZERO,
+            repath: 0.0,
+            reload: WARSHIP_RELOAD,
+            bob: 0.0,
+            hp: WARSHIP_MAX_HP,
+        });
+
+        let sim = (500, 500, 510, 510);
+        let mut reached = false;
+        for _ in 0..300 {
+            game.update(0.1, sim);
+            let w = &game.warships[0];
+            if open_sea(&game.world, w.pos.x.floor() as i32, w.pos.y.floor() as i32) {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "idle warship never made for the open ocean");
     }
 }

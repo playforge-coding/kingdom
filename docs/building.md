@@ -105,6 +105,33 @@ there the goods are sold and the gold is banked. **Stone fetches more than wood*
     won't set off and your cargo stays in the hold. (Your village always sits on
     the sea — via a coast or a river to it — so a route out is normally at hand.)
 
+## ⚓ Warship (the navy)
+
+| | |
+| --- | --- |
+| **Cost** | 20 wood, 10 stone, 60 gold |
+| **Where** | Open water next to your village |
+
+Pick **Warship** mode in the HUD's **Navy** section and **left-click open water
+in your harbour** to lay one down — same launch rules as a cargo ship, but no
+sea route is needed since a warship **patrols rather than voyages**.
+
+Once afloat, a warship acts entirely on its own:
+
+- **Hunts pirates.** It seeks out the nearest pirate, closes to firing range,
+  and **shells it with cannonballs** until the raider sinks. A warship out-guns
+  and out-lasts a lone pirate, so a small navy keeps your shipping lanes clear.
+- **Bombards enemies ashore.** It also fires on enemy units on land, standing
+  **off in the water** to shell the coast — it never beaches itself, so it can
+  only reach foes near the shoreline.
+- **Keeps its distance.** Like pirates, a warship holds a standoff off its
+  target rather than ramming it.
+
+Warships have a **hull bar** and can be **sunk by pirate fire**, so escort a
+valuable convoy with more than one.
+
+See **[Units & Combat](units.md#the-navy)**.
+
 ## ⚑ Rally
 
 Not a building, but it lives in the same list. See

@@ -346,12 +346,44 @@ impl State {
             }
         }
 
-        // Cargo ships at sea: a wide sprite with a gentle 3-frame bob. Each
-        // 32x32 frame covers a 2x2-tile footprint, drawn centred on the hull.
+        // Cargo ships at sea: a 32x32 directional sprite (columns face left, up,
+        // down, right), drawn over a 2x2-tile footprint, centred on the hull.
         for s in game.ships() {
-            let col = ((s.bob * 3.0) as u32) % 3;
+            let col = match s.facing {
+                Dir::Left => 0,
+                Dir::Up => 1,
+                Dir::Down => 2,
+                Dir::Right => 3,
+            };
             let uv = self.atlas.frame_uv("cargo_ship", col, 0);
             out.push(quad([s.pos.x - 1.0, s.pos.y - 1.0], [2.0, 2.0], uv));
+        }
+
+        // Warships (the navy): a 32x32 directional sprite (columns face left,
+        // up, down, right), drawn over a 2x2-tile footprint, with an HP bar when
+        // the hull is damaged.
+        for w in game.warships() {
+            let col = match w.facing {
+                Dir::Left => 0,
+                Dir::Up => 1,
+                Dir::Down => 2,
+                Dir::Right => 3,
+            };
+            let uv = self.atlas.frame_uv("warship", col, 0);
+            out.push(quad([w.pos.x - 1.0, w.pos.y - 1.0], [2.0, 2.0], uv));
+            let ratio = w.hp_ratio();
+            if ratio < 1.0 {
+                let (bw, bh) = (1.2f32, 0.16f32);
+                let bx = w.pos.x - bw / 2.0;
+                let by = w.pos.y - 1.05;
+                out.push(tinted([bx, by], [bw, bh], white, [0.15, 0.0, 0.0, 0.85]));
+                out.push(tinted(
+                    [bx, by],
+                    [bw * ratio, bh],
+                    white,
+                    [0.3, 0.55, 1.0, 0.95],
+                ));
+            }
         }
 
         // Pirate ships: a 32x32 directional sprite (columns face left, up, down,
@@ -365,6 +397,19 @@ impl State {
             };
             let uv = self.atlas.frame_uv("pirate_ship", col, 0);
             out.push(quad([p.pos.x - 1.0, p.pos.y - 1.0], [2.0, 2.0], uv));
+            let ratio = p.hp_ratio();
+            if ratio < 1.0 {
+                let (bw, bh) = (1.2f32, 0.16f32);
+                let bx = p.pos.x - bw / 2.0;
+                let by = p.pos.y - 1.05;
+                out.push(tinted([bx, by], [bw, bh], white, [0.15, 0.0, 0.0, 0.85]));
+                out.push(tinted(
+                    [bx, by],
+                    [bw * ratio, bh],
+                    white,
+                    [0.9, 0.25, 0.2, 0.95],
+                ));
+            }
         }
 
         // Cannonballs in flight: a small sprite centred on the shot.

@@ -8,7 +8,8 @@ use winit::window::Window;
 use crate::game::{
     BuildMode, Game, GatherPriority, Priority, BRIDGE_WOOD_COST, HOUSE_GOLD_COST, HOUSE_STONE_COST,
     HOUSE_WOOD_COST, HUT_GOLD_COST, KNIGHT_GOLD_COST, MINE_GOLD_COST, MINE_STONE_COST, STONE_PRICE,
-    WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WOOD_PRICE,
+    WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST,
+    WARSHIP_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -271,6 +272,17 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 game.ship_payout()
             ));
             ui.small("Ships sail to the nearest allied coast, banking gold on arrival.");
+            ui.separator();
+
+            ui.heading("Navy");
+            ui.radio_value(
+                &mut game.build_mode,
+                BuildMode::Warship,
+                format!(
+                    "⚓ Warship  ({WARSHIP_WOOD_COST} wood, {WARSHIP_STONE_COST} stone, {WARSHIP_GOLD_COST} gold)"
+                ),
+            );
+            ui.small("Launch on open water by your village; it hunts pirates and shells enemies ashore.");
             ui.separator();
 
             ui.horizontal(|ui| {

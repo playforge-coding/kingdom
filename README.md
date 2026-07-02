@@ -21,9 +21,12 @@ both natively and in the browser (via WebGL) using **Trunk**.
   a low-frequency continental field carves broad **continents** out of wide
   **oceans** (with a guaranteed home continent at the origin), a finer field
   roughens the coastlines, and another scatters forests (wood) and ore (stone).
-  Occasional inland **lakes** dot the land, and the starting village's lake is
-  linked to the sea by a carved **river**. Narrow water channels are auto-spanned
-  with **bridges** so landmasses stay connected.
+  Winding, branching **rivers** (domain-warped noise isolines, 2–3 tiles wide)
+  meander across the land and flow to the coast, opening the interior to the sea;
+  occasional inland **lakes** dot it too. Villages **favour the waterside**, so
+  most towns sit on a river or coast — prime hunting ground for the navy. Only
+  single-tile notches are auto-bridged, so rivers stay real barriers you cross by
+  **bridge** or **boat**.
 - **Saving.** Save any time to a custom binary `.dat` blob (magic `KGDM`) that
   captures the seed, stockpile, stats, every unit, and all edited chunks
   (buildings, bridges, depleted resources). Native builds write a file
@@ -60,9 +63,15 @@ both natively and in the browser (via WebGL) using **Trunk**.
   **in your harbour** (ships launch only from near your village) to send it off.
   It charts a water route to the **nearest allied coast** (never crossing land)
   and sells the goods for gold on arrival — **stone fetches more than wood**.
-- **Pirates.** Rare **pirate ships** roam the open ocean, hunt your cargo ships,
-  and fire **cannonballs**; a hit **sinks the ship and its cargo**. They keep to
-  the deep sea and never enter rivers or lakes.
+- **Pirates.** Rare **pirate ships** roam the open ocean, hunt your ships, and
+  fire **cannonballs**; a hit **sinks a cargo ship and its cargo**. They keep to
+  the deep sea, never enter rivers or lakes, and hold a **standoff** to shell
+  their quarry instead of piling onto it.
+- **Navy.** Build a **warship** (wood + stone + gold) on the water by your
+  village and it fights on its own: it **hunts pirates** and **bombards enemies
+  ashore with cannonballs**, holding **off in the water** so it never beaches.
+  Warships have a hull bar and can be sunk by pirate fire — escort convoys with a
+  few.
 - **Building.** Left-click to build:
   - a **House** on open grass (wood + stone + gold) — only *next to your existing
     village*, so your territory grows organically. Houses raise your population

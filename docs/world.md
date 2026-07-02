@@ -27,19 +27,30 @@ Terrain comes from [FastNoise Lite](https://crates.io/crates/fastnoise-lite):
     - **Forests** — trees, your source of 🪵 **wood**.
     - **Ore** — rocks, your source of 🪨 **stone**.
 
-## Lakes and rivers
+## Rivers and lakes
 
-Occasional small **lakes** dot the interior of the larger landmasses. When your
-starting village happens to sit beside one, a **river** is carved from that lake
-out to the open sea — so a cargo ship launched in your harbour can always reach
-the coast, even from an inland pool.
+**Rivers lace the land.** A pair of low-frequency noise fields trace winding,
+branching **waterways** across every continent — a broad main network fed by
+finer tributaries. They meander like real rivers (the coordinates are
+domain-warped so the channels bend rather than run straight) and flow **down to
+the coast**, opening the interior to the sea. Most rivers are **2–3 tiles wide**:
+wide enough to block units on foot, so they're crossed by a **boat** or a
+player-built **[bridge](building.md#bridge)**.
+
+Occasional small **lakes** also dot the interior. When your starting village
+sits beside a landlocked pool, a channel is carved from it out to the sea so a
+cargo ship launched in your harbour can always reach the coast.
+
+Because rivers reach deep inland, your **[navy](building.md#warship-the-navy)**
+can patrol them far from the open ocean — sailing up a river to hunt raiders or
+shell an enemy town on its banks.
 
 ## Bridges
 
-Narrow water channels are **automatically spanned with bridges** at generation
-time, so landmasses stay connected and your units can get around without you
-micromanaging every crossing. You can build your own [bridges](building.md#bridge)
-to cross wider water.
+Only **single-tile** water notches are **automatically spanned with bridges** at
+generation time. Anything wider — including the 2–3-tile rivers — stays open
+water, a genuine barrier you cross with a **[bridge](building.md#bridge)** you
+build yourself or by **[ship](building.md#warship-the-navy)**.
 
 ## Resources
 
@@ -59,6 +70,10 @@ At world creation the generator places:
 - A handful of **enemy villages** on your home continent, each with its own units.
 - A couple of **allied villages** across the sea — friendly [trade
   partners](gameplay.md#factions) your cargo ships sail to.
+
+Settlements **favour the waterside**: the generator plants villages beside a
+river or coast wherever it can, so most towns sit on a waterway — and within
+reach of a **[warship](building.md#warship-the-navy)**.
 
 Because the map is endless, it keeps filling in: **new enemy and allied villages
 are founded over time**, each planted farther out on an ever-widening frontier

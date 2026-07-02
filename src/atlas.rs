@@ -124,6 +124,7 @@ pub fn build() -> Atlas {
         "../assets/textures/entities/ally_swordsman.png"
     ));
     let cargo_ship = load(include_bytes!("../assets/textures/entities/cargo_ship.png"));
+    let warship = load(include_bytes!("../assets/textures/entities/warship.png"));
     let pirate_ship = load(include_bytes!(
         "../assets/textures/entities/pirate_ship.png"
     ));
@@ -153,8 +154,12 @@ pub fn build() -> Atlas {
         Source::sheet("enemy_knight", enemy_knight, 5, 12),
         Source::sheet("ally_farmer", ally_farmer, 5, 12),
         Source::sheet("ally_knight", ally_knight, 5, 12),
-        // Cargo ship: 3 columns x 1 row of 32x32 frames (a gentle bob).
-        Source::sheet("cargo_ship", cargo_ship, 3, 1),
+        // Cargo ship: 4 columns x 1 row of 32x32 frames, facing left, up, down,
+        // right (in that column order).
+        Source::sheet("cargo_ship", cargo_ship, 4, 1),
+        // Warship: 4 columns x 1 row of 32x32 frames, facing left, up, down,
+        // right (same column order as the other ships).
+        Source::sheet("warship", warship, 4, 1),
         // Pirate ship: 4 columns x 1 row of 32x32 frames, facing left, up,
         // down, right (in that column order).
         Source::sheet("pirate_ship", pirate_ship, 4, 1),

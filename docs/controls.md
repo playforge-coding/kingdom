@@ -71,6 +71,14 @@ Radio buttons selecting what a left-click does, with costs shown:
 
 A **✖ Clear rally** button appears while a rally flag is active.
 
+The HUD's **Trade** and **Navy** sections add two more left-click modes on the
+water by your village:
+
+| Mode | Cost | Notes |
+| ---- | ---- | ----- |
+| **🚢 Ship goods** | the wood + stone you load | Sails to an allied coast for gold |
+| **⚓ Warship** | 20 wood, 10 stone, 60 gold | Patrols, hunts pirates, shells the enemy coast |
+
 ### Buttons
 
 - **💾 Save** — write the current world to disk / IndexedDB (see **[Saves & Files](saves.md)**).

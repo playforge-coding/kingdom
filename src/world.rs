@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
+use fastnoise_lite::{DomainWarpType, FastNoiseLite, FractalType, NoiseType};
 
 /// Chunk edge length in tiles.
 pub const CHUNK: i32 = 32;
@@ -563,6 +563,31 @@ const HOME_SOLID: f32 = 28.0;
 /// settle; beyond it the map is left to the natural continent noise.
 const HOME_RADIUS: f32 = 155.0;
 
+/// How close (in tiles) to a river-noise zero-isoline a land tile must be to be
+/// carved into a river. Because the raw noise value is normalised by its local
+/// gradient, this is a real tile distance, so a river stays a steady width
+/// rather than ballooning where the noise flattens. The main network runs a
+/// touch wider than the tributaries — together ~2–3 tiles across.
+const RIVER_HALF_WIDTH_MAIN: f32 = 1.4;
+const RIVER_HALF_WIDTH_TRIB: f32 = 1.05;
+
+/// Approximate distance, in tiles, from `(x, y)` to the nearest zero-isoline of
+/// a (domain-warped) river-noise field. Dividing the noise value by its local
+/// gradient converts "value near zero" into "close to the channel centre" in
+/// real tile units, so a fixed threshold yields a steady-width river regardless
+/// of how steep or flat the underlying noise is.
+fn river_channel_dist(noise: &FastNoiseLite, x: i32, y: i32) -> f32 {
+    let sample = |dx: i32, dy: i32| {
+        let (wx, wy) = noise.domain_warp_2d((x + dx) as f32, (y + dy) as f32);
+        noise.get_noise_2d(wx, wy)
+    };
+    let v = sample(0, 0);
+    let gx = sample(1, 0) - sample(-1, 0);
+    let gy = sample(0, 1) - sample(0, -1);
+    let grad = 0.5 * (gx * gx + gy * gy).sqrt();
+    v.abs() / grad.max(1e-4)
+}
+
 /// Generate one chunk deterministically from the seed and chunk coordinates.
 fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
     // Continental shape: a very low-frequency fractal (FBm) lays out the big
@@ -586,6 +611,27 @@ fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
     let mut lake = FastNoiseLite::with_seed(seed.wrapping_add(4201));
     lake.set_noise_type(Some(NoiseType::OpenSimplex2));
     lake.set_frequency(Some(0.09));
+
+    // Rivers: two low-frequency fractal fields whose *zero-isolines* trace
+    // winding waterways across the map. Domain warp bends those isolines so the
+    // channels meander like real rivers rather than running in smooth arcs. The
+    // first field is a broad main network; the second, higher-frequency one adds
+    // finer tributaries — carving both gives a dense, branching river system.
+    let mut river_main = FastNoiseLite::with_seed(seed.wrapping_add(7777));
+    river_main.set_noise_type(Some(NoiseType::OpenSimplex2));
+    river_main.set_fractal_type(Some(FractalType::FBm));
+    river_main.set_fractal_octaves(Some(2));
+    river_main.set_frequency(Some(0.0060));
+    river_main.set_domain_warp_type(Some(DomainWarpType::OpenSimplex2));
+    river_main.set_domain_warp_amp(Some(28.0));
+
+    let mut river_trib = FastNoiseLite::with_seed(seed.wrapping_add(24601));
+    river_trib.set_noise_type(Some(NoiseType::OpenSimplex2));
+    river_trib.set_fractal_type(Some(FractalType::FBm));
+    river_trib.set_fractal_octaves(Some(2));
+    river_trib.set_frequency(Some(0.0110));
+    river_trib.set_domain_warp_type(Some(DomainWarpType::OpenSimplex2));
+    river_trib.set_domain_warp_amp(Some(16.0));
 
     let mut scatter = FastNoiseLite::with_seed(seed.wrapping_add(1337));
     scatter.set_noise_type(Some(NoiseType::OpenSimplex2));
@@ -631,6 +677,18 @@ fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
                 continue;
             }
 
+            // Carve rivers: where this land tile lies within a channel's width of
+            // a river-noise isoline, it becomes flowing water. Rivers naturally
+            // run down to the coast (the isoline continues into the sea), giving
+            // the navy inland waterways to patrol. The dry home core is spared.
+            if dist >= HOME_SOLID
+                && (river_channel_dist(&river_main, x, y) < RIVER_HALF_WIDTH_MAIN
+                    || river_channel_dist(&river_trib, x, y) < RIVER_HALF_WIDTH_TRIB)
+            {
+                chunk.tiles[i] = Tile::Water;
+                continue;
+            }
+
             // This tile is land: scatter woods and rocks across it.
             let s = scatter.get_noise_2d(x as f32, y as f32);
             if s > 0.45 {
@@ -651,8 +709,10 @@ fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
     chunk
 }
 
-/// Longest water gap we will bridge automatically (within a single chunk).
-const MAX_BRIDGE_GAP: i32 = 4;
+/// Longest water gap we will bridge automatically (within a single chunk). Kept
+/// to a single tile so that rivers (2–3 tiles wide) stay genuine water barriers
+/// — crossed by a boat or a player-built bridge, not paved over automatically.
+const MAX_BRIDGE_GAP: i32 = 1;
 
 /// Is the local tile within this chunk water? (Out-of-chunk reads as non-water.)
 fn tile_is_water(tiles: &[Tile], x: i32, y: i32) -> bool {
