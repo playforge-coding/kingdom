@@ -102,6 +102,7 @@ pub fn build() -> Atlas {
     let wall = load(include_bytes!("../assets/textures/tiles/wall.png"));
     let tree = load(include_bytes!("../assets/textures/tiles/tree.png"));
     let rock = load(include_bytes!("../assets/textures/tiles/rock.png"));
+    let rally = load(include_bytes!("../assets/textures/tiles/rally.png"));
 
     let farmer = load(include_bytes!("../assets/textures/entities/farmer.png"));
     let knight = load(include_bytes!("../assets/textures/entities/swordsman.png"));
@@ -123,6 +124,7 @@ pub fn build() -> Atlas {
         Source::sprite("wall", wall),
         Source::sprite("tree", pad_to_tile(&tree)),
         Source::sprite("rock", pad_to_tile(&rock)),
+        Source::sprite("rally", rally),
         // Character sheets: 5 columns x 12 rows of 16x16 frames.
         Source::sheet("farmer", farmer, 5, 12),
         Source::sheet("knight", knight, 5, 12),

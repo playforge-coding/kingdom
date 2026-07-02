@@ -211,6 +211,9 @@ const PATH_BUDGET: usize = 4000;
 pub enum BuildMode {
     House,
     Bridge,
+    /// Left-click plants a rally flag: player knights march to it until they
+    /// pick up an enemy, then peel off to fight.
+    Rally,
 }
 
 /// Which kind of villager the player's houses favour raising.
@@ -258,6 +261,8 @@ pub struct Game {
     pub gather_priority: GatherPriority,
     pub enemies_defeated: u32,
     pub units_lost: u32,
+    /// Player-set waypoint that knights march toward while no enemy is in reach.
+    pub rally_point: Option<Vec2>,
 
     player_house_tiles: Vec<Tile>,
     /// Bridges the player has placed (anchors for extending spans).
@@ -355,6 +360,7 @@ impl Game {
             gather_priority: GatherPriority::Balanced,
             enemies_defeated: 0,
             units_lost: 0,
+            rally_point: None,
             player_house_tiles,
             player_bridges: Vec::new(),
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
@@ -478,6 +484,7 @@ impl Game {
                     under,
                     &self.player_house_tiles,
                     pref,
+                    self.rally_point,
                     dt,
                 ),
                 Faction::Enemy => ai_step(
@@ -488,6 +495,7 @@ impl Game {
                     acting[i],
                     under,
                     &self.world.enemy_house_tiles,
+                    None,
                     None,
                     dt,
                 ),
@@ -713,7 +721,23 @@ impl Game {
                 self.player_bridges.push((x, y));
                 true
             }
+            BuildMode::Rally => {
+                // Plant (or move) the rally flag. Knights head here until they
+                // pick up an enemy. Clicking the flagged tile again lifts it.
+                let here = tile_center((x, y));
+                self.rally_point = if self.rally_point == Some(here) {
+                    None
+                } else {
+                    Some(here)
+                };
+                true
+            }
         }
+    }
+
+    /// Lift the rally flag; knights resume defending on their own.
+    pub fn clear_rally(&mut self) {
+        self.rally_point = None;
     }
 }
 
@@ -731,6 +755,7 @@ fn ai_step(
     under_limit: bool,
     home: &[Tile],
     pref: Option<Resource>,
+    rally: Option<Vec2>,
     dt: f32,
 ) -> Option<StepEvent> {
     e.repath -= dt;
@@ -743,7 +768,7 @@ fn ai_step(
             if under_limit {
                 retreat_behavior(world, e, owner, home, dt)
             } else {
-                soldier_behavior(world, e, owner, rng, snap, acting, dt)
+                soldier_behavior(world, e, owner, rng, snap, rally, acting, dt)
             }
         }
         (Faction::Enemy, Job::Farmer) => {
@@ -811,6 +836,7 @@ fn soldier_behavior(
     owner: u8,
     rng: &mut Rng,
     snap: &[(Vec2, Faction)],
+    rally: Option<Vec2>,
     acting: bool,
     dt: f32,
 ) -> Option<StepEvent> {
@@ -845,33 +871,45 @@ fn soldier_behavior(
         .filter(|&&(_, f)| f != e.faction)
         .map(|&(p, _)| (p.x.floor() as i32, p.y.floor() as i32))
         .collect();
-    if foes.is_empty() {
-        wander_behavior(world, e, owner, rng, dt);
-        return None;
-    }
 
     if e.repath <= 0.0 || e.path_done() {
-        let goal = |x: i32, y: i32| foes.contains(&(x, y));
-        // Prefer a clear route (crossing bridges as needed); only if none exists
-        // do we smash through obstacles (nodes treated as passable to plan).
-        if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
-            world.walkable_for(owner, x, y)
-        }) {
-            e.set_path(p);
-        } else if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
-            world.walkable_for_siege(owner, x, y)
-        }) {
-            e.set_path(p);
-        } else {
-            // No route to any foe — even smashing through everything. Drop any
-            // stale path so we don't keep grinding down trees/rocks toward an
-            // unreachable target (out of range, across unbridged water, …).
-            e.set_path(Vec::new());
-        }
         e.repath = 0.7;
+        let goal = |x: i32, y: i32| foes.contains(&(x, y));
+        // Engage the nearest reachable foe first — this is a knight "picking up"
+        // an enemy. Prefer a clear route; only smash through trees/rocks when
+        // there's genuinely no clear way in.
+        let engaged = !foes.is_empty() && {
+            if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
+                world.walkable_for(owner, x, y)
+            }) {
+                e.set_path(p);
+                true
+            } else if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
+                world.walkable_for_siege(owner, x, y)
+            }) {
+                e.set_path(p);
+                true
+            } else {
+                false
+            }
+        };
+
+        if !engaged {
+            // No enemy in reach. Follow the player's rally order toward the
+            // flagged tile — clear routes only, so guiding knights across the
+            // map never levels forests. Otherwise (no order / unreachable) drop
+            // any stale path so we idle instead of grinding down trees.
+            let p = rally
+                .and_then(|r| {
+                    let rt = (r.x.floor() as i32, r.y.floor() as i32);
+                    pathfind::path_to(world, owner, e.tile(), rt, PATH_BUDGET)
+                })
+                .unwrap_or_default();
+            e.set_path(p);
+        }
     }
 
-    // With no reachable foe there's nothing to march toward: wander rather than
+    // Nothing to march toward (no reachable foe, no rally): wander rather than
     // hacking obstacles along a dead route.
     if e.path_done() {
         wander_behavior(world, e, owner, rng, dt);
@@ -879,6 +917,7 @@ fn soldier_behavior(
     }
 
     // If the next step is onto a tree/rock, hack it down instead of walking in.
+    // Only combat routes ever step onto a node; rally marches use clear tiles.
     if !e.path_done() {
         let (wx, wy) = e.path[e.path_cursor];
         if world.node(wx, wy).is_some() {
@@ -1476,6 +1515,7 @@ impl Game {
             gather_priority,
             enemies_defeated,
             units_lost,
+            rally_point: None,
             player_house_tiles,
             player_bridges,
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,

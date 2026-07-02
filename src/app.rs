@@ -290,6 +290,12 @@ impl State {
             }
         }
 
+        // Rally flag: the player's knight waypoint, drawn on top of everything.
+        if let Some(r) = game.rally_point {
+            let rally = self.atlas.uv("rally");
+            out.push(quad([r.x - 0.5, r.y - 0.5], [1.0, 1.0], rally));
+        }
+
         out
     }
 
@@ -515,6 +521,15 @@ impl ApplicationHandler<State> for App {
                 button: MouseButton::Left,
                 ..
             } if !ui_consumed => state.build_at_cursor(),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } if !ui_consumed => {
+                if let Some(game) = &mut state.game {
+                    game.clear_rally();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {

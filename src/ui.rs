@@ -205,6 +205,10 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 BuildMode::Bridge,
                 format!("Bridge  ({BRIDGE_WOOD_COST} wood)"),
             );
+            ui.radio_value(&mut game.build_mode, BuildMode::Rally, "⚑ Rally knights");
+            if game.rally_point.is_some() && ui.button("✖ Clear rally").clicked() {
+                game.clear_rally();
+            }
             ui.separator();
 
             ui.horizontal(|ui| {
@@ -219,6 +223,8 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ui.small("Houses must be built next to your village.");
             ui.small("Houses raise new workers only while you have 4+ farmers.");
             ui.small("Farmers gather • Knights defend.");
+            ui.small("Rally: knights march to the flag until they meet an enemy.");
+            ui.small("Right-click clears the rally flag.");
             ui.small("WASD / arrows to pan • scroll to zoom.");
         });
     action
