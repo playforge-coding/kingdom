@@ -72,7 +72,9 @@ Three factions share the world:
    You start with some **seed gold**, but every new **knight** costs gold to arm. A
    broke village raises a (free) civilian instead, so keep the trade routes running.
 5. **Defend & expand.** Keep knights around to fend off raids, then push into
-   enemy territory and take their villages.
+   enemy territory and take their villages. When the frontier worth having lies
+   across the sea, send a **[settler ship](#settling-overseas)** instead and
+   found a village of your own on a far shore.
 
 Use the **Priority** and **Gather** toggles in the HUD to steer this loop:
 lean **Agriculture** while you're building up, swing to **Military** when a camp
@@ -102,6 +104,47 @@ lists each one with its defenders and flags any that are under attack or left
 empty, and **[alerts](controls.md#alerts)** tell you when one is raided, lost, or
 taken. Press <kbd>M</kbd> for the **[overview](controls.md#the-overview)** to see
 the whole realm at once.
+
+## Settling overseas
+
+Walking and bridging only carry you so far: the ocean is too wide to span, so
+land across the sea is out of a knight's reach. **Settler ships** are how the
+kingdom crosses it.
+
+Pick **Settler ship** in the HUD's **Colonies** section and **left-click a far
+shore**. If the stockpile covers the cost (30 wood, 20 stone, 50 gold), the
+spot is clear of every standing settlement, and a sea route reaches it from
+your harbor, then **3 civilians board a ship** and set sail. At least 4
+civilians always stay home, so an expedition can't hollow out your economy.
+
+You'll know the order went through: a **blue banner is planted on the landing**
+the moment the ship casts off and stays there until it arrives, an
+**[alert](controls.md#alerts)** announces the departure (the ship launches from
+your harbor, usually far from where you clicked), and the Colonies section
+counts the **expeditions at sea**. A refused click answers too: a toast at the
+spot says **why it couldn't go through**, whether the shore is too close to a
+settlement, no sea route reaches it, there's no shore there at all, or the cost
+or crew isn't covered.
+
+When the ship drops anchor, the settlers go ashore, **raise the colony's first
+two houses**, and get to work. The new village is yours in every way: it shows
+up in the **[Realm panel](controls.md#the-realm-panel)**, its houses raise
+population on their own, and its coast works as a harbor, so **cargo ships can
+launch from the colony** too; a colony settled near allied shores makes for
+short, safe trade runs.
+
+A few things to mind:
+
+- **Pirates sink settler ships** as readily as cargo ships, and the crew goes
+  down with the hull. Escort a precious expedition with a
+  [warship](building.md#warship-the-navy) or clear the lanes first.
+- A fresh colony starts **undefended**. Knights spawn there like anywhere else
+  once there's gold and population headroom, but until then an enemy wandering
+  in can [take it](#capturing-villages).
+- Settling is for **new ground**: the landing must be well away from every
+  existing village, yours, the enemy's, and the allies' alike.
+
+See **[Building](building.md#settler-ship)** for the full launch rules.
 
 ## Scoring
 

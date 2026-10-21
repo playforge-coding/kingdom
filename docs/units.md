@@ -100,12 +100,15 @@ rather than a faction you fight on land. They:
   reach inland water or come ashore. They haunt the deep water your shipping
   lanes cross.
 - **Hunt your vessels.** A pirate that spots one of your
-  [cargo ships](building.md#ship-goods) (or a [warship](building.md#warship-the-navy))
+  [cargo ships](building.md#ship-goods), [settler ships](building.md#settler-ship),
+  or [warships](building.md#warship-the-navy)
   gives chase and, once in range, opens fire with **cannonballs**. It holds a
   short **standoff** and shells from there rather than piling onto the hull.
 - **Sink cargo on a hit.** A cannonball that strikes a cargo ship **sinks it,
-  cargo and all**. The goods are lost at sea and no gold is paid. Warships are
-  armored and instead lose **hull** with each hit, sinking only when it runs out.
+  cargo and all**. The goods are lost at sea and no gold is paid. A settler
+  ship fares the same, and worse: its **crew is lost with it**, counted among
+  your casualties. Warships are armored and instead lose **hull** with each
+  hit, sinking only when it runs out.
 
 They're uncommon, but a laden ship is a tempting target. Losing a stone-heavy
 hold to pirates stings, so time your shipments or send a warship escort.

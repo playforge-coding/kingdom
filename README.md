@@ -77,6 +77,12 @@ both natively and in the browser (via WebGL) using **Trunk**.
   and sells the goods for gold on arrival, and **stone fetches more than wood**.
   Flip the **autonomous-trade switch** and the harbor keeps dispatching laden
   ships on its own whenever the stockpile covers the configured load in full.
+- **Colonies.** Expand overseas with a **settler ship**: left-click a far shore
+  and, if a sea route reaches it and the spot is clear of every standing
+  settlement, **3 civilians board at your harbor** (at least 4 always stay
+  home), sail over, and **found a new village** with its first two houses on
+  landing. The colony grows like any other village, its coast works as a
+  harbor, and pirates can sink the expedition, crew and all.
 - **Pirates.** Rare **pirate ships** roam the open ocean, hunt your ships, and
   fire **cannonballs**; a hit **sinks a cargo ship and its cargo**. They keep to
   the deep sea, never enter rivers or lakes, and hold a **standoff** to shell

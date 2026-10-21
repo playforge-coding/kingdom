@@ -167,6 +167,42 @@ carry, and anything below that stays home. Flip the switch off and the harbor
 goes quiet again. The switch is saved with the world, and autonomous shipments
 run the same pirate gauntlet as manual ones.
 
+## :lucide-globe: Settler ship
+
+| | |
+| --- | --- |
+| **Cost** | 30 wood, 20 stone, 50 gold, and 3 civilians who board the ship |
+| **Where** | Click the far shore to settle; the ship launches from your harbor on its own |
+
+Settler ships are how the kingdom **expands overseas** (see
+**[Settling overseas](gameplay.md#settling-overseas)**). Pick **Settler ship**
+in the HUD's **Colonies** section and **left-click a distant shore**; unlike
+the other modes you click the *destination*, and the expedition finds its own
+launch water by your village. When the order goes through, a **blue banner**
+marks the landing until the ship arrives, an **alert** announces the
+departure, and the Colonies section counts the expeditions at sea.
+
+The order only goes through when everything lines up; a refusal costs nothing
+and raises a toast at the click saying which of these was the problem:
+
+- The stockpile covers the **cost**, and at least **4 civilians would stay
+  home** after the crew of 3 boards, so settling can't hollow out your economy.
+- The landing is **clear of every standing settlement**: yours, the enemy's,
+  and the allies' alike. Colonies claim new ground, they don't crowd old.
+- A **water route** reaches the shore from your harbor. A coast on a landlocked
+  lake can't be sailed to, however inviting.
+
+On landing the settlers raise the colony's **first two houses** and go to work.
+From then on it's an ordinary village: houses raise its population, builds can
+be ordered around it, and its coast counts as a harbor, so **cargo ships (and
+warships) can launch there** too.
+
+!!! warning "The crew sails with the hull"
+    Pirates sink a settler ship with a **single hit**, and the settlers are
+    lost with it; the sinking's alert offers the same one-click
+    **Summon warship** as a sunk cargo ship. Time the crossing, or send the
+    navy ahead.
+
 ## :lucide-anchor: Warship (the navy)
 
 | | |

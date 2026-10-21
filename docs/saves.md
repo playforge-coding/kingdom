@@ -17,6 +17,7 @@ A save captures everything needed to reconstruct your session exactly:
 - **Every unit:** position, faction, role, and state.
 - **Cargo ships** currently at sea, with their load and payout, plus the
   **autonomous-trade switch** and the configured cargo load.
+- **Settler ships** under sail, with their crew and destination.
 - **Warships** afloat, with their remaining hull.
 - **Construction orders** in progress, your **builder zones**, and the
   **autonomous-building switch**.
@@ -36,11 +37,15 @@ next save you write slims back down to just your edits.
 The save is a custom binary format, not JSON or a standard container:
 
 - It begins with the magic bytes **`KGDM`** and a **version** number, so the
-  loader can reject foreign or incompatible files.
+  loader can reject foreign files and knows which revision of the format it is
+  reading.
 - The rest is a packed representation of the state listed above.
 
-Because the format is versioned, saves are tied to the build that wrote them;
-a much newer or older build may refuse to load an incompatible file.
+The format is versioned so it can grow without stranding anyone: a newer build
+keeps loading the saves older supported versions wrote, filling in whatever
+they predate with sensible defaults (a save from before settler ships simply
+loads with none at sea). Only a save written by a *newer* build than the one
+loading it, or one older than the loader still supports, is refused.
 
 ## Where it lives
 

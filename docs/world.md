@@ -87,4 +87,6 @@ trade with. Allied villages are always raised on coasts **across open water** fr
 you, so the only way to reach them is by [ship](building.md#ship-goods).
 
 How these change hands is covered in
-[Capturing villages](gameplay.md#capturing-villages).
+[Capturing villages](gameplay.md#capturing-villages), and you can plant
+villages of your own on far shores with a
+[settler ship](gameplay.md#settling-overseas).

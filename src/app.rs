@@ -22,6 +22,9 @@ use crate::ui::{Action, MenuState, Scene as UiScene, View};
 use crate::world::{Resource, Tile};
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// A mild player-blue wash over the cargo-ship sprite that marks a settler
+/// ship, so an expedition reads apart from the trade fleet at a glance.
+const SETTLER_TINT: [f32; 4] = [0.72, 0.82, 1.0, 1.0];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scene {
@@ -419,6 +422,24 @@ impl State {
             out.push(quad([s.pos.x - 1.0, s.pos.y - 1.0], [2.0, 2.0], uv));
         }
 
+        // Settler ships: the cargo hull flying the player's colors (a mild blue
+        // tint), drawn over the same 2x2-tile footprint.
+        for s in game.settlers() {
+            let col = match s.facing {
+                Dir::Left => 0,
+                Dir::Up => 1,
+                Dir::Down => 2,
+                Dir::Right => 3,
+            };
+            let uv = self.atlas.frame_uv("cargo_ship", col, 0);
+            out.push(tinted(
+                [s.pos.x - 1.0, s.pos.y - 1.0],
+                [2.0, 2.0],
+                uv,
+                SETTLER_TINT,
+            ));
+        }
+
         // Warships (the navy): a 32x32 directional sprite (columns face left,
         // up, down, right), drawn over a 2x2-tile footprint, with an HP bar when
         // the hull is damaged.
@@ -535,6 +556,20 @@ impl State {
             let mut tint = self.colors.player;
             tint[3] = 1.0;
             out.push(tinted([r.x - 0.5, r.y - 0.5], [1.0, 1.0], rally, tint));
+        }
+
+        // Each settler expedition plants a banner on its landing the moment it
+        // sets sail, so the click that sent it gets an answer on the spot and
+        // the destination stays marked until the ship arrives.
+        for s in game.settlers() {
+            let rally = self.atlas.uv("rally");
+            let (ax, ay) = s.anchor;
+            out.push(tinted(
+                [ax as f32, ay as f32],
+                [1.0, 1.0],
+                rally,
+                SETTLER_TINT,
+            ));
         }
 
         out
@@ -717,6 +752,17 @@ impl State {
         for p in game.pirates() {
             vessel(p.pos, "pirate_ship", p.facing);
         }
+        // Settler ships keep their blue tint out here too.
+        for s in game.settlers() {
+            let uv = self.atlas.frame_uv("cargo_ship", facing_col(s.facing), 0);
+            out.push(Instance {
+                pos: [s.pos.x - ship * 0.5, s.pos.y - ship * 0.5],
+                size: [ship, ship],
+                uv_min: [uv[0], uv[1]],
+                uv_max: [uv[2], uv[3]],
+                color: SETTLER_TINT,
+            });
+        }
 
         if let Some(r) = game.rally_point {
             let size = 1.5 * kf;
@@ -739,6 +785,21 @@ impl State {
                 uv_min: [uv[0], uv[1]],
                 uv_max: [uv[2], uv[3]],
                 color: tint,
+            });
+        }
+
+        // So does each settler expedition's landing banner, which matters most
+        // at this zoom: the whole voyage fits on screen, ship and destination.
+        for s in game.settlers() {
+            let size = 1.5 * kf;
+            let uv = self.atlas.uv("rally");
+            let (ax, ay) = s.anchor;
+            out.push(Instance {
+                pos: [ax as f32 + 0.5 - size * 0.5, ay as f32 + 0.5 - size * 0.5],
+                size: [size, size],
+                uv_min: [uv[0], uv[1]],
+                uv_max: [uv[2], uv[3]],
+                color: SETTLER_TINT,
             });
         }
 
