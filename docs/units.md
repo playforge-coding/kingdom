@@ -117,5 +117,8 @@ The **:lucide-flag: Rally** build mode turns a left-click into a **rally flag**:
 - The flag **clears automatically once they arrive**.
 - **Right-click** (or the **:lucide-x: Clear rally** button) removes the flag manually.
 
-Rallying is also triggered automatically when you **lose a village**: your
-knights converge on it to retake the ground.
+Rallying is also triggered automatically when you **lose a village** or a
+**hut comes under attack**: the knights **near it** converge to retake the
+ground, while those stationed farther away hold their own posts. Only a flag
+you plant yourself calls every knight in the realm, and an automatic alarm
+with no knight close enough to answer simply lifts itself.

@@ -30,6 +30,45 @@ impl Atlas {
             .unwrap_or_else(|| panic!("sprite '{name}' not in atlas"))
     }
 
+    /// Mean color of a static sprite's opaque pixels, in linear RGBA (the space
+    /// the shader blends in, since the atlas is sRGB). The zoomed-out map paints
+    /// flat tiles in these so it reads like the textures it stands in for.
+    pub fn average_color(&self, name: &str) -> [f32; 4] {
+        let r = self.uv(name);
+        let (x0, y0) = (
+            (r[0] * self.width as f32).round() as u32,
+            (r[1] * self.height as f32).round() as u32,
+        );
+        let (x1, y1) = (
+            (r[2] * self.width as f32).round() as u32,
+            (r[3] * self.height as f32).round() as u32,
+        );
+        let to_linear = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let mut sum = [0.0f32; 3];
+        let mut n = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * self.width + x) * 4) as usize;
+                if self.rgba[i + 3] < 128 {
+                    continue;
+                }
+                for (s, &c) in sum.iter_mut().zip(&self.rgba[i..i + 3]) {
+                    *s += to_linear(c);
+                }
+                n += 1;
+            }
+        }
+        let n = n.max(1) as f32;
+        [sum[0] / n, sum[1] / n, sum[2] / n, 1.0]
+    }
+
     /// UV rect for a single frame (col, row) of a packed sprite sheet.
     pub fn frame_uv(&self, sheet: &str, col: u32, row: u32) -> UvRect {
         let (r, cols, rows) = self
@@ -41,6 +80,47 @@ impl Atlas {
         let x = r[0] + col as f32 * fw;
         let y = r[1] + row as f32 * fh;
         [x, y, x + fw, y + fh]
+    }
+}
+
+/// Flat colors (linear RGBA) for drawing the map without textures: the
+/// zoomed-out view and the minimap.
+#[derive(Clone, Copy)]
+pub struct MapColors {
+    pub grass: [f32; 4],
+    pub water: [f32; 4],
+    pub tree: [f32; 4],
+    pub rock: [f32; 4],
+    /// Chunks that haven't been generated yet.
+    pub unexplored: [f32; 4],
+    pub player: [f32; 4],
+    pub enemy: [f32; 4],
+    pub ally: [f32; 4],
+}
+
+impl MapColors {
+    pub fn from_atlas(atlas: &Atlas) -> Self {
+        let grass = atlas.average_color("grass");
+        // A tree or rock only covers part of its tile, so blend it with the
+        // grass showing around it.
+        let over_grass = |c: [f32; 4]| {
+            let mut out = [1.0; 4];
+            for i in 0..3 {
+                out[i] = grass[i] + (c[i] - grass[i]) * 0.6;
+            }
+            out
+        };
+        MapColors {
+            grass,
+            water: atlas.average_color("water"),
+            tree: over_grass(atlas.average_color("tree")),
+            rock: over_grass(atlas.average_color("rock")),
+            unexplored: [0.012, 0.014, 0.02, 1.0],
+            // The same hues as the HP bars.
+            player: [0.3, 0.55, 1.0, 1.0],
+            enemy: [0.9, 0.25, 0.2, 1.0],
+            ally: [0.25, 0.85, 0.3, 1.0],
+        }
     }
 }
 

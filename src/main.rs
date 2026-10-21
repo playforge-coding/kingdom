@@ -3,6 +3,7 @@ mod atlas;
 mod camera;
 mod game;
 mod gfx;
+mod grid;
 mod pathfind;
 mod save;
 mod ui;

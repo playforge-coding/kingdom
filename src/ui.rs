@@ -1,15 +1,20 @@
 //! egui integration (input side) plus the main-menu and in-game panels. The GPU
 //! side (`egui_wgpu::Renderer`) lives in `gfx`.
 
-use egui::{ClippedPrimitive, Image, ImageSource, RichText, WidgetAtom};
+use egui::{
+    Align2, ClippedPrimitive, Color32, Image, ImageSource, Pos2, Rect, RichText, Sense, Stroke,
+    StrokeKind, TextureHandle, TextureOptions, WidgetAtom,
+};
+use glam::Vec2;
 use winit::event::WindowEvent;
 use winit::window::Window;
 
+use crate::atlas::MapColors;
 use crate::game::{
-    BRIDGE_WOOD_COST, BuildMode, Game, GatherPriority, HOUSE_GOLD_COST, HOUSE_STONE_COST,
-    HOUSE_WOOD_COST, HUT_GOLD_COST, KNIGHT_GOLD_COST, MINE_GOLD_COST, MINE_STONE_COST, Priority,
-    STONE_PRICE, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST,
-    WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
+    AlertKind, BRIDGE_WOOD_COST, BuildMode, Faction, Game, GatherPriority, HOUSE_GOLD_COST,
+    HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST, KNIGHT_GOLD_COST, MINE_GOLD_COST,
+    MINE_STONE_COST, Priority, STONE_PRICE, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST,
+    WARSHIP_GOLD_COST, WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -19,6 +24,22 @@ pub enum Action {
     Resume,
     Save,
     ToMenu,
+    /// Move the camera to a spot, zooming back in from the overview if asked.
+    Focus {
+        pos: Vec2,
+        zoom_in: bool,
+    },
+    ToggleOverview,
+}
+
+/// Where the camera is looking, for the minimap and the village list.
+#[derive(Clone, Copy)]
+pub struct View {
+    pub center: Vec2,
+    /// Half the view's size in tiles.
+    pub half: Vec2,
+    /// Zoomed out past full detail.
+    pub overview: bool,
 }
 
 /// Mutable state backing the menu's widgets.
@@ -34,11 +55,14 @@ mod icons {
 
     pub const ANCHOR: ImageSource = include_image!("../assets/icons/anchor.svg");
     pub const BRICK_WALL: ImageSource = include_image!("../assets/icons/brick-wall.svg");
+    pub const CASTLE: ImageSource = include_image!("../assets/icons/castle.svg");
     pub const COINS: ImageSource = include_image!("../assets/icons/coins.svg");
+    pub const CROSSHAIR: ImageSource = include_image!("../assets/icons/crosshair.svg");
     pub const DICES: ImageSource = include_image!("../assets/icons/dices.svg");
     pub const FLAG: ImageSource = include_image!("../assets/icons/flag.svg");
     pub const FOLDER_OPEN: ImageSource = include_image!("../assets/icons/folder-open.svg");
     pub const GLOBE: ImageSource = include_image!("../assets/icons/globe.svg");
+    pub const MAP: ImageSource = include_image!("../assets/icons/map.svg");
     pub const MENU: ImageSource = include_image!("../assets/icons/menu.svg");
     pub const MINUS: ImageSource = include_image!("../assets/icons/minus.svg");
     pub const MOUNTAIN: ImageSource = include_image!("../assets/icons/mountain.svg");
@@ -51,6 +75,7 @@ mod icons {
     pub const SWORDS: ImageSource = include_image!("../assets/icons/swords.svg");
     pub const TENT: ImageSource = include_image!("../assets/icons/tent.svg");
     pub const TREE_PINE: ImageSource = include_image!("../assets/icons/tree-pine.svg");
+    pub const TRIANGLE_ALERT: ImageSource = include_image!("../assets/icons/triangle-alert.svg");
     pub const WHEAT: ImageSource = include_image!("../assets/icons/wheat.svg");
     pub const X: ImageSource = include_image!("../assets/icons/x.svg");
 }
@@ -75,12 +100,17 @@ pub enum Scene<'a> {
         has_save: bool,
         has_game: bool,
     },
-    Game(&'a mut Game),
+    Game {
+        game: &'a mut Game,
+        view: View,
+        colors: &'a MapColors,
+    },
 }
 
 pub struct Ui {
     pub ctx: egui::Context,
     state: egui_winit::State,
+    minimap: Minimap,
 }
 
 pub struct UiOutput {
@@ -101,7 +131,11 @@ impl Ui {
             None,
             None,
         );
-        Ui { ctx, state }
+        Ui {
+            ctx,
+            state,
+            minimap: Minimap::default(),
+        }
     }
 
     pub fn on_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
@@ -117,7 +151,7 @@ impl Ui {
         // pass borrows `scene` again and the last one to ask for an action wins.
         let raw_input = self.state.take_egui_input(window);
         let full_output = self.ctx.run_ui(raw_input, |ui| {
-            if let Some(a) = build_ui(ui, &mut scene) {
+            if let Some(a) = build_ui(ui, &mut scene, &mut self.minimap) {
                 action = Some(a);
             }
         });
@@ -136,14 +170,20 @@ impl Ui {
     }
 }
 
-fn build_ui(ui: &mut egui::Ui, scene: &mut Scene) -> Option<Action> {
+fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Option<Action> {
     match scene {
         Scene::Menu {
             menu,
             has_save,
             has_game,
         } => menu_ui(ui, menu, *has_save, *has_game),
-        Scene::Game(game) => game_ui(ui.ctx(), game),
+        Scene::Game { game, view, colors } => {
+            let ctx = ui.ctx().clone();
+            let hud = game_ui(&ctx, game);
+            let realm = realm_ui(&ctx, game, *view, colors, minimap);
+            let alert = alerts_ui(&ctx, game, *view);
+            hud.or(realm).or(alert)
+        }
     }
 }
 
@@ -380,21 +420,413 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 }
             });
 
-            ui.small("Houses must be built next to your village.");
-            ui.small("Houses raise new workers only while you have 4 or more farmers.");
-            ui.small(format!(
-                "Each new knight costs {KNIGHT_GOLD_COST} gold; a broke village raises a farmer instead."
-            ));
-            ui.small("Trade: load a ship on the coast and it sails to an allied shore for gold.");
-            ui.small("Allies fight the enemy on their own, but never join your battles.");
-            ui.small("Farmers gather and knights defend.");
-            ui.small("Farmers replant trees and mine caves once resources run dry.");
-            ui.small("Mines never run out, but only 4 farmers can work one at a time.");
-            ui.small("Huts shelter farmers from raids; knights rush to defend an attacked one.");
-            ui.small("Rally: knights drop combat and rush the flag; it clears on arrival.");
-            ui.small("Right-click clears the rally flag.");
-            ui.small("Pan with WASD or the arrow keys; zoom with Q and E.");
+            egui::CollapsingHeader::new("Help")
+                .default_open(false)
+                .show(ui, |ui| {
+                ui.small("Houses must be built next to your village.");
+                ui.small("Houses raise new workers only while you have 4 or more farmers.");
+                ui.small(format!(
+                    "Each new knight costs {KNIGHT_GOLD_COST} gold; a broke village raises a farmer instead."
+                ));
+                ui.small("Trade: load a ship on the coast and it sails to an allied shore for gold.");
+                ui.small("Allies fight the enemy on their own, but never join your battles.");
+                ui.small("Farmers gather and knights defend.");
+                ui.small("Farmers replant trees and mine caves once resources run dry.");
+                ui.small("Mines never run out, but only 4 farmers can work one at a time.");
+                ui.small("Huts shelter farmers from raids; knights rush to defend an attacked one.");
+                ui.small("Rally: knights drop combat and rush the flag; it clears on arrival.");
+                ui.small("Right-click clears the rally flag.");
+                ui.small("Pan with WASD or the arrow keys; zoom with Q and E.");
+                ui.small("Press M to jump to the overview map and back.");
+                ui.small("Villages off screen keep working and fighting at a slower pace.");
+                ui.small("Each village supports its own population; build houses where you want growth.");
+                ui.small("A lost village or raided hut only rallies the knights nearby.");
+                });
         });
+    action
+}
+
+/// On-screen size of the minimap, in points.
+const MINIMAP_SIZE: f32 = 200.0;
+/// Resolution of the minimap texture (it's square).
+const MINIMAP_PX: usize = 160;
+/// Smallest stretch of the world the minimap covers, in tiles.
+const MINIMAP_MIN_SPAN: i32 = 192;
+/// The minimap's area snaps to this many tiles, so panning only rebuilds the
+/// texture now and then instead of every frame.
+const MINIMAP_SNAP: i32 = 32;
+/// Seconds between refreshes while the area stays put, to pick up new land.
+const MINIMAP_REFRESH: f64 = 2.0;
+
+/// The minimap's terrain texture, rebuilt only when its area moves or it goes
+/// stale. Villages, ships and the camera are painted over it live.
+#[derive(Default)]
+pub struct Minimap {
+    tex: Option<TextureHandle>,
+    /// (left, top, span) in tiles of the area the texture shows.
+    area: (i32, i32, i32),
+    built_at: f64,
+}
+
+/// A linear map color as egui's sRGB `Color32`.
+fn color32(c: [f32; 4]) -> Color32 {
+    egui::Rgba::from_rgb(c[0], c[1], c[2]).into()
+}
+
+fn faction_color32(colors: &MapColors, f: Faction) -> Color32 {
+    color32(match f {
+        Faction::Player => colors.player,
+        Faction::Enemy => colors.enemy,
+        Faction::Ally => colors.ally,
+    })
+}
+
+const ALARM: Color32 = Color32::from_rgb(255, 110, 95);
+const CAUTION: Color32 = Color32::from_rgb(240, 190, 90);
+
+/// The square area of the world the minimap should show: all of the player's
+/// villages plus the camera's view, with some margin, snapped to a grid.
+fn minimap_area(game: &Game, view: View) -> (i32, i32, i32) {
+    let mut lo = view.center - view.half;
+    let mut hi = view.center + view.half;
+    for v in game
+        .villages()
+        .iter()
+        .filter(|v| v.faction == Faction::Player)
+    {
+        lo = lo.min(Vec2::new(v.min.0 as f32, v.min.1 as f32));
+        hi = hi.max(Vec2::new(v.max.0 as f32 + 1.0, v.max.1 as f32 + 1.0));
+    }
+    let margin = 24.0;
+    let size = (hi - lo) + Vec2::splat(margin * 2.0);
+    let span = (size.max_element().ceil() as i32).max(MINIMAP_MIN_SPAN);
+    let span = (span + MINIMAP_SNAP - 1) / MINIMAP_SNAP * MINIMAP_SNAP;
+    let mid = (lo + hi) * 0.5;
+    let snap = |v: f32| (v / MINIMAP_SNAP as f32).round() as i32 * MINIMAP_SNAP;
+    (snap(mid.x) - span / 2, snap(mid.y) - span / 2, span)
+}
+
+/// Sample the world into the minimap texture, one tile per pixel.
+fn minimap_image(game: &Game, colors: &MapColors, area: (i32, i32, i32)) -> egui::ColorImage {
+    let (x0, y0, span) = area;
+    let world = &game.world;
+    let step = span as f32 / MINIMAP_PX as f32;
+    let palette = [
+        color32(colors.unexplored),
+        color32(colors.water),
+        color32(colors.grass),
+        color32(colors.tree),
+        color32(colors.rock),
+    ];
+    let mut pixels = Vec::with_capacity(MINIMAP_PX * MINIMAP_PX);
+    for py in 0..MINIMAP_PX {
+        let y = (y0 as f32 + (py as f32 + 0.5) * step).floor() as i32;
+        for px in 0..MINIMAP_PX {
+            let x = (x0 as f32 + (px as f32 + 0.5) * step).floor() as i32;
+            let shade = if !world.is_generated(x, y) {
+                0
+            } else if world.tile(x, y) == crate::world::Tile::Water {
+                if world.is_bridge(x, y) { 4 } else { 1 }
+            } else {
+                match world.node(x, y).map(|n| n.kind) {
+                    Some(crate::world::Resource::Wood) => 3,
+                    Some(crate::world::Resource::Stone) => 4,
+                    None => 2,
+                }
+            };
+            pixels.push(palette[shade]);
+        }
+    }
+    egui::ColorImage::new([MINIMAP_PX, MINIMAP_PX], pixels)
+}
+
+/// Draw the minimap. Clicking or dragging on it pans the camera there.
+fn minimap_ui(
+    ui: &mut egui::Ui,
+    game: &Game,
+    view: View,
+    colors: &MapColors,
+    minimap: &mut Minimap,
+) -> Option<Action> {
+    let now = ui.input(|i| i.time);
+    let area = minimap_area(game, view);
+    if minimap.tex.is_none() || area != minimap.area || now - minimap.built_at > MINIMAP_REFRESH {
+        let image = minimap_image(game, colors, area);
+        match &mut minimap.tex {
+            Some(tex) => tex.set(image, TextureOptions::NEAREST),
+            None => {
+                minimap.tex = Some(
+                    ui.ctx()
+                        .load_texture("minimap", image, TextureOptions::NEAREST),
+                )
+            }
+        }
+        minimap.area = area;
+        minimap.built_at = now;
+    }
+    let (x0, y0, span) = minimap.area;
+    let origin = Vec2::new(x0 as f32, y0 as f32);
+    let span = span as f32;
+
+    let (response, painter) = ui.allocate_painter(
+        egui::vec2(MINIMAP_SIZE, MINIMAP_SIZE),
+        Sense::click_and_drag(),
+    );
+    let rect = response.rect;
+    let to_screen = |p: Vec2| {
+        let rel = (p - origin) / span;
+        rect.min + egui::vec2(rel.x, rel.y) * rect.size()
+    };
+
+    if let Some(tex) = &minimap.tex {
+        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        painter.image(tex.id(), rect, uv, Color32::WHITE);
+    }
+
+    // Villages, sized by house count. Ones under attack get a pulsing ring.
+    let pulse = (now * 4.0).sin() as f32 * 0.5 + 0.5;
+    for v in game.villages() {
+        let at = to_screen(v.center);
+        let r = 2.0 + (v.houses as f32).sqrt();
+        painter.circle_filled(at, r, faction_color32(colors, v.faction));
+        if v.faction == Faction::Player && v.threatened {
+            painter.circle_stroke(at, r + 2.0 + pulse * 3.0, Stroke::new(1.5, ALARM));
+        }
+    }
+    for s in game.ships() {
+        painter.circle_filled(to_screen(s.pos), 1.5, Color32::WHITE);
+    }
+    for w in game.warships() {
+        painter.circle_filled(to_screen(w.pos), 1.8, color32(colors.player));
+    }
+    for p in game.pirates() {
+        painter.circle_filled(to_screen(p.pos), 1.8, Color32::BLACK);
+    }
+    if let Some(r) = game.rally_point {
+        painter.circle_stroke(to_screen(r), 3.0, Stroke::new(1.5, CAUTION));
+    }
+
+    let seen = Rect::from_min_max(
+        to_screen(view.center - view.half),
+        to_screen(view.center + view.half),
+    );
+    painter.rect_stroke(
+        seen,
+        0.0,
+        Stroke::new(1.0, Color32::WHITE),
+        StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0, Color32::from_gray(90)),
+        StrokeKind::Inside,
+    );
+
+    let mut action = None;
+    if (response.clicked() || response.dragged())
+        && let Some(p) = response.interact_pointer_pos()
+    {
+        let rel = (p - rect.min) / rect.size();
+        action = Some(Action::Focus {
+            pos: origin + Vec2::new(rel.x, rel.y) * span,
+            zoom_in: false,
+        });
+    }
+    response.on_hover_text("Click or drag to move the camera");
+    action
+}
+
+/// Where `p` lies relative to the camera, like "120 tiles northeast".
+fn whereabouts(view: View, p: Vec2) -> String {
+    let d = p - view.center;
+    if d.x.abs() <= view.half.x && d.y.abs() <= view.half.y {
+        return "In view".to_string();
+    }
+    // The y axis points down the screen, so north is -y.
+    let angle = (-d.y).atan2(d.x).to_degrees().rem_euclid(360.0);
+    let directions = [
+        "east",
+        "northeast",
+        "north",
+        "northwest",
+        "west",
+        "southwest",
+        "south",
+        "southeast",
+    ];
+    let dir = directions[((angle + 22.5) / 45.0) as usize % 8];
+    let tiles = ((d.length() / 10.0).round() as i32 * 10).max(10);
+    format!("{tiles} tiles {dir}")
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// The realm panel: the minimap, the overview toggle, and a list of the
+/// player's villages with their defenders and a button to jump to each.
+fn realm_ui(
+    ctx: &egui::Context,
+    game: &Game,
+    view: View,
+    colors: &MapColors,
+    minimap: &mut Minimap,
+) -> Option<Action> {
+    let mut action = None;
+    egui::Window::new("Realm")
+        .anchor(Align2::RIGHT_TOP, [-12.0, 12.0])
+        .resizable(false)
+        .show(ctx, |ui| {
+            action = minimap_ui(ui, game, view, colors, minimap);
+            if ui
+                .add(egui::Button::selectable(
+                    view.overview,
+                    (icon(ui, icons::MAP), "Overview (M)"),
+                ))
+                .clicked()
+            {
+                action = Some(Action::ToggleOverview);
+            }
+
+            let count = |f: Faction| game.villages().iter().filter(|v| v.faction == f).count();
+            ui.small(format!(
+                "Villages: {} yours, {} enemy, {} allied",
+                count(Faction::Player),
+                count(Faction::Enemy),
+                count(Faction::Ally)
+            ));
+            ui.separator();
+
+            ui.add(WidgetAtom::new((
+                icon(ui, icons::CASTLE),
+                RichText::new("Your villages").heading(),
+            )));
+            // Trouble first: villages under attack, then undefended ones, then
+            // the rest by distance from the camera.
+            let mut mine: Vec<_> = game
+                .villages()
+                .iter()
+                .filter(|v| v.faction == Faction::Player)
+                .collect();
+            mine.sort_by(|a, b| {
+                let rank = |v: &crate::game::Village| (!v.threatened, v.knights + v.farmers > 0);
+                rank(a).cmp(&rank(b)).then(
+                    a.center
+                        .distance_squared(view.center)
+                        .total_cmp(&b.center.distance_squared(view.center)),
+                )
+            });
+            if mine.is_empty() {
+                ui.small("You hold no villages.");
+            }
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for (i, v) in mine.iter().enumerate() {
+                        ui.push_id(i, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button((icon(ui, icons::CROSSHAIR), "Go")).clicked() {
+                                    action = Some(Action::Focus {
+                                        pos: v.center,
+                                        zoom_in: true,
+                                    });
+                                }
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(whereabouts(view, v.center)).strong());
+                                    ui.small(format!(
+                                        "{} ({}/{} pop), {}, {}",
+                                        plural(v.houses, "house", "houses"),
+                                        v.pop,
+                                        v.cap,
+                                        plural(v.knights, "knight", "knights"),
+                                        plural(v.farmers, "farmer", "farmers"),
+                                    ));
+                                    if v.threatened {
+                                        let warn = icon(ui, icons::TRIANGLE_ALERT).tint(ALARM);
+                                        ui.add(WidgetAtom::new((
+                                            warn,
+                                            RichText::new("Under attack").color(ALARM),
+                                        )));
+                                    } else if v.knights + v.farmers == 0 {
+                                        ui.label(
+                                            RichText::new("No defenders, easy to take")
+                                                .small()
+                                                .color(CAUTION),
+                                        );
+                                    }
+                                });
+                            });
+                        });
+                    }
+                });
+        });
+    action
+}
+
+/// Recent alerts, stacked at the top of the screen, newest first. Each one can
+/// jump the camera to where it happened or be dismissed.
+fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action> {
+    let mut action = None;
+    let mut dismiss = None;
+    egui::Area::new(egui::Id::unique("alerts"))
+        .anchor(Align2::CENTER_TOP, [0.0, 12.0])
+        .show(ctx, |ui| {
+            for (i, alert) in game.alerts().iter().enumerate().rev() {
+                // Fade out over the last few seconds on screen.
+                let opacity = (alert.freshness() * 4.0).min(1.0);
+                ui.push_id(i, |ui| {
+                    ui.multiply_opacity(opacity);
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (glyph, tint, text) = match alert.kind {
+                                AlertKind::VillageThreatened => {
+                                    (icons::TRIANGLE_ALERT, ALARM, "A village is under attack")
+                                }
+                                AlertKind::HutRaided => {
+                                    (icons::TENT, ALARM, "Raiders are attacking a hut")
+                                }
+                                AlertKind::VillageLost => (
+                                    icons::FLAG,
+                                    ALARM,
+                                    "A village has fallen. Your knights are rallying to retake it",
+                                ),
+                                AlertKind::VillageCaptured => (
+                                    icons::CASTLE,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "You captured a village",
+                                ),
+                                AlertKind::CargoSunk => {
+                                    (icons::SHIP, ALARM, "Pirates sank a cargo ship")
+                                }
+                                AlertKind::WarshipSunk => {
+                                    (icons::ANCHOR, ALARM, "Pirates sank a warship")
+                                }
+                            };
+                            ui.add(icon(ui, glyph).tint(tint));
+                            ui.label(RichText::new(text).color(tint));
+                            ui.small(format!("({})", whereabouts(view, alert.pos)));
+                            if ui.button((icon(ui, icons::CROSSHAIR), "Go")).clicked() {
+                                action = Some(Action::Focus {
+                                    pos: alert.pos,
+                                    zoom_in: true,
+                                });
+                            }
+                            if ui.small_button(icon(ui, icons::X)).clicked() {
+                                dismiss = Some(i);
+                            }
+                        });
+                    });
+                });
+            }
+        });
+    if let Some(i) = dismiss {
+        game.dismiss_alert(i);
+    }
     action
 }
 

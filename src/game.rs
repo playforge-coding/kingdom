@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use glam::Vec2;
 
+use crate::grid::Grid;
 use crate::pathfind;
 use crate::world::{CHUNK, Node, Resource, Wall, World};
 
@@ -115,6 +116,10 @@ pub struct Entity {
     build_site: Option<Tile>,
     /// Set when a farmer has ducked into a hut this tick (removed afterward).
     sheltered: bool,
+    /// Simulation time owed to an off-screen entity. It accrues while the unit
+    /// waits its turn and is spent (capped) when its rotating batch comes up,
+    /// so the far realm runs at a slower tick instead of freezing. Transient.
+    pending: f32,
 }
 
 fn max_hp_for(faction: Faction, job: Job) -> f32 {
@@ -146,6 +151,7 @@ impl Entity {
             mine_target: None,
             build_site: None,
             sheltered: false,
+            pending: 0.0,
         }
     }
 
@@ -293,6 +299,10 @@ const COMBAT_RANGE: f32 = 0.9;
 /// How close a knight must get to the rally flag to count as "arrived" (which
 /// then lifts the flag for the whole group).
 const RALLY_ARRIVE_RADIUS: f32 = 2.5;
+/// An auto-raised rally (lost village, raided hut) only calls knights within
+/// this range of the flag, so one brushfire doesn't drag the whole realm's
+/// army across the map. A flag the player plants calls everyone.
+const AUTO_RALLY_RADIUS: f32 = 64.0;
 const ATTACK_DPS: f32 = 16.0;
 /// Walls are tough, so breaking one takes several seconds of hacking.
 const WALL_MAX_HP: f32 = 220.0;
@@ -340,10 +350,31 @@ enum StepEvent {
     Hide(Tile),
 }
 
-const ENEMY_CAP: usize = 16;
 const ENEMY_SPAWN_INTERVAL: f32 = 9.0;
 const PLAYER_SPAWN_INTERVAL: f32 = 7.0;
-const PLAYER_POP_MAX: usize = 40;
+
+// Population is capped per village, so every settlement supports its own
+// people and a freshly founded or captured village grows a real garrison
+// instead of draining one shared allowance. Each faction also has a global
+// ceiling so the endless frontier can't snowball the simulation.
+/// Base population a player village supports before counting its houses.
+const VILLAGE_POP_BASE: usize = 4;
+/// Extra population per house in a player village.
+const VILLAGE_POP_PER_HOUSE: usize = 3;
+/// Ceiling on the player's total population across all villages.
+const PLAYER_POP_MAX: usize = 120;
+/// Population cap of a single enemy village (they seed with about five units).
+const ENEMY_VILLAGE_POP: usize = 8;
+/// Ceiling on enemy units across all their villages.
+const ENEMY_POP_MAX: usize = 64;
+/// Population cap of a single allied village.
+const ALLY_VILLAGE_POP: usize = 6;
+/// Ceiling on allied units across all their villages.
+const ALLY_POP_MAX: usize = 36;
+/// A unit within this range of a village's center counts as that village's
+/// population when deciding which village may raise the next unit. Villages
+/// are spaced farther apart than this, so the attribution is unambiguous.
+const VILLAGE_ATTRIBUTION_RADIUS: f32 = 32.0;
 /// Houses only raise new workers while the faction has *more than* this many
 /// farmers to support them.
 const MIN_FARMERS_TO_GROW: usize = 3;
@@ -375,8 +406,6 @@ const ENEMY_VILLAGES: usize = 4;
 const ALLY_VILLAGES: usize = 2;
 /// Allied camps raise new units on their own clock, like the enemy.
 const ALLY_SPAWN_INTERVAL: f32 = 10.0;
-/// Most allied units alive at once across all their villages.
-const ALLY_CAP: usize = 12;
 
 // The world is effectively infinite, so the initial villages above are only a
 // seed: fresh enemy and allied settlements keep being founded forever, each
@@ -407,6 +436,15 @@ const RIVER_BUDGET: usize = 40_000;
 const ENSURE_MARGIN: i32 = 40;
 /// Pathfinding budget (tiles expanded).
 const PATH_BUDGET: usize = 4000;
+
+/// How many off-screen entities are stepped per frame. The rest accrue time
+/// and wait their turn in a round-robin, so the far realm keeps moving at a
+/// slower tick however large the population grows.
+const OFFSCREEN_BUDGET: usize = 48;
+/// Longest catch-up step handed to an off-screen entity when its turn comes.
+/// Under heavy load distant units fall behind real time rather than taking
+/// huge, unstable steps.
+const MAX_CATCHUP_DT: f32 = 0.25;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BuildMode {
@@ -521,6 +559,67 @@ pub struct Cannonball {
     from_pirate: bool,
 }
 
+/// How far past a village's capture radius a hostile unit counts as a threat,
+/// so the alarm sounds while there's still time to react.
+const THREAT_MARGIN: f32 = 4.0;
+/// Seconds an alert stays on screen.
+const ALERT_LIFETIME: f32 = 12.0;
+/// Most alerts kept at once; the oldest drop off first.
+const MAX_ALERTS: usize = 5;
+/// Alerts of the same kind this close together are one situation, not two.
+const ALERT_MERGE_RADIUS: f32 = 14.0;
+/// Seconds a situation must stay quiet before it can raise a fresh alert.
+const ALERT_COOLDOWN: f32 = 20.0;
+
+/// One settlement (a cluster of houses) as the HUD and the far-zoom map see
+/// it. Rebuilt every frame by `survey_villages`; never saved.
+#[derive(Clone)]
+pub struct Village {
+    pub faction: Faction,
+    pub center: Vec2,
+    /// Inclusive tile bounds of its houses.
+    pub min: Tile,
+    pub max: Tile,
+    pub houses: usize,
+    /// The owner's units inside the capture radius: the defenders whose presence
+    /// keeps the village from being taken.
+    pub knights: usize,
+    pub farmers: usize,
+    /// A hostile unit is in or near the village.
+    pub threatened: bool,
+    /// Units attributed to this village: everyone of its faction whose nearest
+    /// village is this one, within `VILLAGE_ATTRIBUTION_RADIUS` of its center.
+    pub pop: usize,
+    /// How many units this village supports on its own.
+    pub cap: usize,
+}
+
+/// Something the player should look at, shown as a clickable toast.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AlertKind {
+    VillageThreatened,
+    HutRaided,
+    VillageLost,
+    VillageCaptured,
+    CargoSunk,
+    WarshipSunk,
+}
+
+#[derive(Clone, Copy)]
+pub struct Alert {
+    pub kind: AlertKind,
+    pub pos: Vec2,
+    /// Seconds since it was raised.
+    pub age: f32,
+}
+
+impl Alert {
+    /// How much of its time on screen is left, from 1 (new) to 0 (expiring).
+    pub fn freshness(&self) -> f32 {
+        (1.0 - self.age / ALERT_LIFETIME).clamp(0.0, 1.0)
+    }
+}
+
 /// Which kind of villager the player's houses favor raising.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
@@ -585,6 +684,11 @@ pub struct Game {
     /// Player-set waypoint knights rush to (overriding combat); cleared once
     /// they arrive. Also raised automatically when a village is lost.
     pub rally_point: Option<Vec2>,
+    /// `None` for a flag the player planted (it calls every knight); for an
+    /// auto-raised flag, only knights within this range answer. Transient.
+    rally_response: Option<f32>,
+    /// Round-robin position for stepping off-screen entities. Transient.
+    offscreen_cursor: usize,
     /// Seconds left on a proclaimed draft (0 when none is in force). While it
     /// counts down, farmers are conscripted into knights (see `run_draft`).
     /// Transient, since a proclamation doesn't survive a save/load.
@@ -617,6 +721,13 @@ pub struct Game {
     /// The player's home landmass, flood-filled once and cached, so allied
     /// villages can be kept off it (reaching them means a sea voyage).
     home_continent: Option<HashSet<Tile>>,
+    /// Every settlement on the map, surveyed each frame (transient).
+    villages: Vec<Village>,
+    /// Toasts for the HUD, newest last (transient).
+    alerts: Vec<Alert>,
+    /// Recently alerted situations and the seconds until each may alert again,
+    /// so an ongoing raid raises one toast rather than one per frame.
+    alert_cooldowns: Vec<(AlertKind, Vec2, f32)>,
     rng: Rng,
 }
 
@@ -792,6 +903,8 @@ impl Game {
             enemies_defeated: 0,
             units_lost: 0,
             rally_point: None,
+            rally_response: None,
+            offscreen_cursor: 0,
             draft_timer: 0.0,
             player_house_tiles,
             cave_tiles: Vec::new(),
@@ -810,6 +923,9 @@ impl Game {
             enemy_villages_founded: ENEMY_VILLAGES as u32,
             ally_villages_founded: ALLY_VILLAGES as u32,
             home_continent: Some(home),
+            villages: Vec::new(),
+            alerts: Vec::new(),
+            alert_cooldowns: Vec::new(),
             rng: Rng::new(seed as u64 ^ 0xD1B54A32D192ED03),
         }
     }
@@ -854,8 +970,23 @@ impl Game {
             .filter(|e| e.faction == faction && e.job == Job::Farmer)
             .count()
     }
+    /// The player's total population allowance: each village supports its own
+    /// people, and the kingdom-wide cap is the sum over villages (ceilinged).
+    /// Before the first survey of a fresh or loaded game the houses haven't
+    /// been clustered yet, so fall back to treating them as one village.
     pub fn pop_cap(&self) -> usize {
-        (6 + self.player_house_tiles.len() * 3).min(PLAYER_POP_MAX)
+        let per_village: usize = self
+            .villages
+            .iter()
+            .filter(|v| v.faction == Faction::Player)
+            .map(|v| v.cap)
+            .sum();
+        let cap = if per_village > 0 {
+            per_village
+        } else {
+            VILLAGE_POP_BASE + self.player_house_tiles.len() * VILLAGE_POP_PER_HOUSE
+        };
+        cap.min(PLAYER_POP_MAX)
     }
 
     /// Can a house be placed at `(x, y)`? That is, is it close enough to one the
@@ -886,19 +1017,52 @@ impl Game {
     pub fn update(&mut self, dt: f32, sim: (i32, i32, i32, i32)) {
         let dt = dt.min(0.1);
 
-        // Only entities near the player's view are simulated. A distant, unwatched
-        // corner of the map is frozen so huge populations don't tank the frame rate.
         let (sx0, sy0, sx1, sy1) = sim;
         let in_sim = |t: Tile| t.0 >= sx0 && t.0 <= sx1 && t.1 >= sy0 && t.1 <= sy1;
 
-        // Keep chunks generated around the simulated (on-screen) entities.
-        self.ensure_around_entities(sim);
+        // Survey first so spawning sees this frame's village populations.
+        self.survey_villages();
         self.handle_spawns(dt);
         self.run_draft(dt);
         self.grow_saplings(dt);
 
-        let snap: Vec<(Vec2, Faction)> = self.entities.iter().map(|e| (e.pos, e.faction)).collect();
+        // Decide who is stepped this frame, and by how much. Everyone near the
+        // view runs at the full frame rate; the rest of the realm accrues time
+        // and is stepped in rotating batches, so distant villages keep
+        // gathering, fighting, and falling at a slower tick instead of
+        // freezing the moment they scroll off screen.
         let n = self.entities.len();
+        let mut step_dt: Vec<Option<f32>> = vec![None; n];
+        for (i, e) in self.entities.iter_mut().enumerate() {
+            if in_sim(e.tile()) {
+                e.pending = 0.0;
+                step_dt[i] = Some(dt);
+            } else {
+                e.pending += dt;
+            }
+        }
+        if n > 0 {
+            let mut granted = 0;
+            let mut examined = 0;
+            while granted < OFFSCREEN_BUDGET && examined < n {
+                let i = (self.offscreen_cursor + examined) % n;
+                examined += 1;
+                if step_dt[i].is_some() {
+                    continue;
+                }
+                let e = &mut self.entities[i];
+                step_dt[i] = Some(e.pending.min(MAX_CATCHUP_DT));
+                e.pending = 0.0;
+                granted += 1;
+            }
+            self.offscreen_cursor = (self.offscreen_cursor + examined) % n;
+        }
+
+        // Keep chunks generated around everyone being stepped this frame.
+        self.ensure_around_active(&step_dt);
+
+        let snap: Vec<(Vec2, Faction)> = self.entities.iter().map(|e| (e.pos, e.faction)).collect();
+        let grid = Grid::build(snap.iter().map(|&(p, _)| p));
 
         // How many farmers are already working each mine, so we can cap the crowd.
         let mut cave_use: std::collections::HashMap<Tile, u32> = std::collections::HashMap::new();
@@ -925,36 +1089,37 @@ impl Game {
             std::collections::HashMap::new();
         let mut hut_damage: std::collections::HashMap<Tile, f32> = std::collections::HashMap::new();
         for i in 0..n {
-            if self.entities[i].job != Job::Knight || !in_sim(self.entities[i].tile()) {
+            let Some(adt) = step_dt[i] else { continue };
+            if self.entities[i].job != Job::Knight {
                 continue;
             }
             let (pi, fi) = snap[i];
             let mut best: Option<usize> = None;
             let mut bd = COMBAT_RANGE * COMBAT_RANGE;
-            for (j, &(pj, fj)) in snap.iter().enumerate() {
-                if j == i || !hostile(fi, fj) {
-                    continue;
+            grid.for_each_within(pi, COMBAT_RANGE, |j, pj| {
+                if j == i || !hostile(fi, snap[j].1) {
+                    return;
                 }
                 let d = pi.distance_squared(pj);
                 if d <= bd {
                     bd = d;
                     best = Some(j);
                 }
-            }
+            });
             if let Some(j) = best {
-                damage[j] += ATTACK_DPS * dt;
+                damage[j] += ATTACK_DPS * adt;
                 acting[i] = true;
                 self.entities[i].facing = dir_from_vec(snap[j].0 - pi);
             } else if let Some(wall) =
                 adjacent_enemy_wall(&self.world, owner_of(fi), self.entities[i].tile())
             {
-                *wall_damage.entry(wall).or_insert(0.0) += WALL_DPS * dt;
+                *wall_damage.entry(wall).or_insert(0.0) += WALL_DPS * adt;
                 acting[i] = true;
                 self.entities[i].facing = dir_from_vec(tile_center(wall) - pi);
             } else if let Some(hut) =
                 adjacent_enemy_hut(&self.world, owner_of(fi), self.entities[i].tile())
             {
-                *hut_damage.entry(hut).or_insert(0.0) += WALL_DPS * dt;
+                *hut_damage.entry(hut).or_insert(0.0) += WALL_DPS * adt;
                 acting[i] = true;
                 self.entities[i].facing = dir_from_vec(tile_center(hut) - pi);
             }
@@ -973,6 +1138,8 @@ impl Game {
                 && h.occupants > 0
             {
                 self.rally_point = Some(tile_center(tile));
+                self.rally_response = Some(AUTO_RALLY_RADIUS);
+                self.alert_ongoing(AlertKind::HutRaided, tile_center(tile));
             }
             if let Some(hut) = self.world.damage_hut(tile.0, tile.1, dmg) {
                 // Razed with farmers still inside, so they're lost with it.
@@ -988,15 +1155,19 @@ impl Game {
 
         // AI + movement.
         for i in 0..n {
-            if !in_sim(self.entities[i].tile()) {
-                continue;
-            }
+            let Some(adt) = step_dt[i] else { continue };
             let faction = self.entities[i].faction;
             let under = match faction {
                 Faction::Player => player_under,
                 Faction::Enemy => enemy_under,
                 Faction::Ally => ally_under,
             };
+            // An auto-raised rally flag only calls knights close enough to
+            // answer; a player-planted one calls everyone.
+            let rally = self.rally_point.filter(|r| {
+                self.rally_response
+                    .is_none_or(|rad| self.entities[i].pos.distance_squared(*r) <= rad * rad)
+            });
             let event = match (faction, self.entities[i].job) {
                 (Faction::Player, Job::Farmer) => {
                     let mut farm = FarmCtx {
@@ -1010,15 +1181,16 @@ impl Game {
                         &mut self.entities[i],
                         &mut self.rng,
                         &snap,
+                        &grid,
                         acting[i],
                         under,
                         &self.player_house_tiles,
                         pref,
-                        self.rally_point,
+                        rally,
                         &self.hut_tiles,
                         &self.hut_orders,
                         Some(&mut farm),
-                        dt,
+                        adt,
                     )
                 }
                 (Faction::Player, _) => ai_step(
@@ -1026,21 +1198,23 @@ impl Game {
                     &mut self.entities[i],
                     &mut self.rng,
                     &snap,
+                    &grid,
                     acting[i],
                     under,
                     &self.player_house_tiles,
                     pref,
-                    self.rally_point,
+                    rally,
                     &self.hut_tiles,
                     &self.hut_orders,
                     None,
-                    dt,
+                    adt,
                 ),
                 (Faction::Enemy, _) => ai_step(
                     &self.world,
                     &mut self.entities[i],
                     &mut self.rng,
                     &snap,
+                    &grid,
                     acting[i],
                     under,
                     &self.world.enemy_house_tiles,
@@ -1049,13 +1223,14 @@ impl Game {
                     &self.hut_tiles,
                     &[],
                     None,
-                    dt,
+                    adt,
                 ),
                 (Faction::Ally, _) => ai_step(
                     &self.world,
                     &mut self.entities[i],
                     &mut self.rng,
                     &snap,
+                    &grid,
                     acting[i],
                     under,
                     &self.world.ally_house_tiles,
@@ -1064,7 +1239,7 @@ impl Game {
                     &self.hut_tiles,
                     &[],
                     None,
-                    dt,
+                    adt,
                 ),
             };
             match event {
@@ -1129,6 +1304,7 @@ impl Game {
         self.emerge_from_huts();
         self.clear_reached_rally();
         self.resolve_captures();
+        self.age_alerts(dt);
         self.update_ships(dt);
         self.update_pirates(dt);
         // Sail the navy after the pirates so warships react to this frame's
@@ -1293,6 +1469,7 @@ impl Game {
             .position(|s| (s.pos - bp).length_squared() < r2)
         {
             log::info!("a cargo ship was sunk by pirates, its cargo lost at sea!");
+            self.push_alert(AlertKind::CargoSunk, self.ships[si].pos);
             self.ships.swap_remove(si);
             return true;
         }
@@ -1304,6 +1481,7 @@ impl Game {
             self.warships[wi].hp -= CANNON_DAMAGE;
             if self.warships[wi].hp <= 0.0 {
                 log::info!("a warship was sunk by pirates!");
+                self.push_alert(AlertKind::WarshipSunk, self.warships[wi].pos);
                 self.warships.swap_remove(wi);
             }
             return true;
@@ -1507,13 +1685,24 @@ impl Game {
     fn clear_reached_rally(&mut self) {
         if let Some(r) = self.rally_point {
             let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
-            let arrived = self.entities.iter().any(|e| {
-                e.faction == Faction::Player
-                    && e.job == Job::Knight
-                    && e.pos.distance_squared(r) <= r2
+            let knights = |e: &&Entity| e.faction == Faction::Player && e.job == Job::Knight;
+            let arrived = self
+                .entities
+                .iter()
+                .filter(knights)
+                .any(|e| e.pos.distance_squared(r) <= r2);
+            // An auto-raised flag with no knight close enough to answer is
+            // pointless; lift it rather than leave it standing forever.
+            let unanswerable = self.rally_response.is_some_and(|rad| {
+                !self
+                    .entities
+                    .iter()
+                    .filter(knights)
+                    .any(|e| e.pos.distance_squared(r) <= rad * rad)
             });
-            if arrived {
+            if arrived || unanswerable {
                 self.rally_point = None;
+                self.rally_response = None;
             }
         }
     }
@@ -1532,6 +1721,7 @@ impl Game {
                     self.world.convert_house(x, y, 0);
                     self.world.reown_walls_near(x, y, 4, 1, 0);
                 }
+                self.push_alert(AlertKind::VillageCaptured, village_center(&village));
                 changed = true;
             }
         }
@@ -1543,9 +1733,12 @@ impl Game {
                     self.world.convert_house(x, y, 1);
                     self.world.reown_walls_near(x, y, 4, 0, 1);
                 }
-                // Sound the alarm: rally every (simulated) knight to the fallen
-                // village to come to their allies' aid and retake it.
+                // Sound the alarm: rally the knights near the fallen village to
+                // come to their allies' aid and retake it. Knights farther out
+                // stay at their own posts.
                 self.rally_point = Some(village_center(&village));
+                self.rally_response = Some(AUTO_RALLY_RADIUS);
+                self.push_alert(AlertKind::VillageLost, village_center(&village));
                 log::info!("village lost, knights rallying to retake it");
                 changed = true;
             }
@@ -1580,6 +1773,168 @@ impl Game {
         !owner_present && attacker_present
     }
 
+    /// Rebuild the village list: cluster each faction's houses, then count the
+    /// defenders standing in each and check whether a hostile unit is closing
+    /// in. A threatened player village raises an alert.
+    fn survey_villages(&mut self) {
+        let capture2 = CAPTURE_RADIUS * CAPTURE_RADIUS;
+        let reach = CAPTURE_RADIUS + THREAT_MARGIN;
+        let threat2 = reach * reach;
+        let mut villages = Vec::new();
+        for (faction, tiles) in [
+            (Faction::Player, &self.player_house_tiles),
+            (Faction::Enemy, &self.world.enemy_house_tiles),
+            (Faction::Ally, &self.world.ally_house_tiles),
+        ] {
+            for houses in cluster(tiles) {
+                let min = houses
+                    .iter()
+                    .fold((i32::MAX, i32::MAX), |m, &(x, y)| (m.0.min(x), m.1.min(y)));
+                let max = houses
+                    .iter()
+                    .fold((i32::MIN, i32::MIN), |m, &(x, y)| (m.0.max(x), m.1.max(y)));
+                let cap = match faction {
+                    Faction::Player => VILLAGE_POP_BASE + houses.len() * VILLAGE_POP_PER_HOUSE,
+                    Faction::Enemy => ENEMY_VILLAGE_POP,
+                    Faction::Ally => ALLY_VILLAGE_POP,
+                };
+                let mut v = Village {
+                    faction,
+                    center: village_center(&houses),
+                    min,
+                    max,
+                    houses: houses.len(),
+                    knights: 0,
+                    farmers: 0,
+                    threatened: false,
+                    pop: 0,
+                    cap,
+                };
+                let lo = Vec2::new(min.0 as f32, min.1 as f32) - Vec2::splat(reach);
+                let hi = Vec2::new(max.0 as f32, max.1 as f32) + Vec2::splat(reach + 1.0);
+                for e in &self.entities {
+                    if e.pos.x < lo.x || e.pos.y < lo.y || e.pos.x > hi.x || e.pos.y > hi.y {
+                        continue;
+                    }
+                    let d2 = houses
+                        .iter()
+                        .map(|&h| e.pos.distance_squared(tile_center(h)))
+                        .fold(f32::MAX, f32::min);
+                    if e.faction == faction && d2 <= capture2 {
+                        match e.job {
+                            Job::Knight => v.knights += 1,
+                            Job::Farmer => v.farmers += 1,
+                        }
+                    } else if hostile(e.faction, faction) && d2 <= threat2 {
+                        v.threatened = true;
+                    }
+                }
+                villages.push(v);
+            }
+        }
+        // Attribute each unit to the nearest village of its own faction, so
+        // spawning knows which villages still have room to grow. Units at war
+        // far from any village count toward no one's allowance.
+        let attr2 = VILLAGE_ATTRIBUTION_RADIUS * VILLAGE_ATTRIBUTION_RADIUS;
+        for e in &self.entities {
+            let nearest = villages
+                .iter_mut()
+                .filter(|v| v.faction == e.faction)
+                .map(|v| (e.pos.distance_squared(v.center), v))
+                .min_by(|(a, _), (b, _)| a.total_cmp(b));
+            if let Some((d2, v)) = nearest
+                && d2 <= attr2
+            {
+                v.pop += 1;
+            }
+        }
+        let under_attack: Vec<Vec2> = villages
+            .iter()
+            .filter(|v| v.faction == Faction::Player && v.threatened)
+            .map(|v| v.center)
+            .collect();
+        for c in under_attack {
+            self.alert_ongoing(AlertKind::VillageThreatened, c);
+        }
+        self.villages = villages;
+    }
+
+    /// Alert for a situation that lasts across frames, like a raid in progress:
+    /// toast it once, then stay quiet until it has been calm for
+    /// `ALERT_COOLDOWN` seconds.
+    fn alert_ongoing(&mut self, kind: AlertKind, pos: Vec2) {
+        let r2 = ALERT_MERGE_RADIUS * ALERT_MERGE_RADIUS;
+        if let Some(c) = self
+            .alert_cooldowns
+            .iter_mut()
+            .find(|(k, p, _)| *k == kind && p.distance_squared(pos) <= r2)
+        {
+            c.2 = ALERT_COOLDOWN;
+            return;
+        }
+        self.alert_cooldowns.push((kind, pos, ALERT_COOLDOWN));
+        self.push_alert(kind, pos);
+    }
+
+    /// Toast a one-off event. A repeat of one still on screen nearby just
+    /// refreshes it instead of stacking a duplicate.
+    fn push_alert(&mut self, kind: AlertKind, pos: Vec2) {
+        let r2 = ALERT_MERGE_RADIUS * ALERT_MERGE_RADIUS;
+        if let Some(a) = self
+            .alerts
+            .iter_mut()
+            .find(|a| a.kind == kind && a.pos.distance_squared(pos) <= r2)
+        {
+            a.age = 0.0;
+            a.pos = pos;
+            return;
+        }
+        self.alerts.push(Alert {
+            kind,
+            pos,
+            age: 0.0,
+        });
+        if self.alerts.len() > MAX_ALERTS {
+            self.alerts.remove(0);
+        }
+    }
+
+    fn age_alerts(&mut self, dt: f32) {
+        for a in &mut self.alerts {
+            a.age += dt;
+        }
+        self.alerts.retain(|a| a.age < ALERT_LIFETIME);
+        for c in &mut self.alert_cooldowns {
+            c.2 -= dt;
+        }
+        self.alert_cooldowns.retain(|c| c.2 > 0.0);
+    }
+
+    /// Every settlement on the map as of the last update.
+    pub fn villages(&self) -> &[Village] {
+        &self.villages
+    }
+
+    /// Alerts currently on screen, oldest first.
+    pub fn alerts(&self) -> &[Alert] {
+        &self.alerts
+    }
+
+    pub fn dismiss_alert(&mut self, i: usize) {
+        if i < self.alerts.len() {
+            self.alerts.remove(i);
+        }
+    }
+
+    pub fn player_houses(&self) -> &[Tile] {
+        &self.player_house_tiles
+    }
+
+    /// Every hut on the map, all factions.
+    pub fn huts(&self) -> &[Tile] {
+        &self.hut_tiles
+    }
+
     /// Rebuild the cached list of player-owned house tiles from the world.
     fn rescan_player_houses(&mut self) {
         self.player_house_tiles.clear();
@@ -1595,31 +1950,22 @@ impl Game {
         }
     }
 
-    fn ensure_around_entities(&mut self, sim: (i32, i32, i32, i32)) {
-        let (sx0, sy0, sx1, sy1) = sim;
-        let (mut minx, mut miny, mut maxx, mut maxy) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        let mut any = false;
-        for e in &self.entities {
-            let (tx, ty) = e.tile();
-            // Only bother generating land around entities we're actually simulating.
-            if tx < sx0 || tx > sx1 || ty < sy0 || ty > sy1 {
+    /// Generate the land around every entity stepped this frame. Each unit gets
+    /// its own margin rather than sharing one bounding box, so a zoomed-out
+    /// view spanning distant villages doesn't generate all the sea between them.
+    fn ensure_around_active(&mut self, step_dt: &[Option<f32>]) {
+        for (i, e) in self.entities.iter().enumerate() {
+            if step_dt.get(i).copied().flatten().is_none() {
                 continue;
             }
-            any = true;
-            minx = minx.min(tx);
-            miny = miny.min(ty);
-            maxx = maxx.max(tx);
-            maxy = maxy.max(ty);
+            let (tx, ty) = e.tile();
+            self.world.ensure_region(
+                tx - ENSURE_MARGIN,
+                ty - ENSURE_MARGIN,
+                tx + ENSURE_MARGIN,
+                ty + ENSURE_MARGIN,
+            );
         }
-        if !any {
-            return;
-        }
-        self.world.ensure_region(
-            minx - ENSURE_MARGIN,
-            miny - ENSURE_MARGIN,
-            maxx + ENSURE_MARGIN,
-            maxy + ENSURE_MARGIN,
-        );
     }
 
     /// Advance sown saplings; a mature one becomes a real tree (wood node).
@@ -1642,26 +1988,55 @@ impl Game {
         }
     }
 
+    /// A spot to raise a new unit for `faction`: a random village of theirs
+    /// with room under its own population cap, then a walkable tile beside one
+    /// of its houses. `None` when every village is full (or none is surveyed
+    /// yet, right after a world is created or loaded).
+    fn spawn_site(&mut self, faction: Faction) -> Option<Tile> {
+        let candidates: Vec<usize> = self
+            .villages
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.faction == faction && v.pop < v.cap)
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let pick = candidates[self.rng.range(0, candidates.len() as i32) as usize];
+        let (min, max) = (self.villages[pick].min, self.villages[pick].max);
+        let houses: Vec<Tile> = match faction {
+            Faction::Player => &self.player_house_tiles,
+            Faction::Enemy => &self.world.enemy_house_tiles,
+            Faction::Ally => &self.world.ally_house_tiles,
+        }
+        .iter()
+        .copied()
+        .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
+        .collect();
+        if houses.is_empty() {
+            return None;
+        }
+        let (hx, hy) = houses[self.rng.range(0, houses.len() as i32) as usize];
+        adjacent_walkable(&self.world, hx, hy)
+    }
+
     fn handle_spawns(&mut self, dt: f32) {
         self.enemy_spawn_timer -= dt;
         if self.enemy_spawn_timer <= 0.0 {
             let farmers = self.farmer_count(Faction::Enemy);
             self.enemy_spawn_timer = spawn_interval(ENEMY_SPAWN_INTERVAL, farmers);
-            if !self.world.enemy_house_tiles.is_empty()
-                && self.enemy_count() < ENEMY_CAP
+            if self.enemy_count() < ENEMY_POP_MAX
                 && farmers > MIN_FARMERS_TO_GROW
+                && let Some(t) = self.spawn_site(Faction::Enemy)
             {
-                let pick = self.rng.range(0, self.world.enemy_house_tiles.len() as i32) as usize;
-                let (hx, hy) = self.world.enemy_house_tiles[pick];
-                if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
-                    let job = if self.enemy_spawn_cycle % 3 == 2 {
-                        Job::Farmer
-                    } else {
-                        Job::Knight
-                    };
-                    self.enemy_spawn_cycle += 1;
-                    self.entities.push(Entity::new(Faction::Enemy, job, t));
-                }
+                let job = if self.enemy_spawn_cycle % 3 == 2 {
+                    Job::Farmer
+                } else {
+                    Job::Knight
+                };
+                self.enemy_spawn_cycle += 1;
+                self.entities.push(Entity::new(Faction::Enemy, job, t));
             }
         }
 
@@ -1669,44 +2044,40 @@ impl Game {
         if self.player_spawn_timer <= 0.0 {
             let farmers = self.farmer_count(Faction::Player);
             self.player_spawn_timer = spawn_interval(PLAYER_SPAWN_INTERVAL, farmers);
-            if !self.player_house_tiles.is_empty()
-                && self.population() < self.pop_cap()
+            if self.population() < self.pop_cap()
                 && farmers > MIN_FARMERS_TO_GROW
+                && let Some(t) = self.spawn_site(Faction::Player)
             {
-                let pick = self.rng.range(0, self.player_house_tiles.len() as i32) as usize;
-                let (hx, hy) = self.player_house_tiles[pick];
-                if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
-                    // Agriculture favors farmers (2:1); Military favors
-                    // knights (1:2). Both still raise some of each.
-                    let c = self.player_spawn_cycle % 3;
-                    let mut job = match self.priority {
-                        Priority::Agriculture => {
-                            if c == 2 {
-                                Job::Knight
-                            } else {
-                                Job::Farmer
-                            }
-                        }
-                        Priority::Military => {
-                            if c == 0 {
-                                Job::Farmer
-                            } else {
-                                Job::Knight
-                            }
-                        }
-                    };
-                    // Knights must be paid for; an empty treasury raises a
-                    // (free) farmer instead, so the village still grows.
-                    if job == Job::Knight {
-                        if self.money >= KNIGHT_GOLD_COST {
-                            self.money -= KNIGHT_GOLD_COST;
+                // Agriculture favors farmers (2:1); Military favors
+                // knights (1:2). Both still raise some of each.
+                let c = self.player_spawn_cycle % 3;
+                let mut job = match self.priority {
+                    Priority::Agriculture => {
+                        if c == 2 {
+                            Job::Knight
                         } else {
-                            job = Job::Farmer;
+                            Job::Farmer
                         }
                     }
-                    self.player_spawn_cycle += 1;
-                    self.entities.push(Entity::new(Faction::Player, job, t));
+                    Priority::Military => {
+                        if c == 0 {
+                            Job::Farmer
+                        } else {
+                            Job::Knight
+                        }
+                    }
+                };
+                // Knights must be paid for; an empty treasury raises a
+                // (free) farmer instead, so the village still grows.
+                if job == Job::Knight {
+                    if self.money >= KNIGHT_GOLD_COST {
+                        self.money -= KNIGHT_GOLD_COST;
+                    } else {
+                        job = Job::Farmer;
+                    }
                 }
+                self.player_spawn_cycle += 1;
+                self.entities.push(Entity::new(Faction::Player, job, t));
             }
         }
 
@@ -1716,21 +2087,17 @@ impl Game {
         if self.ally_spawn_timer <= 0.0 {
             let farmers = self.farmer_count(Faction::Ally);
             self.ally_spawn_timer = spawn_interval(ALLY_SPAWN_INTERVAL, farmers);
-            if !self.world.ally_house_tiles.is_empty()
-                && self.ally_count() < ALLY_CAP
+            if self.ally_count() < ALLY_POP_MAX
                 && farmers > MIN_FARMERS_TO_GROW
+                && let Some(t) = self.spawn_site(Faction::Ally)
             {
-                let pick = self.rng.range(0, self.world.ally_house_tiles.len() as i32) as usize;
-                let (hx, hy) = self.world.ally_house_tiles[pick];
-                if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
-                    let job = if self.ally_spawn_cycle % 3 == 2 {
-                        Job::Farmer
-                    } else {
-                        Job::Knight
-                    };
-                    self.ally_spawn_cycle += 1;
-                    self.entities.push(Entity::new(Faction::Ally, job, t));
-                }
+                let job = if self.ally_spawn_cycle % 3 == 2 {
+                    Job::Farmer
+                } else {
+                    Job::Knight
+                };
+                self.ally_spawn_cycle += 1;
+                self.entities.push(Entity::new(Faction::Ally, job, t));
             }
         }
 
@@ -1956,12 +2323,14 @@ impl Game {
             BuildMode::Rally => {
                 // Plant (or move) the rally flag. Knights head here until they
                 // pick up an enemy. Clicking the flagged tile again lifts it.
+                // A player-planted flag calls every knight in the realm.
                 let here = tile_center((x, y));
                 self.rally_point = if self.rally_point == Some(here) {
                     None
                 } else {
                     Some(here)
                 };
+                self.rally_response = None;
                 true
             }
             BuildMode::Ship => {
@@ -2037,6 +2406,7 @@ impl Game {
     /// Lift the rally flag; knights resume defending on their own.
     pub fn clear_rally(&mut self) {
         self.rally_point = None;
+        self.rally_response = None;
     }
 
     /// Proclaim a draft: for the next `DRAFT_DURATION` seconds, farmers may be
@@ -2106,6 +2476,7 @@ fn ai_step(
     e: &mut Entity,
     rng: &mut Rng,
     snap: &[(Vec2, Faction)],
+    grid: &Grid,
     acting: bool,
     under_limit: bool,
     home: &[Tile],
@@ -2121,7 +2492,7 @@ fn ai_step(
     match (e.faction, e.job) {
         (Faction::Player, Job::Farmer) => {
             let farm = farm.expect("player farmers need farm context");
-            gather_behavior(world, e, owner, pref, home, farm, snap, rng, dt)
+            gather_behavior(world, e, owner, pref, home, farm, snap, grid, rng, dt)
         }
         (_, Job::Knight) => {
             if under_limit {
@@ -2135,7 +2506,7 @@ fn ai_step(
         (_, Job::Farmer) => {
             // Enemy and allied farmers shelter in their own huts when a hostile
             // faction closes in, then putter around their village.
-            if let Some(ev) = seek_shelter(world, e, owner, e.faction, snap, huts, dt) {
+            if let Some(ev) = seek_shelter(world, e, owner, e.faction, snap, grid, huts, dt) {
                 return ev;
             }
             wander_behavior(world, e, owner, None, rng, dt);
@@ -2250,11 +2621,20 @@ fn plan_plant(
 }
 
 /// Is a hostile unit within `r` of `pos`? (Allies don't scare the player, and
-/// vice versa. Only the enemy triggers a flight to shelter.)
-fn enemy_within(snap: &[(Vec2, Faction)], pos: Vec2, faction: Faction, r: f32) -> bool {
-    let r2 = r * r;
-    snap.iter()
-        .any(|&(p, f)| hostile(f, faction) && p.distance_squared(pos) <= r2)
+/// vice versa. Only the enemy triggers a flight to shelter.) Answered from the
+/// spatial grid so every farmer can afford to ask it every frame.
+fn enemy_within(
+    snap: &[(Vec2, Faction)],
+    grid: &Grid,
+    pos: Vec2,
+    faction: Faction,
+    r: f32,
+) -> bool {
+    let mut found = false;
+    grid.for_each_within(pos, r, |i, _| {
+        found = found || hostile(snap[i].1, faction);
+    });
+    found
 }
 
 /// Nearest friendly hut (owned by `owner`) with room and a reachable doorway.
@@ -2273,16 +2653,18 @@ fn nearest_shelter(world: &World, owner: u8, huts: &[Tile], start: Tile) -> Opti
 /// When an enemy is close and a friendly hut has room, run for it. Returns
 /// `Some(_)` when the farmer is fleeing (the inner event is `Hide` on arrival,
 /// or `None` while still running); `None` means "no need to flee".
+#[allow(clippy::too_many_arguments)]
 fn seek_shelter(
     world: &World,
     e: &mut Entity,
     owner: u8,
     faction: Faction,
     snap: &[(Vec2, Faction)],
+    grid: &Grid,
     huts: &[Tile],
     dt: f32,
 ) -> Option<Option<StepEvent>> {
-    if !enemy_within(snap, e.pos, faction, DANGER_RADIUS) {
+    if !enemy_within(snap, grid, e.pos, faction, DANGER_RADIUS) {
         return None;
     }
     let hut = nearest_shelter(world, owner, huts, e.tile())?;
@@ -2311,13 +2693,14 @@ fn gather_behavior(
     home: &[Tile],
     farm: &mut FarmCtx,
     snap: &[(Vec2, Faction)],
+    grid: &Grid,
     rng: &mut Rng,
     dt: f32,
 ) -> Option<StepEvent> {
     let here = e.tile();
 
     // Survival first: if the enemy's near, drop everything and hide in a hut.
-    if let Some(ev) = seek_shelter(world, e, owner, Faction::Player, snap, farm.huts, dt) {
+    if let Some(ev) = seek_shelter(world, e, owner, Faction::Player, snap, grid, farm.huts, dt) {
         release_cave(e, farm.cave_use);
         return ev;
     }
@@ -2528,7 +2911,10 @@ fn soldier_behavior(
             }) {
                 e.set_path(p);
             } else {
+                // The flag is unreachable from here; don't re-exhaust the
+                // search budget every replan tick while it stands.
                 e.set_path(Vec::new());
+                e.repath = 2.0;
             }
         }
         return advance_or_hack(world, e, dt);
@@ -2582,6 +2968,13 @@ fn soldier_behavior(
             // Nothing reachable to fight or raze: drop any stale path so we idle
             // rather than grinding down trees along a dead route.
             e.set_path(Vec::new());
+            if !foes.is_empty() || siege {
+                // There were targets, but both searches exhausted their budget
+                // without a route (foes across the sea, say). Burning that
+                // budget again every replan tick is the costliest thing a big
+                // map does, so back off (with jitter) before trying again.
+                e.repath = 2.0 + rng.range(0, 200) as f32 / 100.0;
+            }
         }
     }
 
@@ -3762,6 +4155,7 @@ impl Game {
                 mine_target: None,
                 build_site: None,
                 sheltered: false,
+                pending: 0.0,
             });
         }
 
@@ -3954,6 +4348,8 @@ impl Game {
             enemies_defeated,
             units_lost,
             rally_point: None,
+            rally_response: None,
+            offscreen_cursor: 0,
             draft_timer: 0.0,
             player_house_tiles,
             cave_tiles,
@@ -3972,6 +4368,9 @@ impl Game {
             enemy_villages_founded,
             ally_villages_founded,
             home_continent: None,
+            villages: Vec::new(),
+            alerts: Vec::new(),
+            alert_cooldowns: Vec::new(),
             rng: Rng::new(seed as u64 ^ 0xD1B54A32D192ED03),
         };
         Some((game, cam))
@@ -4054,10 +4453,12 @@ mod tests {
             assert_eq!(game.ships().len(), 1);
             assert_eq!(game.money, money0, "reward paid before delivery");
 
-            // The voyage from the home port is long; remove the player's
-            // villagers so the treasury doesn't drift (idle knights cost gold),
+            // The voyage from the home port is long, and the realm no longer
+            // freezes off-screen. Strip every land unit so the thousands of
+            // updates below don't simulate two warring factions, and so
+            // nothing drifts the treasury (knights cost gold to raise),
             // isolating the ship's payout as the only change to `money`.
-            game.entities.retain(|e| e.faction != Faction::Player);
+            game.entities.clear();
 
             let sim = (port.0 - 6, port.1 - 6, port.0 + 6, port.1 + 6);
             let mut steps = 0;
@@ -4545,5 +4946,190 @@ mod tests {
             }
         }
         assert!(reached, "idle warship never made for the open ocean");
+    }
+
+    #[test]
+    fn survey_spots_a_raid_and_alerts_once() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        let house = game.player_house_tiles[0];
+        let home_village = |game: &Game| {
+            game.villages()
+                .iter()
+                .find(|v| {
+                    v.faction == Faction::Player
+                        && (v.min.0..=v.max.0).contains(&house.0)
+                        && (v.min.1..=v.max.1).contains(&house.1)
+                })
+                .cloned()
+                .expect("the capital is surveyed")
+        };
+
+        // A lone knight at home: counted as a defender, and all is quiet.
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Knight, house));
+        game.survey_villages();
+        let v = home_village(&game);
+        assert_eq!((v.knights, v.farmers), (1, 0));
+        assert!(!v.threatened);
+        assert!(game.alerts().is_empty());
+
+        // A raider walks in: the village is threatened and one alert goes up,
+        // and it stays one alert however long the raid lasts.
+        game.entities.push(Entity::new(
+            Faction::Enemy,
+            Job::Knight,
+            (house.0 + 2, house.1),
+        ));
+        for _ in 0..100 {
+            game.survey_villages();
+            game.age_alerts(0.1);
+        }
+        assert!(home_village(&game).threatened);
+        assert_eq!(game.alerts().len(), 1);
+        assert!(game.alerts()[0].kind == AlertKind::VillageThreatened);
+
+        // Once the raid is over and has been quiet for the cooldown, the old
+        // toast is gone and a new raid alerts again.
+        game.entities.retain(|e| e.faction == Faction::Player);
+        for _ in 0..25 {
+            game.survey_villages();
+            game.age_alerts(1.0);
+        }
+        assert!(game.alerts().is_empty(), "alerts expire");
+        game.entities.push(Entity::new(
+            Faction::Enemy,
+            Job::Knight,
+            (house.0 + 2, house.1),
+        ));
+        game.survey_villages();
+        assert_eq!(game.alerts().len(), 1, "a fresh raid alerts again");
+    }
+
+    #[test]
+    fn overview_generates_chunks_on_a_budget() {
+        let mut world = World::new(1);
+        world.ensure_region_budget(-200, -200, 200, 200, 3);
+        assert_eq!(world.chunks_iter().count(), 3);
+        assert!(world.is_generated(0, 0), "the center fills in first");
+    }
+
+    #[test]
+    fn offscreen_farmers_keep_gathering() {
+        let mut game = Game::new(1);
+        // Keep the economy pure: no knights, no enemies to raid the workers.
+        game.entities
+            .retain(|e| e.faction == Faction::Player && e.job == Job::Farmer);
+        let wood0 = game.wood;
+        let stone0 = game.stone;
+        // Simulate with the view parked far away, so the capital's farmers are
+        // all off-screen and only the rotating catch-up batches advance them.
+        let sim = (5000, 5000, 5010, 5010);
+        for _ in 0..600 {
+            game.update(0.1, sim);
+        }
+        assert!(
+            game.wood + game.stone > wood0 + stone0,
+            "off-screen farmers must keep stocking the pile"
+        );
+    }
+
+    #[test]
+    fn pop_cap_sums_per_village() {
+        let mut game = Game::new(1);
+        game.survey_villages();
+        let capital_houses = game.player_house_tiles.len();
+        assert_eq!(
+            game.pop_cap(),
+            VILLAGE_POP_BASE + capital_houses * VILLAGE_POP_PER_HOUSE
+        );
+
+        // A second village far away raises the kingdom-wide allowance by its
+        // own cap.
+        let anchor = (
+            game.player_house_tiles[0].0 + VILLAGE_SPACING + 20,
+            game.player_house_tiles[0].1,
+        );
+        game.world
+            .ensure_region(anchor.0 - 20, anchor.1 - 20, anchor.0 + 20, anchor.1 + 20);
+        let Some(anchor) = find_land_anchor(&mut game.world, anchor, 16) else {
+            panic!("no land for the second village");
+        };
+        let spots = open_tiles_near(&game.world, anchor.0, anchor.1, 4);
+        for &(x, y) in spots.iter().step_by(4).take(4) {
+            game.world.set_house(x, y, true);
+        }
+        game.rescan_player_houses();
+        game.survey_villages();
+        let total_houses = game.player_house_tiles.len();
+        assert!(total_houses > capital_houses, "the camp must add houses");
+        assert_eq!(
+            game.pop_cap(),
+            2 * VILLAGE_POP_BASE + total_houses * VILLAGE_POP_PER_HOUSE
+        );
+    }
+
+    #[test]
+    fn spawns_go_to_villages_with_room() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        // Stuff one enemy village to its cap (with farmers, so the global
+        // farmer gate stays open) and leave the others empty.
+        let full = cluster(&game.world.enemy_house_tiles)
+            .into_iter()
+            .next()
+            .expect("seed 1 plants enemy villages");
+        let full_center = village_center(&full);
+        for _ in 0..ENEMY_VILLAGE_POP {
+            if let Some(t) = adjacent_walkable(&game.world, full[0].0, full[0].1) {
+                game.entities
+                    .push(Entity::new(Faction::Enemy, Job::Farmer, t));
+            }
+        }
+        game.survey_villages();
+
+        let before = game.enemy_count();
+        game.enemy_spawn_timer = 0.0;
+        game.handle_spawns(0.01);
+        assert_eq!(game.enemy_count(), before + 1, "a spawn must fire");
+        let spawned = game.entities.last().unwrap();
+        assert!(
+            spawned.pos.distance(full_center) > CAPTURE_RADIUS * 2.0,
+            "the full village must not receive the new unit"
+        );
+    }
+
+    #[test]
+    fn lost_village_rallies_only_nearby_knights() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        let village = cluster(&game.player_house_tiles)
+            .into_iter()
+            .next()
+            .expect("the player starts with a village");
+        let center = village_center(&village);
+        // An enemy stands in the undefended village: it falls, and the alarm
+        // is raised as a local rally.
+        game.entities.push(Entity::new(
+            Faction::Enemy,
+            Job::Knight,
+            (center.x as i32, center.y as i32),
+        ));
+        game.resolve_captures();
+        let rally = game.rally_point.expect("losing a village raises a rally");
+        assert_eq!(game.rally_response, Some(AUTO_RALLY_RADIUS));
+
+        // The filter in `update` is what knights see: one close by answers,
+        // one far away keeps its post.
+        let answers = |response: Option<f32>, pos: Vec2| {
+            game.rally_point
+                .filter(|r| response.is_none_or(|rad| pos.distance_squared(*r) <= rad * rad))
+        };
+        let auto = game.rally_response;
+        assert_eq!(answers(auto, rally + Vec2::splat(10.0)), Some(rally));
+        assert_eq!(answers(auto, rally + Vec2::splat(200.0)), None);
+
+        // A player-planted flag calls everyone, however far.
+        assert_eq!(answers(None, rally + Vec2::splat(200.0)), Some(rally));
     }
 }

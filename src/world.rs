@@ -197,6 +197,34 @@ impl World {
         }
     }
 
+    /// Like `ensure_region`, but generates at most `budget` missing chunks,
+    /// nearest the rectangle's center first. Used by the zoomed-out view, which
+    /// can span hundreds of chunks, so the map fills in over a few frames
+    /// instead of stalling on one.
+    pub fn ensure_region_budget(
+        &mut self,
+        min_x: i32,
+        min_y: i32,
+        max_x: i32,
+        max_y: i32,
+        budget: usize,
+    ) {
+        let (ccx, ccy) = (chunk_of((min_x + max_x) / 2), chunk_of((min_y + max_y) / 2));
+        let mut missing: Vec<(i32, i32)> = (chunk_of(min_y)..=chunk_of(max_y))
+            .flat_map(|cy| (chunk_of(min_x)..=chunk_of(max_x)).map(move |cx| (cx, cy)))
+            .filter(|c| !self.chunks.contains_key(c))
+            .collect();
+        missing.sort_by_key(|&(cx, cy)| (cx - ccx).abs().max((cy - ccy).abs()));
+        for (cx, cy) in missing.into_iter().take(budget) {
+            self.ensure(cx, cy);
+        }
+    }
+
+    /// Has the chunk holding this tile been generated yet?
+    pub fn is_generated(&self, x: i32, y: i32) -> bool {
+        self.chunk_at(x, y).is_some()
+    }
+
     #[inline]
     fn chunk_at(&self, x: i32, y: i32) -> Option<&Chunk> {
         self.chunks.get(&(chunk_of(x), chunk_of(y)))

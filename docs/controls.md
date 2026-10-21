@@ -13,7 +13,8 @@ through the panel; your units carry them out on their own.
 | ----- | ------ |
 | <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> / arrow keys | Pan the camera (pan speed scales with zoom) |
 | <kbd>E</kbd> or <kbd>=</kbd> (hold) | Zoom in |
-| <kbd>Q</kbd> or <kbd>-</kbd> (hold) | Zoom out |
+| <kbd>Q</kbd> or <kbd>-</kbd> (hold) | Zoom out (past full detail, the map turns into the [overview](#the-overview)) |
+| <kbd>M</kbd> | Jump to the [overview](#the-overview) and back |
 | **Left-click** | Perform the current build action, or place the rally flag |
 | **Right-click** | Clear the rally flag |
 | <kbd>Esc</kbd> | Return to the menu (from the menu on native builds: quit) |
@@ -24,8 +25,10 @@ a rally flag. See **[Building](building.md)** for what each mode does.
 
 ## The HUD panel
 
-An **egui** window titled *Kingdom* sits in the top-left corner. It's your only
-control surface in-game.
+An **egui** window titled *Kingdom* sits in the top-left corner. It holds your
+stockpile and every order you can give. The [Realm panel](#the-realm-panel) on
+the right is for finding your way around, and [alerts](#alerts) pop up along
+the top.
 
 ### Stockpile
 
@@ -86,5 +89,59 @@ water by your village:
 - **:lucide-save: Save:** write the current world to disk / IndexedDB (see **[Saves & Files](saves.md)**).
 - **:lucide-menu: Menu:** return to the main menu (your session stays resumable).
 
-The panel also lists reminders about the building and unit rules described on
-the **[Building](building.md)** and **[Units & Combat](units.md)** pages.
+### Help
+
+A collapsed **Help** section at the bottom holds short reminders of the building
+and unit rules described on the **[Building](building.md)** and
+**[Units & Combat](units.md)** pages. Click it to expand.
+
+## The Realm panel
+
+The *Realm* window in the top-right corner is how you keep track of a large
+kingdom:
+
+- **Minimap:** your villages and everything around them. Villages show as dots
+  in their faction's color (bigger for more houses), cargo ships as white
+  specks, warships blue, pirates black, and the rally flag as a yellow ring. The
+  white box is what's on screen. Land that hasn't been explored yet is dark.
+  **Click or drag** on the minimap to move the camera there.
+- **:lucide-map: Overview (M):** toggles the [overview](#the-overview).
+- **Village count:** how many villages you, the enemy, and the allies hold.
+- **Your villages:** one row per village, with where it is relative to the
+  camera (for example *120 tiles northeast*, or *In view*), its houses, its
+  population against its own cap, and the knights and farmers standing in it.
+  A village **under attack** is flagged in
+  red and one with **no defenders** in amber, since an empty village is easy to
+  take. Those come first in the list. **:lucide-crosshair: Go** jumps the camera
+  there and zooms back in if you were on the overview.
+
+## Alerts
+
+When something needs your attention, a toast appears at the top of the screen
+saying what happened and where:
+
+- a village is **under attack** (an enemy is in or near it)
+- raiders are **attacking a hut** with farmers inside
+- a village has **fallen** (your knights rally to retake it)
+- you **captured** a village
+- pirates **sank** a cargo ship or a warship
+
+Press **:lucide-crosshair: Go** to jump there, or **:lucide-x:** to dismiss it.
+Alerts fade after a few seconds. An ongoing raid only raises one alert, and the
+same spot won't alert again until it has been quiet for a while.
+
+## The overview
+
+Zoom out past the normal limit (or press <kbd>M</kbd>) and the map switches to
+a flat **overview**. Terrain is drawn as solid color, every village gets a
+tinted box in its faction's color, houses and units become small marks, and
+ships keep their sprites, drawn bigger. A village of yours under attack
+**flashes its border red**, so trouble is easy to spot from across the map.
+
+The whole realm stays alive wherever the camera is: what's on screen (plus a
+margin) runs at full speed, and everything beyond it keeps gathering, fighting,
+and growing at a slower tick. Distant villages defend themselves, fall, and can
+be captured without you watching, so keep an eye on the
+[alerts](#alerts) and the [Realm panel](#the-realm-panel). Unexplored land
+fills in over a few moments as you look at it. Clicks still work here, so the
+overview is handy for setting a rally flag far away.

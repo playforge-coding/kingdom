@@ -59,7 +59,8 @@ Three factions share the world:
    **:lucide-coins: gold** (stone sells for more). Mind the open water, though:
    **pirates** prowl the ocean and will sink a cargo ship they catch.
 3. **Build.** Spend wood, stone, and gold on [houses, bridges, mines, walls, and huts](building.md).
-   Houses raise your population cap and periodically spawn new workers.
+   Houses raise their own village's population cap and periodically spawn new
+   workers, so each settlement grows on its own.
 4. **Grow.** More houses mean more population, and so more farmers and knights.
    You start with some **seed gold**, but every new **knight** costs gold to arm. A
    broke village raises a (free) farmer instead, so keep the trade routes running.
@@ -83,11 +84,17 @@ Territory changes hands per-village:
   your control.
 - **Losing one of yours:** the same rule applies in reverse. If a village of
   yours is left undefended with an enemy inside it, you lose it. When that
-  happens, your knights automatically **rally to the lost village** to try to
-  retake it.
+  happens, the knights **near the lost village** automatically rally to try to
+  retake it, while garrisons farther away stay at their own posts.
 
 This makes defense and offense the same skill: keep a presence in your villages,
 and strip the enemy's before you move in.
+
+Once you hold several villages, the **[Realm panel](controls.md#the-realm-panel)**
+lists each one with its defenders and flags any that are under attack or left
+empty, and **[alerts](controls.md#alerts)** tell you when one is raided, lost, or
+taken. Press <kbd>M</kbd> for the **[overview](controls.md#the-overview)** to see
+the whole realm at once.
 
 ## Scoring
 

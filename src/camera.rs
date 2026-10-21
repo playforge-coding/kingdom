@@ -4,6 +4,14 @@
 use glam::camera::rh::proj::directx;
 use glam::{Mat4, Vec2};
 
+/// Closest zoom, in tiles of view height.
+pub const MIN_VIEW_HEIGHT: f32 = 8.0;
+/// Farthest zoom. Past `DETAIL_VIEW_HEIGHT` the map switches to the flat
+/// overview, so this can reach well beyond what full sprites could afford.
+pub const MAX_VIEW_HEIGHT: f32 = 360.0;
+/// The farthest zoom drawn with full textures and sprites.
+pub const DETAIL_VIEW_HEIGHT: f32 = 80.0;
+
 pub struct Camera {
     /// World-space point at the center of the screen (in tiles).
     pub center: Vec2,
@@ -49,6 +57,16 @@ impl Camera {
     }
 
     pub fn zoom(&mut self, factor: f32) {
-        self.view_height = (self.view_height * factor).clamp(8.0, 80.0);
+        self.view_height = (self.view_height * factor).clamp(MIN_VIEW_HEIGHT, MAX_VIEW_HEIGHT);
+    }
+
+    /// Is the camera zoomed out past full detail, into the flat overview?
+    pub fn overview(&self) -> bool {
+        self.view_height > DETAIL_VIEW_HEIGHT
+    }
+
+    /// Half the view's size in tiles (width, height).
+    pub fn half_size(&self) -> Vec2 {
+        self.half_extents()
     }
 }

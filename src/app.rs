@@ -12,12 +12,12 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::atlas::{self, Atlas};
-use crate::camera::Camera;
+use crate::atlas::{self, Atlas, MapColors};
+use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
 use crate::game::{Anim, CamState, Dir, Entity, Faction, Game, Job};
 use crate::gfx::{Instance, Renderer};
 use crate::save;
-use crate::ui::{Action, MenuState, Scene as UiScene};
+use crate::ui::{Action, MenuState, Scene as UiScene, View};
 use crate::world::{Resource, Tile};
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -32,12 +32,17 @@ const DEFAULT_VIEW_HEIGHT: f32 = 28.0;
 /// How fast a held zoom key zooms, as a natural-log change in view height per
 /// second (about 1.5 s to cross the whole zoom range).
 const ZOOM_RATE: f32 = 1.5;
-/// Tiles beyond the visible rectangle that are still simulated, so units walking
-/// on/off screen behave seamlessly.
+/// Tiles beyond the visible rectangle that still run at the full frame rate,
+/// so units walking on/off screen behave seamlessly.
 const SIM_MARGIN: i32 = 24;
 /// Most same-type units drawn on a single tile; caps overdraw from huge stacks
 /// without hiding ordinary crowds.
 const STACK_DRAW_CAP: u32 = 8;
+/// Zoom the overview toggle (M) jumps out to.
+const OVERVIEW_VIEW_HEIGHT: f32 = 240.0;
+/// Most chunks the overview generates per frame. A far zoom can uncover
+/// hundreds at once, so they fill in over a few frames rather than in one stall.
+const OVERVIEW_CHUNK_BUDGET: usize = 6;
 
 fn now_secs() -> f64 {
     #[cfg(target_arch = "wasm32")]
@@ -71,7 +76,10 @@ pub struct State {
     window: Arc<Window>,
     renderer: Renderer,
     atlas: Atlas,
+    colors: MapColors,
     camera: Camera,
+    /// The detailed zoom to return to when the overview toggle is pressed again.
+    detail_view_height: f32,
     ui: crate::ui::Ui,
     scene: Scene,
     menu: MenuState,
@@ -91,8 +99,10 @@ impl State {
         State {
             window,
             renderer,
+            colors: MapColors::from_atlas(&atlas),
             atlas,
             camera,
+            detail_view_height: DEFAULT_VIEW_HEIGHT,
             ui,
             scene: Scene::Menu,
             menu: MenuState::default(),
@@ -157,8 +167,9 @@ impl State {
             self.camera.zoom((z * ZOOM_RATE * dt).exp());
         }
 
-        // Simulate a generous rectangle around the view; entities outside it are
-        // frozen so unwatched crowds don't cost anything.
+        // Entities in a generous rectangle around the view run at the full
+        // frame rate; the rest of the realm is stepped in slower, rotating
+        // batches (see `Game::update`).
         let (minx, miny, maxx, maxy) = self.visible_bounds();
         let sim = (
             minx - SIM_MARGIN,
@@ -232,6 +243,23 @@ impl State {
             Action::ToMenu => {
                 self.scene = Scene::Menu;
             }
+            Action::Focus { pos, zoom_in } => {
+                self.camera.center = pos;
+                if zoom_in && self.camera.overview() {
+                    self.camera.view_height = self.detail_view_height;
+                }
+            }
+            Action::ToggleOverview => self.toggle_overview(),
+        }
+    }
+
+    /// Jump between the current detailed zoom and the flat overview.
+    fn toggle_overview(&mut self) {
+        if self.camera.overview() {
+            self.camera.view_height = self.detail_view_height;
+        } else {
+            self.detail_view_height = self.camera.view_height;
+            self.camera.view_height = OVERVIEW_VIEW_HEIGHT;
         }
     }
 
@@ -241,6 +269,9 @@ impl State {
         let Some(game) = &self.game else {
             return Vec::new();
         };
+        if self.camera.overview() {
+            return self.build_overview_instances(game);
+        }
         let world = &game.world;
         let grass = self.atlas.uv("grass");
         let water = self.atlas.uv("water");
@@ -456,12 +487,191 @@ impl State {
         out
     }
 
+    /// The far-zoom draw list. Past `DETAIL_VIEW_HEIGHT` a tile is only a pixel
+    /// or two, so terrain is drawn as flat blocks of several tiles each, with
+    /// each village's territory, houses and units as solid marks on top. This
+    /// keeps the instance count flat however far out the camera goes.
+    fn build_overview_instances(&self, game: &Game) -> Vec<Instance> {
+        let world = &game.world;
+        let c = &self.colors;
+        let white = self.atlas.uv("white");
+        let solid = |pos: [f32; 2], size: [f32; 2], color: [f32; 4]| Instance {
+            pos,
+            size,
+            uv_min: [white[0], white[1]],
+            uv_max: [white[2], white[3]],
+            color,
+        };
+        let sprite = |pos: [f32; 2], size: [f32; 2], uv: [f32; 4]| Instance {
+            pos,
+            size,
+            uv_min: [uv[0], uv[1]],
+            uv_max: [uv[2], uv[3]],
+            color: WHITE,
+        };
+        let faction_color = |f: Faction| match f {
+            Faction::Player => c.player,
+            Faction::Enemy => c.enemy,
+            Faction::Ally => c.ally,
+        };
+        let with_alpha = |mut col: [f32; 4], a: f32| {
+            col[3] = a;
+            col
+        };
+
+        // Block size in tiles, chosen so about `DETAIL_VIEW_HEIGHT` blocks span
+        // the view's height. Blocks snap to a fixed grid so panning doesn't
+        // make the terrain shimmer.
+        let k = (self.camera.view_height / DETAIL_VIEW_HEIGHT)
+            .ceil()
+            .max(1.0) as i32;
+        let kf = k as f32;
+        let (minx, miny, maxx, maxy) = self.visible_bounds();
+        let (bx0, by0) = (minx.div_euclid(k) * k, miny.div_euclid(k) * k);
+        let cols = (maxx - bx0) / k + 1;
+        let rows = (maxy - by0) / k + 1;
+        let mut out = Vec::with_capacity((cols * rows) as usize + 512);
+
+        for by in (by0..=maxy).step_by(k as usize) {
+            for bx in (bx0..=maxx).step_by(k as usize) {
+                let (sx, sy) = (bx + k / 2, by + k / 2);
+                let color = if !world.is_generated(sx, sy) {
+                    c.unexplored
+                } else {
+                    match world.tile(sx, sy) {
+                        Tile::Water if world.is_bridge(sx, sy) => c.rock,
+                        Tile::Water => c.water,
+                        Tile::Grass => match world.node(sx, sy).map(|n| n.kind) {
+                            Some(Resource::Wood) => c.tree,
+                            Some(Resource::Stone) => c.rock,
+                            None => c.grass,
+                        },
+                    }
+                };
+                out.push(solid([bx as f32, by as f32], [kf, kf], color));
+            }
+        }
+
+        // Territory: a tinted box around each village with a border in its
+        // faction's color. A player village under attack flashes its border
+        // red so trouble is visible from across the map.
+        let pulse = (now_secs() * 4.0).sin() as f32 * 0.5 + 0.5;
+        let border = 0.4 * kf;
+        for v in game.villages() {
+            let pad = 3.0;
+            let x0 = v.min.0 as f32 - pad;
+            let y0 = v.min.1 as f32 - pad;
+            let w = (v.max.0 - v.min.0) as f32 + 1.0 + 2.0 * pad;
+            let h = (v.max.1 - v.min.1) as f32 + 1.0 + 2.0 * pad;
+            let base = faction_color(v.faction);
+            out.push(solid([x0, y0], [w, h], with_alpha(base, 0.22)));
+            let edge = if v.faction == Faction::Player && v.threatened {
+                let mut e = c.enemy;
+                for (ch, b) in e.iter_mut().zip(base) {
+                    *ch = b + (*ch - b) * pulse;
+                }
+                e
+            } else {
+                base
+            };
+            out.push(solid([x0, y0], [w, border], edge));
+            out.push(solid([x0, y0 + h - border], [w, border], edge));
+            out.push(solid([x0, y0], [border, h], edge));
+            out.push(solid([x0 + w - border, y0], [border, h], edge));
+        }
+
+        // Houses and huts as solid marks a little bigger than their tile so
+        // they stay visible when a tile is only a pixel or two.
+        let mark = (0.6 * kf).max(1.0);
+        let mut house = |(x, y): (i32, i32), col: [f32; 4], size: f32| {
+            let off = (size - 1.0) * 0.5;
+            out.push(solid([x as f32 - off, y as f32 - off], [size, size], col));
+        };
+        for &t in game.player_houses() {
+            house(t, c.player, mark);
+        }
+        for &t in &world.enemy_house_tiles {
+            house(t, c.enemy, mark);
+        }
+        for &t in &world.ally_house_tiles {
+            house(t, c.ally, mark);
+        }
+        for &(x, y) in game.huts() {
+            if let Some(h) = world.hut(x, y) {
+                let col = match h.owner {
+                    0 => c.player,
+                    2 => c.ally,
+                    _ => c.enemy,
+                };
+                house((x, y), col, mark * 0.75);
+            }
+        }
+
+        // Units as dots: knights in the full faction color, farmers lighter.
+        let dot = (0.45 * kf).max(0.8);
+        for e in &game.entities {
+            let mut col = faction_color(e.faction);
+            if e.job == Job::Farmer {
+                for ch in col.iter_mut().take(3) {
+                    *ch += (1.0 - *ch) * 0.45;
+                }
+            }
+            out.push(solid(
+                [e.pos.x - dot * 0.5, e.pos.y - dot * 0.5],
+                [dot, dot],
+                col,
+            ));
+        }
+
+        // Ships keep their sprites, scaled up so they read at this distance.
+        let ship = (1.2 * kf).max(2.0);
+        let facing_col = |d: Dir| match d {
+            Dir::Left => 0,
+            Dir::Up => 1,
+            Dir::Down => 2,
+            Dir::Right => 3,
+        };
+        let mut vessel = |pos: Vec2, sheet: &str, d: Dir| {
+            let uv = self.atlas.frame_uv(sheet, facing_col(d), 0);
+            out.push(sprite(
+                [pos.x - ship * 0.5, pos.y - ship * 0.5],
+                [ship, ship],
+                uv,
+            ));
+        };
+        for s in game.ships() {
+            vessel(s.pos, "cargo_ship", s.facing);
+        }
+        for w in game.warships() {
+            vessel(w.pos, "warship", w.facing);
+        }
+        for p in game.pirates() {
+            vessel(p.pos, "pirate_ship", p.facing);
+        }
+
+        if let Some(r) = game.rally_point {
+            let size = 1.5 * kf;
+            out.push(sprite(
+                [r.x - size * 0.5, r.y - size * 0.5],
+                [size, size],
+                self.atlas.uv("rally"),
+            ));
+        }
+
+        out
+    }
+
     fn render(&mut self) {
         // Ensure visible chunks are generated before we read them.
         if self.scene == Scene::Playing {
             let (minx, miny, maxx, maxy) = self.visible_bounds();
             if let Some(game) = &mut self.game {
-                game.world.ensure_region(minx, miny, maxx, maxy);
+                if self.camera.overview() {
+                    game.world
+                        .ensure_region_budget(minx, miny, maxx, maxy, OVERVIEW_CHUNK_BUDGET);
+                } else {
+                    game.world.ensure_region(minx, miny, maxx, maxy);
+                }
             }
         }
 
@@ -470,9 +680,21 @@ impl State {
 
         // Build the egui frame (disjoint field borrows on self).
         let window = &self.window;
+        let view = View {
+            center: self.camera.center,
+            half: self.camera.half_size(),
+            overview: self.camera.overview(),
+        };
         let (mut ui_out, action) = match self.scene {
             Scene::Playing => match &mut self.game {
-                Some(game) => self.ui.run(window, UiScene::Game(game)),
+                Some(game) => self.ui.run(
+                    window,
+                    UiScene::Game {
+                        game,
+                        view,
+                        colors: &self.colors,
+                    },
+                ),
                 None => {
                     let has_save = save::exists();
                     self.ui.run(
@@ -639,7 +861,12 @@ impl ApplicationHandler<State> for App {
     // Delivery of the async-initialized State (web path).
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, state: State) {
         state.window.request_redraw();
-        self.state = Some(state);
+        let state = self.state.insert(state);
+        // Any Resized events that fired during async init were dropped (no
+        // state to receive them), and the renderer may have captured the
+        // canvas before layout, so sync to the real size now.
+        let size = state.window.inner_size();
+        state.resize(size.width.max(1), size.height.max(1));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -684,6 +911,11 @@ impl ApplicationHandler<State> for App {
                         }
                         KeyCode::KeyQ | KeyCode::Minus | KeyCode::NumpadSubtract => {
                             state.input.zoom_out = pressed
+                        }
+                        KeyCode::KeyM
+                            if pressed && !event.repeat && state.scene == Scene::Playing =>
+                        {
+                            state.toggle_overview()
                         }
                         KeyCode::Escape if pressed => {
                             // Playing -> back to menu; on the menu -> quit.

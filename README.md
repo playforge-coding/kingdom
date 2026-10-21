@@ -49,8 +49,13 @@ both natively and in the browser (via WebGL) using **Trunk**.
 - **Your village.** You begin controlling a single village on the **coast** near
   the origin, right by the sea, giving your cargo ships a home port. Villages
   change hands per-camp: leave one undefended with an enemy inside and you lose it
-  (your knights auto-rally to retake it); strip an enemy village of its defenders
+  (your nearby knights auto-rally to retake it); strip an enemy village of its defenders
   and stand a unit in it to capture it. (Allied villages can't be captured.)
+- **A realm that keeps living.** What's on screen runs at full speed, and the
+  rest of the world keeps gathering, fighting, and growing at a slower tick, so
+  distant villages defend themselves, fall, or expand without you watching.
+  Every village supports its own population (more houses, more people), and
+  alerts plus the Realm panel keep you posted on trouble far away.
 - **Priorities.** Toggle **Agriculture / Military** to bias which workers your
   houses raise, and **Balanced / Wood / Stone** to steer what farmers gather.
 - **Proclaim a draft.** Need soldiers now? Declare a draft and, for a short
@@ -92,13 +97,18 @@ both natively and in the browser (via WebGL) using **Trunk**.
 |-------|--------|
 | `WASD` / arrow keys | Pan the camera |
 | `E` or `=` (hold) | Zoom in |
-| `Q` or `-` (hold) | Zoom out |
+| `Q` or `-` (hold) | Zoom out (far out, the map becomes a flat overview) |
+| `M` | Jump to the overview and back |
 | Left-click | Perform the current build action / place the rally flag |
 | Right-click | Clear the rally flag |
 | `Esc` | Return to menu (from the menu: quit on native) |
 
 The **egui** panel in the top-left shows your stockpile, population, score, and
 the current build mode, plus priority toggles and **Save** and **Menu** buttons.
+The **Realm** panel in the top-right has a clickable minimap and a list of your
+villages, each with its defenders, whether it's under attack, and a button to
+jump to it. Alerts for raids, lost or captured villages, and sunk ships pop up
+along the top and jump the camera there when clicked.
 
 ## Running
 
@@ -148,7 +158,7 @@ with the `web-dev` profile, which is the debug profile on LLVM.
 | `src/game.rs` | Simulation: factions, AI, gathering, combat, spawns, building, save (de)serialization |
 | `src/save.rs` | `.dat` persistence (native file / web IndexedDB) |
 | `src/camera.rs` | Top-down orthographic camera (tile units) |
-| `src/ui.rs` | egui menu + in-game panel |
+| `src/ui.rs` | egui menu, in-game panels, minimap and alerts |
 | `src/shader.wgsl` | Instanced textured-quad shader |
 | `assets/textures/` | Tile, building and character-sheet PNGs |
 | `assets/icons/` | Lucide SVG icons for the HUD |

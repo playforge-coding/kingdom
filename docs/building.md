@@ -23,10 +23,13 @@ anywhere on the map.
 | **Cost** | 8 wood, 8 stone, 30 gold |
 | **Where** | Open grass, next to your existing village or houses |
 
-Houses are the backbone of your economy. Each one raises your **population cap**
-and periodically **spawns new workers** (farmers or knights, depending on your
-[Agriculture / Military priority](gameplay.md)). Because they must be adjacent to
-what you already own, building houses is how you expand your borders.
+Houses are the backbone of your economy. Each one raises the **population cap
+of its own village** and periodically **spawns new workers** (farmers or
+knights, depending on your [Agriculture / Military priority](gameplay.md)).
+Every village supports and raises its own people, so build houses in whichever
+settlement you want to grow; the number in the HUD is the sum across all of
+them. Because houses must be adjacent to what you already own, building them is
+also how you expand your borders.
 
 !!! note "Growth needs farmers"
     Houses only raise new workers while you have **4 or more farmers**, so keep
