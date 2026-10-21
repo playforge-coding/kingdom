@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use glam::Vec2;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -29,6 +29,9 @@ enum Scene {
 }
 
 const DEFAULT_VIEW_HEIGHT: f32 = 28.0;
+/// How fast a held zoom key zooms, as a natural-log change in view height per
+/// second (about 1.5 s to cross the whole zoom range).
+const ZOOM_RATE: f32 = 1.5;
 /// Tiles beyond the visible rectangle that are still simulated, so units walking
 /// on/off screen behave seamlessly.
 const SIM_MARGIN: i32 = 24;
@@ -59,6 +62,8 @@ struct Input {
     down: bool,
     left: bool,
     right: bool,
+    zoom_in: bool,
+    zoom_out: bool,
     cursor: (f64, f64),
 }
 
@@ -136,6 +141,20 @@ impl State {
         }
         if d != Vec2::ZERO {
             self.camera.center += d.normalize() * pan;
+        }
+
+        // Zoom with dedicated keys rather than the scroll wheel, which
+        // free-spins on smooth-scrolling mice. Exponential so it feels even
+        // at every zoom level.
+        let mut z = 0.0;
+        if self.input.zoom_in {
+            z -= 1.0;
+        }
+        if self.input.zoom_out {
+            z += 1.0;
+        }
+        if z != 0.0 {
+            self.camera.zoom((z * ZOOM_RATE * dt).exp());
         }
 
         // Simulate a generous rectangle around the view; entities outside it are
@@ -638,14 +657,6 @@ impl ApplicationHandler<State> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 state.input.cursor = (position.x, position.y);
             }
-            WindowEvent::MouseWheel { delta, .. } if !ui_consumed => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 60.0,
-                };
-                // Scroll up -> zoom in.
-                state.camera.zoom(if scroll > 0.0 { 0.9 } else { 1.1 });
-            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -668,6 +679,12 @@ impl ApplicationHandler<State> for App {
                         KeyCode::KeyS | KeyCode::ArrowDown => state.input.down = pressed,
                         KeyCode::KeyA | KeyCode::ArrowLeft => state.input.left = pressed,
                         KeyCode::KeyD | KeyCode::ArrowRight => state.input.right = pressed,
+                        KeyCode::KeyE | KeyCode::Equal | KeyCode::NumpadAdd => {
+                            state.input.zoom_in = pressed
+                        }
+                        KeyCode::KeyQ | KeyCode::Minus | KeyCode::NumpadSubtract => {
+                            state.input.zoom_out = pressed
+                        }
                         KeyCode::Escape if pressed => {
                             // Playing -> back to menu; on the menu -> quit.
                             if state.scene == Scene::Playing {

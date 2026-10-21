@@ -91,7 +91,8 @@ both natively and in the browser (via WebGL) using **Trunk**.
 | Input | Action |
 |-------|--------|
 | `WASD` / arrow keys | Pan the camera |
-| Mouse scroll | Zoom in / out |
+| `E` or `=` (hold) | Zoom in |
+| `Q` or `-` (hold) | Zoom out |
 | Left-click | Perform the current build action / place the rally flag |
 | Right-click | Clear the rally flag |
 | `Esc` | Return to menu (from the menu: quit on native) |

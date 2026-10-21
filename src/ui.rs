@@ -393,7 +393,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ui.small("Huts shelter farmers from raids; knights rush to defend an attacked one.");
             ui.small("Rally: knights drop combat and rush the flag; it clears on arrival.");
             ui.small("Right-click clears the rally flag.");
-            ui.small("Pan with WASD or the arrow keys; scroll to zoom.");
+            ui.small("Pan with WASD or the arrow keys; zoom with Q and E.");
         });
     action
 }

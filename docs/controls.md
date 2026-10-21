@@ -12,7 +12,8 @@ through the panel; your units carry them out on their own.
 | Input | Action |
 | ----- | ------ |
 | <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> / arrow keys | Pan the camera (pan speed scales with zoom) |
-| Mouse scroll | Zoom in (up) / out (down) |
+| <kbd>E</kbd> or <kbd>=</kbd> (hold) | Zoom in |
+| <kbd>Q</kbd> or <kbd>-</kbd> (hold) | Zoom out |
 | **Left-click** | Perform the current build action, or place the rally flag |
 | **Right-click** | Clear the rally flag |
 | <kbd>Esc</kbd> | Return to the menu (from the menu on native builds: quit) |
