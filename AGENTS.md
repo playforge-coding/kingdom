@@ -23,6 +23,10 @@ If your harness has dedicated search or file tools that already wrap these, thos
 
 Always lint and format.
 
+## Save compatibility
+
+World saves must stay loadable across versions. When you change or add state that gets saved, make sure a save written by an older version still loads: give new fields sensible defaults when they are missing instead of failing, and never repurpose or re-interpret an existing field's meaning. If an old save genuinely cannot be represented in the new format, write an explicit upgrade step that migrates it; losing or corrupting a player's world is never acceptable.
+
 ## Docs (IMPORTANT!!!)
 
 Always update the docs if necessary when changing or adding code. If the docs already contain outdated information, expand your scope to cover that info too.
