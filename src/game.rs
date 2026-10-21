@@ -116,6 +116,9 @@ pub struct Entity {
     build_site: Option<Tile>,
     /// Set when a farmer has ducked into a hut this tick (removed afterward).
     sheltered: bool,
+    /// A farmer called up by the draft and still owed `LEVY_GOLD_PAY`. Levies
+    /// return to farming (paid) or desert (unpaid) once the danger has passed.
+    levy: bool,
     /// Simulation time owed to an off-screen entity. It accrues while the unit
     /// waits its turn and is spent (capped) when its rotating batch comes up,
     /// so the far realm runs at a slower tick instead of freezing. Transient.
@@ -151,6 +154,7 @@ impl Entity {
             mine_target: None,
             build_site: None,
             sheltered: false,
+            levy: false,
             pending: 0.0,
         }
     }
@@ -384,10 +388,16 @@ const MIN_SPAWN_INTERVAL: f32 = 1.5;
 /// Seconds a proclaimed **draft** stays in force. While it runs, the player's
 /// farmers may be called up as knights (see `run_draft`).
 const DRAFT_DURATION: f32 = 15.0;
-/// Per-farmer, per-second chance of being conscripted during a draft. The real
-/// brake is gold, though: every call-up still costs `KNIGHT_GOLD_COST`, and a
-/// core of farmers is always left behind to keep the village running.
+/// Per-farmer, per-second chance of being conscripted during a draft. A core of
+/// farmers is always left behind to keep the village running.
 const DRAFT_CHANCE_PER_SEC: f32 = 0.2;
+/// Gold each surviving levy is owed when the draft stands down. Draftees serve
+/// on credit: nothing is spent when they're called up, so a broke realm can
+/// still raise one, but the bill comes due once the fighting is over.
+pub const LEVY_GOLD_PAY: u32 = 15;
+/// Seconds the realm must go without a threatened village, once the draft has
+/// ended, before the levies stand down (see `stand_down_levies`).
+const LEVY_STAND_DOWN: f32 = 15.0;
 
 /// Spawn interval scaled by farmer count: each farmer beyond the minimum
 /// shortens the wait, so a larger workforce raises new units faster.
@@ -603,6 +613,11 @@ pub enum AlertKind {
     VillageCaptured,
     CargoSunk,
     WarshipSunk,
+    /// The draft stood down and the levies were paid and went home to farm.
+    LeviesPaid,
+    /// The draft stood down but the treasury couldn't pay some levies, so they
+    /// deserted.
+    LeviesDeserted,
 }
 
 #[derive(Clone, Copy)]
@@ -693,6 +708,10 @@ pub struct Game {
     /// counts down, farmers are conscripted into knights (see `run_draft`).
     /// Transient, since a proclamation doesn't survive a save/load.
     draft_timer: f32,
+    /// Seconds since the draft ended with no player village under threat; the
+    /// levies stand down when it reaches `LEVY_STAND_DOWN`. Transient (the
+    /// levies themselves are saved, so a reload just restarts the wait).
+    levy_quiet: f32,
 
     player_house_tiles: Vec<Tile>,
     /// Player-built mines (caves); farmers mine these for endless stone.
@@ -906,6 +925,7 @@ impl Game {
             rally_response: None,
             offscreen_cursor: 0,
             draft_timer: 0.0,
+            levy_quiet: 0.0,
             player_house_tiles,
             cave_tiles: Vec::new(),
             hut_tiles,
@@ -1024,6 +1044,7 @@ impl Game {
         self.survey_villages();
         self.handle_spawns(dt);
         self.run_draft(dt);
+        self.stand_down_levies(dt);
         self.grow_saplings(dt);
 
         // Decide who is stepped this frame, and by how much. Everyone near the
@@ -2410,8 +2431,8 @@ impl Game {
     }
 
     /// Proclaim a draft: for the next `DRAFT_DURATION` seconds, farmers may be
-    /// conscripted into knights (each still paid for). Re-proclaiming refreshes
-    /// the clock.
+    /// conscripted into knights, serving as levies on credit. Re-proclaiming
+    /// refreshes the clock.
     pub fn proclaim_draft(&mut self) {
         self.draft_timer = DRAFT_DURATION;
     }
@@ -2421,10 +2442,17 @@ impl Game {
         (self.draft_timer > 0.0).then_some(self.draft_timer)
     }
 
+    /// Levies currently serving, and the gold they'll be owed when they stand
+    /// down.
+    pub fn levies_owed(&self) -> (usize, u32) {
+        let n = self.entities.iter().filter(|e| e.levy).count();
+        (n, n as u32 * LEVY_GOLD_PAY)
+    }
+
     /// While a draft is in force, call up the player's farmers as knights at
-    /// random. Every call-up still costs `KNIGHT_GOLD_COST`, so an empty
-    /// treasury halts it; a working core of farmers is always spared so the
-    /// economy (and knight upkeep) doesn't collapse. The floor is kept just
+    /// random. Call-ups are free: each becomes a levy, paid when the draft
+    /// stands down (see `stand_down_levies`). A working core of farmers is
+    /// always spared so the economy doesn't collapse. The floor is kept just
     /// *above* `MIN_FARMERS_TO_GROW` so the draft never trips the low-farmer
     /// retreat that would march the very knights it just raised back home.
     fn run_draft(&mut self, dt: f32) {
@@ -2433,9 +2461,7 @@ impl Game {
         }
         self.draft_timer -= dt;
         for i in 0..self.entities.len() {
-            if self.money < KNIGHT_GOLD_COST
-                || self.farmer_count(Faction::Player) <= MIN_FARMERS_TO_GROW + 1
-            {
+            if self.farmer_count(Faction::Player) <= MIN_FARMERS_TO_GROW + 1 {
                 break;
             }
             let e = &self.entities[i];
@@ -2446,8 +2472,8 @@ impl Game {
             if (self.rng.next_u32() as f32) / (u32::MAX as f32) >= DRAFT_CHANCE_PER_SEC * dt {
                 continue;
             }
-            self.money -= KNIGHT_GOLD_COST;
             let e = &mut self.entities[i];
+            e.levy = true;
             e.job = Job::Knight;
             e.max_hp = max_hp_for(Faction::Player, Job::Knight);
             e.hp = e.max_hp;
@@ -2457,6 +2483,65 @@ impl Game {
             e.target_node = None;
             e.harvest_timer = 0.0;
             e.set_path(Vec::new());
+        }
+    }
+
+    /// Once the draft is over and no player village has been threatened for
+    /// `LEVY_STAND_DOWN` seconds, the invasion counts as repelled and the
+    /// levies stand down. Each survivor is paid `LEVY_GOLD_PAY` and goes back
+    /// to farming; any the treasury can't cover desert. The fallen are owed
+    /// nothing.
+    fn stand_down_levies(&mut self, dt: f32) {
+        if !self.entities.iter().any(|e| e.levy) {
+            return;
+        }
+        let threatened = self
+            .villages
+            .iter()
+            .any(|v| v.faction == Faction::Player && v.threatened);
+        if self.draft_timer > 0.0 || threatened {
+            self.levy_quiet = 0.0;
+            return;
+        }
+        self.levy_quiet += dt;
+        if self.levy_quiet < LEVY_STAND_DOWN {
+            return;
+        }
+        self.levy_quiet = 0.0;
+
+        let mut paid_at = None;
+        let mut deserted_at = None;
+        let money = &mut self.money;
+        self.entities.retain_mut(|e| {
+            if !e.levy {
+                return true;
+            }
+            if *money < LEVY_GOLD_PAY {
+                deserted_at.get_or_insert(e.pos);
+                return false;
+            }
+            *money -= LEVY_GOLD_PAY;
+            paid_at.get_or_insert(e.pos);
+            e.levy = false;
+            // A levy that already fell back home is a farmer again; the rest
+            // lay down their arms, keeping their wounds.
+            if e.job == Job::Knight {
+                let max_hp = max_hp_for(e.faction, Job::Farmer);
+                e.hp = (e.hp / e.max_hp * max_hp).max(1.0);
+                e.max_hp = max_hp;
+                e.job = Job::Farmer;
+                e.build_site = None;
+                e.target_node = None;
+                e.harvest_timer = 0.0;
+                e.set_path(Vec::new());
+            }
+            true
+        });
+        if let Some(pos) = paid_at {
+            self.push_alert(AlertKind::LeviesPaid, pos);
+        }
+        if let Some(pos) = deserted_at {
+            self.push_alert(AlertKind::LeviesDeserted, pos);
         }
     }
 
@@ -3856,7 +3941,7 @@ fn open_tiles_near(world: &World, cx: i32, cy: i32, r: i32) -> Vec<Tile> {
 // ---------------------------------------------------------------------------
 
 const MAGIC: &[u8; 4] = b"KGDM";
-const VERSION: u8 = 10;
+const VERSION: u8 = 11;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
     b.push(v);
@@ -3978,6 +4063,7 @@ impl Game {
             wf32(&mut b, e.max_hp);
             wu8(&mut b, dir_u8(e.facing));
             wu8(&mut b, anim_u8(e.anim));
+            wu8(&mut b, e.levy as u8);
         }
 
         wu32(&mut b, self.player_bridges.len() as u32);
@@ -4138,6 +4224,7 @@ impl Game {
                 2 => Anim::Act,
                 _ => Anim::Idle,
             };
+            let levy = r.u8()? != 0;
             entities.push(Entity {
                 faction,
                 job,
@@ -4155,6 +4242,7 @@ impl Game {
                 mine_target: None,
                 build_site: None,
                 sheltered: false,
+                levy,
                 pending: 0.0,
             });
         }
@@ -4351,6 +4439,7 @@ impl Game {
             rally_response: None,
             offscreen_cursor: 0,
             draft_timer: 0.0,
+            levy_quiet: 0.0,
             player_house_tiles,
             cave_tiles,
             hut_tiles,
@@ -4512,22 +4601,22 @@ mod tests {
         assert!(game.money >= KNIGHT_GOLD_COST);
     }
 
-    #[test]
-    fn draft_conscripts_farmers_but_is_gated_by_gold() {
+    /// A broke fresh world with extra farmers at home and a draft run to its
+    /// end. Drives `run_draft` directly so spawns and combat can't muddy the
+    /// count.
+    fn drafted_game() -> Game {
         let mut game = Game::new(1);
-        // Give the draft a healthy pool of farmers to call up.
+        game.money = 0;
         let home = game.start_center();
         let tile = (home.x as i32, home.y as i32);
         for _ in 0..10 {
             game.entities
                 .push(Entity::new(Faction::Player, Job::Farmer, tile));
         }
-        let farmers0 = game.farmer_count(Faction::Player);
-        assert!(farmers0 > MIN_FARMERS_TO_GROW + 1, "need bodies to draft");
-
-        // Fund exactly two call-ups, then proclaim and run the draft to its end.
-        // Drive `run_draft` directly so spawns and combat can't muddy the count.
-        game.money = KNIGHT_GOLD_COST * 2;
+        assert!(
+            game.farmer_count(Faction::Player) > MIN_FARMERS_TO_GROW + 1,
+            "need bodies to draft"
+        );
         game.proclaim_draft();
         assert!(game.draft_remaining().is_some());
         for _ in 0..1000 {
@@ -4536,19 +4625,99 @@ mod tests {
                 break;
             }
         }
+        game
+    }
 
-        // Gold is the brake: at most two farmers were called up, and the spend
-        // matches exactly one knight per missing farmer.
-        let converted = (farmers0 - game.farmer_count(Faction::Player)) as u32;
-        assert!(converted <= 2, "gold must cap conscription at two");
-        assert_eq!(game.money, KNIGHT_GOLD_COST * (2 - converted));
-        assert!(
-            converted >= 1,
-            "a funded draft with bodies should call some up"
-        );
+    #[test]
+    fn draft_raises_levies_on_credit() {
+        let farmers0 = Game::new(1).farmer_count(Faction::Player) + 10;
+        let game = drafted_game();
+
+        // Even a broke realm can call up levies, and none of it is paid yet.
+        let (levies, owed) = game.levies_owed();
+        let converted = farmers0 - game.farmer_count(Faction::Player);
+        assert!(levies >= 1, "a draft with bodies should call some up");
+        assert_eq!(levies, converted, "every call-up is a levy");
+        assert_eq!(owed, levies as u32 * LEVY_GOLD_PAY);
+        assert_eq!(game.money, 0, "levies are paid later, not up front");
         // A working core of farmers is always spared, and the draft expires.
         assert!(game.farmer_count(Faction::Player) > MIN_FARMERS_TO_GROW);
         assert!(game.draft_remaining().is_none(), "draft must expire");
+    }
+
+    #[test]
+    fn levies_wait_out_a_threat_then_are_paid_and_go_home() {
+        let mut game = drafted_game();
+        let (levies, owed) = game.levies_owed();
+        assert!(levies >= 1);
+        let farmers0 = game.farmer_count(Faction::Player);
+        game.money = owed;
+
+        // While a village is under threat, the levies stay under arms however
+        // long it lasts.
+        game.villages = vec![Village {
+            faction: Faction::Player,
+            center: game.start_center(),
+            min: (0, 0),
+            max: (0, 0),
+            houses: 1,
+            knights: 0,
+            farmers: 0,
+            threatened: true,
+            pop: 0,
+            cap: 0,
+        }];
+        for _ in 0..(LEVY_STAND_DOWN as usize * 30) {
+            game.stand_down_levies(0.1);
+        }
+        assert_eq!(game.levies_owed().0, levies, "stood down mid-raid");
+
+        // Once it's quiet for long enough, everyone is paid and back farming.
+        game.villages[0].threatened = false;
+        for _ in 0..(LEVY_STAND_DOWN as usize * 10 + 1) {
+            game.stand_down_levies(0.1);
+        }
+        assert_eq!(game.levies_owed(), (0, 0));
+        assert_eq!(game.money, 0, "each levy is paid exactly once");
+        assert_eq!(game.farmer_count(Faction::Player), farmers0 + levies);
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::LeviesPaid)
+        );
+    }
+
+    #[test]
+    fn unpaid_levies_desert() {
+        let mut game = drafted_game();
+        let (levies, _) = game.levies_owed();
+        assert!(levies >= 1);
+        let units0 = game.entities.len();
+        let farmers0 = game.farmer_count(Faction::Player);
+        // Enough gold for all but one.
+        game.money = (levies as u32 - 1) * LEVY_GOLD_PAY;
+        for _ in 0..(LEVY_STAND_DOWN as usize * 10 + 1) {
+            game.stand_down_levies(0.1);
+        }
+        assert_eq!(game.levies_owed(), (0, 0));
+        assert_eq!(game.money, 0);
+        assert_eq!(game.entities.len(), units0 - 1, "the unpaid levy deserts");
+        assert_eq!(game.farmer_count(Faction::Player), farmers0 + levies - 1);
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::LeviesDeserted)
+        );
+    }
+
+    #[test]
+    fn levies_survive_a_save() {
+        let game = drafted_game();
+        let (levies, _) = game.levies_owed();
+        assert!(levies >= 1);
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+        assert_eq!(loaded.levies_owed(), game.levies_owed());
     }
 
     #[test]

@@ -46,14 +46,27 @@ the HUD (see **[Controls](controls.md#proclamations)**). For a short spell:
 
 - Your **farmers may spontaneously take up arms**, converting into knights at
   random over the course of the draft.
-- Each call-up **still costs gold**, exactly like raising a knight normally, so
-  the size of your treasury, not the number of farmers, is the real limit. When
-  the coffers run dry, the call-ups stop.
+- Draftees are **levies** and serve **on credit**. Calling them up costs
+  nothing, so a draft works even when the treasury is empty.
 - A **working core of farmers is always spared**, so a draft can't hollow out
   your economy (or trip your knights into retreating home).
 
-It's a burst of military muscle when a raid is bearing down, at the price of
-gold and a thinner workforce until you rebuild it.
+Once the draft has ended and none of your villages has been under threat for a
+little while, the invasion counts as repelled and the levies **stand down**:
+
+- Each surviving levy is **paid 15 gold** and **goes back to farming**, keeping
+  any wounds from the fight. Levies who fell in battle are owed nothing.
+- If the treasury can't cover everyone, the levies you can't pay **desert** and
+  are gone for good.
+- An alert tells you the levies were paid, or that some deserted.
+
+While levies are serving, the Proclamations panel shows how many there are and
+how much you owe. Proclaiming another draft, or a fresh raid on one of your
+villages, keeps them under arms a while longer.
+
+It's a burst of military muscle when a raid is bearing down, at the price of a
+thinner workforce during the fight and a bill once it's won. Keep the trade
+routes running so the gold is there when it comes due.
 
 ## Enemies
 

@@ -12,9 +12,9 @@ use winit::window::Window;
 use crate::atlas::MapColors;
 use crate::game::{
     AlertKind, BRIDGE_WOOD_COST, BuildMode, Faction, Game, GatherPriority, HOUSE_GOLD_COST,
-    HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST, KNIGHT_GOLD_COST, MINE_GOLD_COST,
-    MINE_STONE_COST, Priority, STONE_PRICE, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST,
-    WARSHIP_GOLD_COST, WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
+    HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST, KNIGHT_GOLD_COST, LEVY_GOLD_PAY,
+    MINE_GOLD_COST, MINE_STONE_COST, Priority, STONE_PRICE, WALL_GOLD_COST, WALL_STONE_COST,
+    WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -305,8 +305,21 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             {
                 game.proclaim_draft();
             }
+            let (levies, owed) = game.levies_owed();
+            if levies > 0 {
+                let tint = if game.money >= owed { ui.visuals().text_color() } else { ALARM };
+                ui.horizontal(|ui| {
+                    ui.add(icon(ui, icons::COINS).tint(tint));
+                    ui.label(
+                        RichText::new(format!("{levies} levies serving, {owed} gold owed"))
+                            .color(tint),
+                    );
+                });
+            }
             ui.small(format!(
-                "Draft: farmers may take up arms as knights ({KNIGHT_GOLD_COST} gold each)."
+                "Draft: farmers take up arms for free. Once the realm is quiet, each \
+                 survivor is paid {LEVY_GOLD_PAY} gold and goes back to farming. \
+                 Any you can't pay will desert."
             ));
             ui.separator();
 
@@ -805,6 +818,14 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                 }
                                 AlertKind::WarshipSunk => {
                                     (icons::ANCHOR, ALARM, "Pirates sank a warship")
+                                }
+                                AlertKind::LeviesPaid => (
+                                    icons::COINS,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "The levies were paid and went back to farming",
+                                ),
+                                AlertKind::LeviesDeserted => {
+                                    (icons::COINS, ALARM, "Unpaid levies deserted")
                                 }
                             };
                             ui.add(icon(ui, glyph).tint(tint));

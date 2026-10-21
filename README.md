@@ -59,9 +59,10 @@ both natively and in the browser (via WebGL) using **Trunk**.
 - **Priorities.** Toggle **Agriculture / Military** to bias which workers your
   houses raise, and **Balanced / Wood / Stone** to steer what farmers gather.
 - **Proclaim a draft.** Need soldiers now? Declare a draft and, for a short
-  spell, your **farmers spontaneously take up arms as knights**. Each is still paid
-  for in gold, so your treasury caps the call-up while a core of farmers is
-  always spared.
+  spell, your **farmers spontaneously take up arms as knights**. These levies
+  serve on credit, so even a broke realm can raise them, while a core of farmers
+  is always spared. Once the realm is quiet again, each survivor is paid and goes
+  back to farming. Any you can't pay will desert.
 - **Economy.** Alongside wood and stone you keep a purse of **gold**. You start
   with some seed gold; every new **knight** costs gold to arm (a broke village
   raises a free farmer instead), and most structures cost gold too.

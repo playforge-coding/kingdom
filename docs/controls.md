@@ -56,9 +56,11 @@ Everything you build is paid for out of this pool.
 ### Proclamations
 
 - **:lucide-scroll-text: Proclaim draft:** declares a draft for a short spell.
-  While it runs, your farmers may spontaneously **take up arms as knights**. Each
-  still costs the usual gold, and an empty treasury stops the call-ups. The button is
-  replaced by a countdown while a draft is in force. See
+  While it runs, your farmers may spontaneously **take up arms as knights**. They
+  serve as **levies**: free to call up, but each survivor is owed gold once the
+  fighting is over. The button is replaced by a countdown while a draft is in
+  force, and while levies are serving the panel shows how many there are and
+  how much you owe them (in red if you can't cover it yet). See
   **[Units & Combat](units.md#the-draft)**.
 
 ### Build (left-click)
@@ -125,6 +127,8 @@ saying what happened and where:
 - a village has **fallen** (your knights rally to retake it)
 - you **captured** a village
 - pirates **sank** a cargo ship or a warship
+- the draft stood down and your levies were **paid**, or some **deserted**
+  because you couldn't pay them
 
 Press **:lucide-crosshair: Go** to jump there, or **:lucide-x:** to dismiss it.
 Alerts fade after a few seconds. An ongoing raid only raises one alert, and the
