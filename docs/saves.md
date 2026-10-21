@@ -20,6 +20,9 @@ A save captures everything needed to reconstruct your session exactly:
 
 Loading replays the seed to regenerate untouched terrain, then applies your
 saved edits on top, so even an "infinite" world round-trips from a small file.
+Loading also tidies up after older saves that stored unedited terrain: any
+chunk that matches what the seed regenerates is treated as untouched, so the
+next save you write slims back down to just your edits.
 
 ## The `.dat` format
 

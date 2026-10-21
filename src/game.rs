@@ -2,7 +2,12 @@
 //! collision-aware movement via BFS pathfinding, enemies, combat, building, and
 //! (de)serialization to the custom `.dat` save format.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+
+// Tile-keyed maps are on the hottest paths in the game (every world read hashes
+// a chunk coordinate; BFS hashes every visited tile), so they all use the fast,
+// deterministic FxHash instead of std's DoS-resistant SipHash.
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use glam::Vec2;
 
@@ -195,6 +200,15 @@ impl Entity {
         self.path = p;
         self.path_cursor = 0;
     }
+    /// May this unit plan a route now? Freely once its replan clock has lapsed,
+    /// or immediately on finishing a path — unless a failure backoff (a clock
+    /// pushed past the normal tick after every search came up empty) is still
+    /// running. Without that exception, clearing the path on failure would make
+    /// `path_done` retrigger the expensive searches every single frame.
+    #[inline]
+    fn may_replan(&self) -> bool {
+        self.repath <= 0.0 || (self.path_done() && self.repath <= REPLAN_TICK)
+    }
 }
 
 fn set_anim(e: &mut Entity, a: Anim, dt: f32) {
@@ -318,6 +332,10 @@ pub const SHIP_NEAR_RADIUS: i32 = 8;
 const CIVILIAN_SPEED: f32 = 2.4;
 const KNIGHT_SPEED: f32 = 2.9;
 const HARVEST_TIME: f32 = 2.0;
+/// Seconds between route replans while a unit is on the move. A unit that just
+/// finished its path may replan at once; one whose searches all failed backs
+/// off for longer (see `Entity::may_replan`).
+const REPLAN_TICK: f32 = 0.7;
 /// Civilians never roam further than this from their nearest house. A hard
 /// leash that keeps them tending the village instead of wandering off after
 /// resources. Builders walking to a claimed site are exempt, so a bridge can
@@ -481,6 +499,10 @@ const RIVER_BUDGET: usize = 40_000;
 
 /// Tiles kept generated around live entities so AI/pathfinding have room.
 const ENSURE_MARGIN: i32 = 40;
+/// Seconds between sweeps that evict far-off, never-edited chunks. Untouched
+/// terrain regenerates from the seed on demand, so shedding it caps world
+/// memory at roughly the edited area plus what's near the view and the units.
+const EVICT_INTERVAL: f32 = 2.0;
 /// Pathfinding budget (tiles expanded).
 const PATH_BUDGET: usize = 4000;
 
@@ -831,6 +853,8 @@ pub struct Game {
     pub auto_build: bool,
     /// Countdown to the next autonomous-build check. Transient.
     auto_timer: f32,
+    /// Countdown to the next clean-chunk eviction sweep. Transient.
+    evict_timer: f32,
     /// Saplings mid-growth (transient, not persisted across saves).
     saplings: Vec<Sapling>,
     /// Bridges the player has placed (anchors for extending spans).
@@ -1044,6 +1068,7 @@ impl Game {
             auto_zones: Vec::new(),
             auto_build: false,
             auto_timer: 0.0,
+            evict_timer: EVICT_INTERVAL,
             saplings: Vec::new(),
             player_bridges: Vec::new(),
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
@@ -1199,19 +1224,24 @@ impl Game {
             self.offscreen_cursor = (self.offscreen_cursor + examined) % n;
         }
 
-        // Keep chunks generated around everyone being stepped this frame.
+        // Keep chunks generated around everyone being stepped this frame, and
+        // every so often shed far-off pristine chunks: untouched terrain
+        // regenerates from the seed, so only edits need to stay resident.
         self.ensure_around_active(&step_dt);
+        self.evict_timer -= dt;
+        if self.evict_timer <= 0.0 {
+            self.evict_timer = EVICT_INTERVAL;
+            self.evict_far_chunks(sim);
+        }
 
         let snap: Vec<(Vec2, Faction)> = self.entities.iter().map(|e| (e.pos, e.faction)).collect();
         let grid = Grid::build(snap.iter().map(|&(p, _)| p));
 
         // How many miners are already working each mine, so we can cap the crowd.
-        let mut cave_use: std::collections::HashMap<Tile, u32> = std::collections::HashMap::new();
+        let mut cave_use: HashMap<Tile, u32> = HashMap::default();
         // Tiles no sapling may be sown on: existing saplings and pending builds.
-        let mut sapling_tiles: std::collections::HashSet<Tile> =
-            self.saplings.iter().map(|s| s.tile).collect();
-        let site_tiles: std::collections::HashSet<Tile> =
-            self.build_sites.iter().map(|s| s.tile).collect();
+        let mut sapling_tiles: HashSet<Tile> = self.saplings.iter().map(|s| s.tile).collect();
+        let site_tiles: HashSet<Tile> = self.build_sites.iter().map(|s| s.tile).collect();
         sapling_tiles.extend(site_tiles.iter().copied());
         // Drop stale site claims (the site was canceled or finished), then note
         // which sites are already spoken for so each gets a single builder.
@@ -1225,7 +1255,7 @@ impl Game {
                 e.build_site = None;
             }
         }
-        let mut site_claims: std::collections::HashSet<Tile> = self
+        let mut site_claims: HashSet<Tile> = self
             .entities
             .iter()
             .filter(|e| e.job == Job::Civilian)
@@ -1251,9 +1281,8 @@ impl Game {
         // adjacent enemy wall or hut if no opponent is close.
         let mut damage = vec![0f32; n];
         let mut acting = vec![false; n];
-        let mut wall_damage: std::collections::HashMap<Tile, f32> =
-            std::collections::HashMap::new();
-        let mut hut_damage: std::collections::HashMap<Tile, f32> = std::collections::HashMap::new();
+        let mut wall_damage: HashMap<Tile, f32> = HashMap::default();
+        let mut hut_damage: HashMap<Tile, f32> = HashMap::default();
         for i in 0..n {
             let Some(adt) = step_dt[i] else { continue };
             if self.entities[i].job != Job::Knight {
@@ -2153,6 +2182,40 @@ impl Game {
         }
     }
 
+    /// Evict clean (never-edited) chunks far from everything that matters: the
+    /// simulated rectangle around the view, every unit and vessel, and pending
+    /// work tiles (saplings, build sites, builder zones). The margin kept around
+    /// units covers the widest region anything generates for itself
+    /// (`ENSURE_MARGIN` on land, `PATROL_SCAN` at sea), so the realm doesn't
+    /// churn through evict-regenerate cycles. Edited chunks are never evicted;
+    /// they're what saves are made of.
+    fn evict_far_chunks(&mut self, sim: (i32, i32, i32, i32)) {
+        let m = ENSURE_MARGIN.max(PATROL_SCAN);
+        let mut keep: Vec<(i32, i32, i32, i32)> = Vec::with_capacity(
+            1 + self.entities.len()
+                + self.ships.len()
+                + self.warships.len()
+                + self.pirates.len()
+                + self.saplings.len()
+                + self.build_sites.len()
+                + self.auto_zones.len(),
+        );
+        keep.push(sim);
+        let around = |p: Vec2| {
+            let (x, y) = (p.x.floor() as i32, p.y.floor() as i32);
+            (x - m, y - m, x + m, y + m)
+        };
+        keep.extend(self.entities.iter().map(|e| around(e.pos)));
+        keep.extend(self.ships.iter().map(|s| around(s.pos)));
+        keep.extend(self.warships.iter().map(|w| around(w.pos)));
+        keep.extend(self.pirates.iter().map(|p| around(p.pos)));
+        let tile_rect = |&(x, y): &Tile| (x - 1, y - 1, x + 1, y + 1);
+        keep.extend(self.saplings.iter().map(|s| tile_rect(&s.tile)));
+        keep.extend(self.build_sites.iter().map(|s| tile_rect(&s.tile)));
+        keep.extend(self.auto_zones.iter().map(tile_rect));
+        self.world.evict_clean_chunks(&keep);
+    }
+
     /// Advance sown saplings; a mature one becomes a real tree (wood node).
     fn grow_saplings(&mut self, dt: f32) {
         let step = dt / SAPLING_GROW_TIME;
@@ -2905,11 +2968,11 @@ fn ai_step(
 /// construction sites waiting on a builder (with the claims taken so far).
 struct FarmCtx<'a> {
     caves: &'a [Tile],
-    cave_use: &'a mut std::collections::HashMap<Tile, u32>,
-    saplings: &'a std::collections::HashSet<Tile>,
+    cave_use: &'a mut HashMap<Tile, u32>,
+    saplings: &'a HashSet<Tile>,
     huts: &'a [Tile],
     sites: &'a [BuildSite],
-    site_claims: &'a mut std::collections::HashSet<Tile>,
+    site_claims: &'a mut HashSet<Tile>,
 }
 
 /// Is any construction site still waiting for a builder?
@@ -2987,7 +3050,7 @@ fn stand_tile(world: &World, owner: u8, t: Tile) -> Option<Tile> {
 }
 
 /// Release a civilian's claim on a mine, freeing its slot for someone else.
-fn release_cave(e: &mut Entity, cave_use: &mut std::collections::HashMap<Tile, u32>) {
+fn release_cave(e: &mut Entity, cave_use: &mut HashMap<Tile, u32>) {
     if let Some(c) = e.mine_target.take()
         && let Some(n) = cave_use.get_mut(&c)
     {
@@ -3027,7 +3090,7 @@ fn claim_cave(
 fn plantable_neighbor(
     world: &World,
     home: &[Tile],
-    saplings: &std::collections::HashSet<Tile>,
+    saplings: &HashSet<Tile>,
     stand: Tile,
 ) -> Option<Tile> {
     [(1, 0), (-1, 0), (0, 1), (0, -1)]
@@ -3046,7 +3109,7 @@ fn plan_plant(
     owner: u8,
     start: Tile,
     home: &[Tile],
-    saplings: &std::collections::HashSet<Tile>,
+    saplings: &HashSet<Tile>,
 ) -> Option<(Vec<Tile>, Tile)> {
     let path = pathfind::bfs(
         start,
@@ -3114,12 +3177,12 @@ fn seek_shelter(
         return Some(Some(StepEvent::Hide(hut)));
     }
     if let Some(stand) = stand_tile(world, owner, hut)
-        && (e.repath <= 0.0 || e.path_done())
+        && e.may_replan()
     {
         if let Some(p) = pathfind::path_to(world, owner, e.tile(), stand, PATH_BUDGET) {
             e.set_path(p);
         }
-        e.repath = 0.7;
+        e.repath = REPLAN_TICK;
     }
     let moved = follow_path(e, CIVILIAN_SPEED, dt);
     set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
@@ -3159,8 +3222,8 @@ fn gather_behavior(
             set_anim(e, Anim::Act, dt);
             return Some(StepEvent::Construct(site));
         } else {
-            if e.repath <= 0.0 || e.path_done() {
-                e.repath = 0.7;
+            if e.may_replan() {
+                e.repath = REPLAN_TICK;
                 if let Some(p) = path_beside(world, owner, here, site) {
                     e.set_path(p);
                 } else {
@@ -3184,12 +3247,12 @@ fn gather_behavior(
         release_cave(e, farm.cave_use);
         e.target_node = None;
         if let Some(h) = nearest_house(home, here)
-            && (e.repath <= 0.0 || e.path_done())
+            && e.may_replan()
         {
             if let Some(p) = pathfind::path_to(world, owner, here, h, PATH_BUDGET) {
                 e.set_path(p);
             }
-            e.repath = 0.7;
+            e.repath = REPLAN_TICK;
         }
         let moved = follow_path(e, CIVILIAN_SPEED, dt);
         set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
@@ -3276,6 +3339,14 @@ fn gather_behavior(
         e.target_node = None;
     }
 
+    // Everything below runs budgeted searches over the map. When all of them
+    // just came up empty, sit out the backoff (finishing any stroll, else
+    // idling) instead of burning that whole budget again every frame.
+    if !e.may_replan() {
+        wander_behavior(world, e, owner, Some((home, CIVILIAN_HOME_RADIUS)), rng, dt);
+        return None;
+    }
+
     // Idle hands take up building before gathering: claim the nearest
     // reachable site still waiting on a builder and head over.
     if let Some((site, path)) = claim_site(world, owner, here, farm) {
@@ -3339,7 +3410,10 @@ fn gather_behavior(
         return None;
     }
 
-    // Truly idle: putter around, but stay on the leash.
+    // Truly idle: nothing to build, gather, mine, or sow anywhere in reach.
+    // Back off (with jitter) before searching it all again, and putter around
+    // on the leash in the meantime.
+    e.repath = 2.0 + rng.range(0, 200) as f32 / 100.0;
     wander_behavior(world, e, owner, Some((home, CIVILIAN_HOME_RADIUS)), rng, dt);
     None
 }
@@ -3397,8 +3471,8 @@ fn soldier_behavior(
     // rush the flag, punching through trees/rocks if that's the only way in. The
     // flag is lifted the instant the group arrives (see `clear_reached_rally`).
     if let Some(r) = rally {
-        if e.repath <= 0.0 || e.path_done() {
-            e.repath = 0.7;
+        if e.may_replan() {
+            e.repath = REPLAN_TICK;
             let rt = (r.x.floor() as i32, r.y.floor() as i32);
             let goal = |x: i32, y: i32| (x, y) == rt;
             if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
@@ -3438,15 +3512,15 @@ fn soldier_behavior(
     // With no foe in the field, knights stay on the offensive: they march on
     // the enemy's own huts and walls, routing to a tile from which the combat
     // step can start hacking the structure down.
-    let foes: std::collections::HashSet<Tile> = snap
+    let foes: HashSet<Tile> = snap
         .iter()
         .filter(|&&(_, f)| hostile(f, e.faction))
         .map(|&(p, _)| (p.x.floor() as i32, p.y.floor() as i32))
         .collect();
     let siege = any_hostile_hut(world, owner, huts);
 
-    if e.repath <= 0.0 || e.path_done() {
-        e.repath = 0.7;
+    if e.may_replan() {
+        e.repath = REPLAN_TICK;
         let goal = |x: i32, y: i32| {
             foes.contains(&(x, y))
                 || adjacent_enemy_wall(world, owner, (x, y)).is_some()
@@ -3570,11 +3644,11 @@ fn retreat_behavior(
         return choose_wall_tile(world, target).map(StepEvent::RaiseWall);
     }
 
-    if e.repath <= 0.0 || e.path_done() {
+    if e.may_replan() {
         if let Some(p) = pathfind::path_to(world, owner, here, target, PATH_BUDGET) {
             e.set_path(p);
         }
-        e.repath = 0.7;
+        e.repath = REPLAN_TICK;
     }
     let moved = follow_path(e, KNIGHT_SPEED, dt);
     set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
@@ -3649,7 +3723,7 @@ fn plan_sea_route(world: &World, start: Tile, ally_houses: &[Tile]) -> Option<Ve
     if ally_houses.is_empty() {
         return None;
     }
-    let ports: std::collections::HashSet<Tile> = ally_houses.iter().copied().collect();
+    let ports: HashSet<Tile> = ally_houses.iter().copied().collect();
     let sea = |x: i32, y: i32| world.tile(x, y) == WTile::Water;
     let is_port = |x: i32, y: i32| {
         sea(x, y)
@@ -4026,7 +4100,7 @@ fn home_continent_tiles(
     max_radius: i32,
     cap: usize,
 ) -> HashSet<Tile> {
-    let mut seen: HashSet<Tile> = HashSet::new();
+    let mut seen: HashSet<Tile> = HashSet::default();
     let mut queue: VecDeque<Tile> = VecDeque::new();
     let passable = |world: &mut World, x: i32, y: i32| {
         world.ensure(x.div_euclid(CHUNK), y.div_euclid(CHUNK));
@@ -4106,7 +4180,7 @@ fn find_ocean_coast_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile
     cands.sort_by_key(|&(x, y)| (x - near.0).abs() + (y - near.1).abs());
     // Check candidates nearest-first; cache lake tiles so each small body is only
     // flooded once.
-    let mut lake: HashSet<Tile> = HashSet::new();
+    let mut lake: HashSet<Tile> = HashSet::default();
     for (x, y) in cands {
         for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
             let w = (x + dx, y + dy);
@@ -4139,12 +4213,12 @@ fn reachable_overseas_coasts(
     if world.tile(start_sea.0, start_sea.1) != WTile::Water {
         return Vec::new();
     }
-    let mut seen: HashSet<Tile> = HashSet::new();
+    let mut seen: HashSet<Tile> = HashSet::default();
     let mut q: VecDeque<Tile> = VecDeque::new();
     seen.insert(start_sea);
     q.push_back(start_sea);
     let mut coasts: Vec<Tile> = Vec::new();
-    let mut coast_seen: HashSet<Tile> = HashSet::new();
+    let mut coast_seen: HashSet<Tile> = HashSet::default();
     while let Some((x, y)) = q.pop_front() {
         if seen.len() > explore_cap {
             break;
@@ -4243,7 +4317,7 @@ fn nearest_water(world: &mut World, cx: i32, cy: i32, r: i32) -> Option<Tile> {
 /// and the tiles visited.
 fn flood_water(world: &mut World, sx: i32, sy: i32, cap: usize) -> (bool, HashSet<Tile>) {
     use crate::world::Tile as WTile;
-    let mut seen: HashSet<Tile> = HashSet::new();
+    let mut seen: HashSet<Tile> = HashSet::default();
     world.ensure(sx.div_euclid(CHUNK), sy.div_euclid(CHUNK));
     if world.tile(sx, sy) != WTile::Water {
         return (false, seen);
@@ -4282,7 +4356,7 @@ fn carve_river_to_sea(world: &mut World, seed: Tile, avoid: &[Tile]) {
     // own water seeds the search, land tiles become river candidates, and any
     // *other* water body large enough to be the sea is the goal. Only the land
     // tiles on the chosen path are carved, since existing water already connects.
-    let mut came: HashMap<Tile, Tile> = HashMap::new();
+    let mut came: HashMap<Tile, Tile> = HashMap::default();
     let mut visited: HashSet<Tile> = body.clone();
     let mut q: VecDeque<Tile> = body.iter().copied().collect();
     let mut mouth: Option<Tile> = None;
@@ -4554,7 +4628,9 @@ impl Game {
             wu8(&mut b, s.auto as u8);
         }
 
-        let chunks: Vec<_> = self.world.chunks_iter().collect();
+        // Only edited chunks go in the save; everything else regenerates from
+        // the seed on load, keeping the file small on an endless map.
+        let chunks: Vec<_> = self.world.chunks_iter().filter(|(_, c)| c.dirty).collect();
         wu32(&mut b, chunks.len() as u32);
         for (coord, chunk) in chunks {
             wi32(&mut b, coord.0);
@@ -4795,6 +4871,9 @@ impl Game {
                 walls: Vec::with_capacity(n_tiles),
                 caves: Vec::with_capacity(n_tiles),
                 huts: Vec::with_capacity(n_tiles),
+                // Provisional; `World::from_saved` re-marks each loaded chunk
+                // by comparing it against what the seed regenerates.
+                dirty: true,
             };
             for _ in 0..n_tiles {
                 chunk.tiles.push(if r.u8()? == 1 {
@@ -4925,6 +5004,7 @@ impl Game {
             auto_zones,
             auto_build,
             auto_timer: 0.0,
+            evict_timer: EVICT_INTERVAL,
             saplings: Vec::new(),
             player_bridges,
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
@@ -4969,6 +5049,43 @@ mod tests {
             }
         }
         None
+    }
+
+    /// Manual performance probe, not part of the suite. Reports chunk
+    /// generation cost (what a pan into fresh terrain pays) and update cost as
+    /// the realm grows. Run with:
+    /// `cargo test --release perf_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual perf probe"]
+    fn perf_probe() {
+        use std::time::Instant;
+
+        let mut world = World::new(11);
+        let span = CHUNK * 16;
+        let t = Instant::now();
+        world.ensure_region(1000, 1000, 1000 + span - 1, 1000 + span - 1);
+        println!("generate_chunk: {:.2?} avg over 256", t.elapsed() / 256);
+
+        let mut game = Game::new(11);
+        let c = game.start_center();
+        let sim = (
+            c.x as i32 - 60,
+            c.y as i32 - 60,
+            c.x as i32 + 60,
+            c.y as i32 + 60,
+        );
+        for (label, updates) in [("fresh", 600u32), ("+10 min", 6000), ("+20 min", 6000)] {
+            let t = Instant::now();
+            for _ in 0..updates {
+                game.update(0.1, sim);
+            }
+            println!(
+                "{label}: {:?}/update, {} units, {} chunks",
+                t.elapsed() / updates,
+                game.entities.len(),
+                game.world.chunks_iter().count(),
+            );
+        }
     }
 
     /// A launchable home port: open water within the player's harbor that has a
@@ -5189,6 +5306,49 @@ mod tests {
                 .iter()
                 .any(|a| a.kind == AlertKind::LeviesDeserted)
         );
+    }
+
+    #[test]
+    fn pristine_chunks_are_evicted_and_left_out_of_saves() {
+        let mut game = Game::new(3);
+
+        // Reveal a swath of far-off terrain, as panning the zoomed-out view
+        // does. None of it is edited, so none of it should stick.
+        game.world.ensure_region(2000, 2000, 2400, 2400);
+        let revealed = game.world.chunks_iter().count();
+        let edited = game.world.chunks_iter().filter(|(_, c)| c.dirty).count();
+        assert!(edited > 0, "founding the realm must edit some chunks");
+        assert!(
+            edited < revealed / 2,
+            "most revealed chunks should be pristine ({edited} of {revealed} edited)"
+        );
+
+        // The save holds only the edited chunks, and a load restores the realm
+        // (regenerating pristine terrain from the seed on demand).
+        let mut houses = game.player_house_tiles.clone();
+        houses.sort_unstable();
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+        assert_eq!(loaded.world.chunks_iter().count(), edited);
+        let mut loaded_houses = loaded.player_house_tiles.clone();
+        loaded_houses.sort_unstable();
+        assert_eq!(loaded_houses, houses);
+        for &(x, y) in &houses {
+            assert!(loaded.world.is_house(x, y), "house lost across save");
+        }
+
+        // Eviction sheds the far-off pristine chunks but never an edited one.
+        game.evict_far_chunks((-50, -50, 50, 50));
+        let after = game.world.chunks_iter().count();
+        assert!(after < revealed, "eviction freed nothing");
+        assert_eq!(
+            game.world.chunks_iter().filter(|(_, c)| c.dirty).count(),
+            edited,
+            "eviction dropped an edited chunk"
+        );
+        for &(x, y) in &houses {
+            assert!(game.world.is_house(x, y), "house lost to eviction");
+        }
     }
 
     #[test]

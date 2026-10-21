@@ -3,7 +3,7 @@
 //! demand from the seed; player edits (buildings, bridges, depleted resources)
 //! live in the loaded chunks and are what gets written to save files.
 
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use fastnoise_lite::{DomainWarpType, FastNoiseLite, FractalType, NoiseType};
 
@@ -23,7 +23,7 @@ pub enum Resource {
     Stone,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Node {
     pub kind: Resource,
     pub amount: u32,
@@ -31,7 +31,7 @@ pub struct Node {
 
 /// A defensive wall tile. `owner` is a faction tag (0 = player, 1 = enemy);
 /// walls block the *other* faction and take a while to break down.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Wall {
     pub owner: u8,
     pub hp: f32,
@@ -39,7 +39,7 @@ pub struct Wall {
 
 /// A hut: a sturdy shelter (built from a tree) that farmers hide inside. Takes a
 /// while to destroy; `occupants` is how many farmers are sheltering within.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Hut {
     pub owner: u8,
     pub hp: f32,
@@ -63,6 +63,10 @@ pub struct Chunk {
     pub caves: Vec<bool>,
     /// Huts (shelters) built from trees; farmers hide inside them.
     pub huts: Vec<Option<Hut>>,
+    /// Set once an edit (a building, a harvested node, a carved river...) lands
+    /// in this chunk. A clean chunk regenerates identically from the seed, so
+    /// only dirty chunks are written to saves or held resident during eviction.
+    pub dirty: bool,
 }
 
 impl Chunk {
@@ -77,7 +81,23 @@ impl Chunk {
             walls: vec![None; CHUNK_TILES],
             caves: vec![false; CHUNK_TILES],
             huts: vec![None; CHUNK_TILES],
+            dirty: false,
         }
+    }
+
+    /// Tile-for-tile content equality, ignoring the `dirty` bookkeeping flag.
+    /// Used on load to tell edited chunks apart from ones an older save stored
+    /// even though they match what the seed regenerates.
+    fn same_content(&self, other: &Chunk) -> bool {
+        self.tiles == other.tiles
+            && self.nodes == other.nodes
+            && self.houses == other.houses
+            && self.enemy_houses == other.enemy_houses
+            && self.ally_houses == other.ally_houses
+            && self.bridges == other.bridges
+            && self.walls == other.walls
+            && self.caves == other.caves
+            && self.huts == other.huts
     }
 }
 
@@ -107,7 +127,7 @@ impl World {
     pub fn new(seed: i32) -> Self {
         World {
             seed,
-            chunks: HashMap::new(),
+            chunks: HashMap::default(),
             enemy_house_tiles: Vec::new(),
             ally_house_tiles: Vec::new(),
         }
@@ -116,8 +136,12 @@ impl World {
     /// Rebuild a world from a saved seed + explicit chunks (used on load).
     pub fn from_saved(seed: i32, chunks: Vec<((i32, i32), Chunk)>) -> Self {
         let mut w = World::new(seed);
-        for (coord, chunk) in chunks {
-            w.chunks.insert(coord, chunk);
+        for ((cx, cy), mut chunk) in chunks {
+            // Older saves stored every chunk ever generated, edited or not. A
+            // chunk identical to what the seed regenerates carries no edits:
+            // leave it clean so eviction can shed it and the next save skips it.
+            chunk.dirty = !chunk.same_content(&generate_chunk(seed, cx, cy));
+            w.chunks.insert((cx, cy), chunk);
         }
         w.rescan_enemy_houses();
         w.rescan_ally_houses();
@@ -225,13 +249,36 @@ impl World {
         self.chunk_at(x, y).is_some()
     }
 
+    /// Drop every clean chunk lying outside all of the `keep` rectangles
+    /// (inclusive tile rects). Edited (dirty) chunks always stay; a clean one
+    /// regenerates identically from the seed on the next `ensure`, so evicting
+    /// it loses nothing. This is what keeps memory bounded on an endless map:
+    /// without it, every chunk the camera ever revealed would stay resident.
+    pub fn evict_clean_chunks(&mut self, keep: &[(i32, i32, i32, i32)]) {
+        let mut kept: HashSet<(i32, i32)> = HashSet::default();
+        for &(min_x, min_y, max_x, max_y) in keep {
+            for cy in chunk_of(min_y)..=chunk_of(max_y) {
+                for cx in chunk_of(min_x)..=chunk_of(max_x) {
+                    kept.insert((cx, cy));
+                }
+            }
+        }
+        self.chunks
+            .retain(|coord, chunk| chunk.dirty || kept.contains(coord));
+    }
+
     #[inline]
     fn chunk_at(&self, x: i32, y: i32) -> Option<&Chunk> {
         self.chunks.get(&(chunk_of(x), chunk_of(y)))
     }
+    /// Every mutator goes through here, so this is where a chunk is marked
+    /// dirty: once handed out mutably it is assumed edited and is thereafter
+    /// saved and exempt from eviction. Reads use `chunk_at`.
     #[inline]
     fn chunk_at_mut(&mut self, x: i32, y: i32) -> Option<&mut Chunk> {
-        self.chunks.get_mut(&(chunk_of(x), chunk_of(y)))
+        let c = self.chunks.get_mut(&(chunk_of(x), chunk_of(y)))?;
+        c.dirty = true;
+        Some(c)
     }
 
     // --- read accessors (default to water/empty for ungenerated chunks) ----
@@ -599,21 +646,50 @@ const HOME_RADIUS: f32 = 155.0;
 const RIVER_HALF_WIDTH_MAIN: f32 = 1.4;
 const RIVER_HALF_WIDTH_TRIB: f32 = 1.05;
 
-/// Approximate distance, in tiles, from `(x, y)` to the nearest zero-isoline of
-/// a (domain-warped) river-noise field. Dividing the noise value by its local
-/// gradient converts "value near zero" into "close to the channel center" in
-/// real tile units, so a fixed threshold yields a steady-width river regardless
-/// of how steep or flat the underlying noise is.
-fn river_channel_dist(noise: &FastNoiseLite, x: i32, y: i32) -> f32 {
-    let sample = |dx: i32, dy: i32| {
-        let (wx, wy) = noise.domain_warp_2d((x + dx) as f32, (y + dy) as f32);
-        noise.get_noise_2d(wx, wy)
-    };
-    let v = sample(0, 0);
-    let gx = sample(1, 0) - sample(-1, 0);
-    let gy = sample(0, 1) - sample(0, -1);
-    let grad = 0.5 * (gx * gx + gy * gy).sqrt();
-    v.abs() / grad.max(1e-4)
+/// A river-noise field sampled once per tile over a chunk plus a one-tile apron,
+/// so channel distances can be read from cached values instead of resampling
+/// the (expensive) domain-warped noise five times per tile. Neighboring tiles
+/// share their sample points, so this is a pure caching layer: the distances
+/// come out bit-identical to sampling the noise directly.
+struct RiverField {
+    /// Values on `[x0-1, x0+CHUNK] x [y0-1, y0+CHUNK]`, row-major.
+    values: Vec<f32>,
+    x0: i32,
+    y0: i32,
+}
+
+/// Grid edge of a `RiverField`: a chunk plus the one-tile apron on each side.
+const FIELD: i32 = CHUNK + 2;
+
+impl RiverField {
+    fn sample(noise: &FastNoiseLite, x0: i32, y0: i32) -> Self {
+        let mut values = Vec::with_capacity((FIELD * FIELD) as usize);
+        for y in (y0 - 1)..(y0 + CHUNK + 1) {
+            for x in (x0 - 1)..(x0 + CHUNK + 1) {
+                let (wx, wy) = noise.domain_warp_2d(x as f32, y as f32);
+                values.push(noise.get_noise_2d(wx, wy));
+            }
+        }
+        RiverField { values, x0, y0 }
+    }
+
+    #[inline]
+    fn at(&self, x: i32, y: i32) -> f32 {
+        self.values[((y - self.y0 + 1) * FIELD + (x - self.x0 + 1)) as usize]
+    }
+
+    /// Approximate distance, in tiles, from `(x, y)` to the nearest
+    /// zero-isoline of the field. Dividing the noise value by its local
+    /// gradient converts "value near zero" into "close to the channel center"
+    /// in real tile units, so a fixed threshold yields a steady-width river
+    /// regardless of how steep or flat the underlying noise is.
+    fn channel_dist(&self, x: i32, y: i32) -> f32 {
+        let v = self.at(x, y);
+        let gx = self.at(x + 1, y) - self.at(x - 1, y);
+        let gy = self.at(x, y + 1) - self.at(x, y - 1);
+        let grad = 0.5 * (gx * gx + gy * gy).sqrt();
+        v.abs() / grad.max(1e-4)
+    }
 }
 
 /// Generate one chunk deterministically from the seed and chunk coordinates.
@@ -665,6 +741,13 @@ fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
     scatter.set_noise_type(Some(NoiseType::OpenSimplex2));
     scatter.set_frequency(Some(0.12));
 
+    // River fields are cached once per tile over the whole chunk (plus a
+    // one-tile apron for the gradients), which saves resampling the warped
+    // noise five times per tile per field. Sampled lazily on the first land
+    // tile that needs them, so all-ocean chunks skip the rivers entirely.
+    let (x0, y0) = (cx * CHUNK, cy * CHUNK);
+    let mut rivers: Option<(RiverField, RiverField)> = None;
+
     let mut chunk = Chunk::blank();
     for ly in 0..CHUNK {
         for lx in 0..CHUNK {
@@ -709,10 +792,17 @@ fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
             // a river-noise isoline, it becomes flowing water. Rivers naturally
             // run down to the coast (the isoline continues into the sea), giving
             // the navy inland waterways to patrol. The dry home core is spared.
-            if dist >= HOME_SOLID
-                && (river_channel_dist(&river_main, x, y) < RIVER_HALF_WIDTH_MAIN
-                    || river_channel_dist(&river_trib, x, y) < RIVER_HALF_WIDTH_TRIB)
-            {
+            let in_river = dist >= HOME_SOLID && {
+                let (main_field, trib_field) = rivers.get_or_insert_with(|| {
+                    (
+                        RiverField::sample(&river_main, x0, y0),
+                        RiverField::sample(&river_trib, x0, y0),
+                    )
+                });
+                main_field.channel_dist(x, y) < RIVER_HALF_WIDTH_MAIN
+                    || trib_field.channel_dist(x, y) < RIVER_HALF_WIDTH_TRIB
+            };
+            if in_river {
                 chunk.tiles[i] = Tile::Water;
                 continue;
             }
@@ -809,6 +899,34 @@ fn span_bridges(chunk: &mut Chunk) {
                 for by in start..end {
                     chunk.bridges[li(lx, by)] = true;
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The per-chunk river cache is a pure caching layer: every stored value
+    /// must equal sampling the warped noise directly at that tile, or chunk
+    /// regeneration would stop being deterministic.
+    #[test]
+    fn river_field_cache_matches_direct_sampling() {
+        let mut noise = FastNoiseLite::with_seed(7777);
+        noise.set_noise_type(Some(NoiseType::OpenSimplex2));
+        noise.set_fractal_type(Some(FractalType::FBm));
+        noise.set_fractal_octaves(Some(2));
+        noise.set_frequency(Some(0.0060));
+        noise.set_domain_warp_type(Some(DomainWarpType::OpenSimplex2));
+        noise.set_domain_warp_amp(Some(28.0));
+
+        let (x0, y0) = (64, -32);
+        let field = RiverField::sample(&noise, x0, y0);
+        for y in (y0 - 1)..(y0 + CHUNK + 1) {
+            for x in (x0 - 1)..(x0 + CHUNK + 1) {
+                let (wx, wy) = noise.domain_warp_2d(x as f32, y as f32);
+                assert_eq!(field.at(x, y), noise.get_noise_2d(wx, wy));
             }
         }
     }

@@ -3,7 +3,9 @@
 //! travels through already-generated, walkable tiles (ungenerated chunks read
 //! as non-walkable, so BFS naturally stays within the loaded region).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::world::World;
 
@@ -24,7 +26,7 @@ where
         return Some(Vec::new());
     }
 
-    let mut came_from: HashMap<Tile, Tile> = HashMap::new();
+    let mut came_from: HashMap<Tile, Tile> = HashMap::default();
     let mut queue = VecDeque::new();
     came_from.insert(start, start);
     queue.push_back(start);

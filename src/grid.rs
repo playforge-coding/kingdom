@@ -3,7 +3,7 @@
 //! answering from the grid touches only nearby cells instead of every unit on
 //! the map, so those checks stay cheap as the realm's population grows.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use glam::Vec2;
 
@@ -17,7 +17,7 @@ pub struct Grid {
 
 impl Grid {
     pub fn build(positions: impl Iterator<Item = Vec2>) -> Self {
-        let mut cells: HashMap<(i32, i32), Vec<(u32, Vec2)>> = HashMap::new();
+        let mut cells: HashMap<(i32, i32), Vec<(u32, Vec2)>> = HashMap::default();
         for (i, p) in positions.enumerate() {
             cells.entry(cell_of(p)).or_default().push((i as u32, p));
         }

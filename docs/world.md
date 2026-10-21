@@ -15,6 +15,11 @@ as the camera reveals new ground. There's no fixed edge; pan far enough in any
 direction and fresh terrain appears. Chunks you've changed (buildings, bridges,
 depleted resources) are remembered and saved.
 
+Untouched chunks don't pile up, either: terrain that nothing has edited and
+nobody is near is **dropped from memory** and regenerated from the seed the next
+time it's needed, identical down to the last tile. So however far you roam, the
+game only holds on to your edits plus the land around the action.
+
 ## Terrain
 
 Terrain comes from [FastNoise Lite](https://crates.io/crates/fastnoise-lite):

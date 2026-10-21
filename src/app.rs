@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use glam::Vec2;
+use rustc_hash::FxHashMap as HashMap;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -358,8 +359,7 @@ impl State {
         // how many same-type units are drawn on any one tile. Small crowds show
         // fully (so you see newcomers arrive), but a pathological pile-up of
         // hundreds costs a handful of quads instead of hundreds.
-        let mut stack: std::collections::HashMap<(i32, i32, bool, bool), u32> =
-            std::collections::HashMap::new();
+        let mut stack: HashMap<(i32, i32, bool, bool), u32> = HashMap::default();
         for e in &game.entities {
             let key = (
                 e.pos.x.floor() as i32,

@@ -19,6 +19,7 @@ egui-wgpu = "0.37"
 egui-winit = { version = "0.37", default-features = false }
 # SVG loader for the HUD icons in assets/icons/.
 egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
+rustc-hash = "2.1.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.11"
