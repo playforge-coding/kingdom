@@ -14,7 +14,7 @@ use winit::window::{Window, WindowId};
 
 use crate::atlas::{self, Atlas, MapColors};
 use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
-use crate::game::{Anim, CamState, Dir, Entity, Faction, Game, Job};
+use crate::game::{AUTO_ZONE_RADIUS, Anim, CamState, Dir, Entity, Faction, Game, Job, SiteKind};
 use crate::gfx::{Instance, Renderer};
 use crate::save;
 use crate::ui::{Action, MenuState, Scene as UiScene, View};
@@ -468,13 +468,47 @@ impl State {
             out.push(quad([b.pos.x - 0.2, b.pos.y - 0.2], [0.4, 0.4], cannonball));
         }
 
-        // Pending hut orders: a ghostly hut on each tree awaiting a builder.
-        for &(ox, oy) in game.hut_orders() {
+        // Builder zones: a translucent plot over each marked area, brighter
+        // while the autonomous-building switch is on, with a small center mark.
+        let zone_span = (AUTO_ZONE_RADIUS * 2 + 1) as f32;
+        for &(zx, zy) in game.auto_zones() {
+            let mut fill = self.colors.player;
+            fill[3] = if game.auto_build { 0.16 } else { 0.08 };
             out.push(tinted(
-                [ox as f32, oy as f32],
+                [
+                    (zx - AUTO_ZONE_RADIUS) as f32,
+                    (zy - AUTO_ZONE_RADIUS) as f32,
+                ],
+                [zone_span, zone_span],
+                white,
+                fill,
+            ));
+            let mut mark = self.colors.player;
+            mark[3] = 0.6;
+            out.push(tinted(
+                [zx as f32 + 0.25, zy as f32 + 0.25],
+                [0.5, 0.5],
+                white,
+                mark,
+            ));
+        }
+
+        // Construction sites: a ghost of the coming structure that solidifies
+        // as its builder works.
+        for s in game.build_sites() {
+            let uv = match s.kind {
+                SiteKind::House => house,
+                SiteKind::Bridge => bridge,
+                SiteKind::Mine => cave,
+                SiteKind::Wall => wall,
+                SiteKind::Hut => hut,
+            };
+            let alpha = 0.35 + 0.5 * s.progress();
+            out.push(tinted(
+                [s.tile.0 as f32, s.tile.1 as f32],
                 [1.0, 1.0],
-                hut,
-                [1.0, 1.0, 1.0, 0.4],
+                uv,
+                [1.0, 1.0, 1.0, alpha],
             ));
         }
 
@@ -607,11 +641,27 @@ impl State {
             }
         }
 
-        // Units as dots: knights in the full faction color, farmers lighter.
+        // Builder zones as faint plots, so the overview shows where autonomous
+        // building is permitted.
+        let zone_span = (AUTO_ZONE_RADIUS * 2 + 1) as f32;
+        for &(zx, zy) in game.auto_zones() {
+            let mut fill = c.player;
+            fill[3] = if game.auto_build { 0.18 } else { 0.1 };
+            out.push(solid(
+                [
+                    (zx - AUTO_ZONE_RADIUS) as f32,
+                    (zy - AUTO_ZONE_RADIUS) as f32,
+                ],
+                [zone_span, zone_span],
+                fill,
+            ));
+        }
+
+        // Units as dots: knights in the full faction color, civilians lighter.
         let dot = (0.45 * kf).max(0.8);
         for e in &game.entities {
             let mut col = faction_color(e.faction);
-            if e.job == Job::Farmer {
+            if e.job == Job::Civilian {
                 for ch in col.iter_mut().take(3) {
                     *ch += (1.0 - *ch) * 0.45;
                 }
@@ -756,16 +806,17 @@ const KNIGHT_ROWS: AnimRows = AnimRows {
 
 /// Map an entity's state + facing to a (sheet, column, row) frame.
 fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
+    // Civilians keep the classic farmer art whatever job they've taken up.
     let sheet = match (e.faction, e.job) {
-        (Faction::Player, Job::Farmer) => "farmer",
+        (Faction::Player, Job::Civilian) => "farmer",
         (Faction::Player, Job::Knight) => "knight",
-        (Faction::Enemy, Job::Farmer) => "enemy_farmer",
+        (Faction::Enemy, Job::Civilian) => "enemy_farmer",
         (Faction::Enemy, Job::Knight) => "enemy_knight",
-        (Faction::Ally, Job::Farmer) => "ally_farmer",
+        (Faction::Ally, Job::Civilian) => "ally_farmer",
         (Faction::Ally, Job::Knight) => "ally_knight",
     };
     let rows = match e.job {
-        Job::Farmer => FARMER_ROWS,
+        Job::Civilian => FARMER_ROWS,
         Job::Knight => KNIGHT_ROWS,
     };
 

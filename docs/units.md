@@ -9,19 +9,30 @@ role; you influence them through [priorities, buildings, and the rally flag](con
 All units navigate the tile grid with **BFS pathfinding**, routing around water,
 buildings, walls, and resource nodes, or across bridges.
 
-## Farmers
+## Civilians
 
-Farmers are your economy. They:
+Civilians are your economy. Each one takes up whichever job the realm needs at
+the moment, and the HUD's status line shows how many are working each:
 
-- Walk to the **nearest reachable resource** and gather it, **chopping wood**
-  from trees and **mining stone** from ore, with a swing animation.
-- Deposit everything into your **shared stockpile**.
-- **Replant trees** and dig into **mines (caves)** once nearby resources run dry,
-  so your supply doesn't collapse.
-- Prefer to stay near home rather than wander off after distant resources.
+- **Farmers** walk to the **nearest reachable resource** and gather it,
+  **chopping wood** from trees and quarrying **stone** from ore with a swing
+  animation, and **replant trees** once the nearby pickings run dry.
+- **Miners** work your **[mines (caves)](building.md#mine)**: bottomless stone,
+  but only four to a mine.
+- **Builders** claim pending **[construction orders](building.md)**, walk to the
+  site, and put the structure up over a few real seconds. The **builder's pay**
+  is part of every order's gold cost.
+
+Whatever the job, civilians:
+
+- Deposit everything they gather into your **shared stockpile**.
+- Prefer to stay near home rather than wander off after distant resources
+  (builders may step out of that leash to reach a site, such as a bridge span).
 - **Take shelter in huts** when a raid comes close.
 
 Use the **Gather** toggle (Balanced / Wood / Stone) to bias what they collect.
+A construction order outranks everything else: even a miner puts down the pick
+when a site is waiting for hands.
 
 ## Knights
 
@@ -34,6 +45,10 @@ Knights are your military. They:
   foe left to chase, knights march on the nearest enemy **huts and walls** and
   hack them down rather than idling at home.
 - **Rush to defend** an occupied hut or a village that comes under attack.
+- **Bridge their own way across water.** When the only route to a foe, an enemy
+  structure, or your rally flag crosses water, knights lay the bridges
+  themselves as they go: each tile costs **3 wood** but **no gold**, since
+  they're already paid for serving.
 - Follow the **rally flag** when you set one.
 
 Lean on the **:lucide-swords: Military priority** to raise more of them when you're under
@@ -44,18 +59,18 @@ pressure.
 Need soldiers *now* rather than waiting on new spawns? **Proclaim a draft** from
 the HUD (see **[Controls](controls.md#proclamations)**). For a short spell:
 
-- Your **farmers may spontaneously take up arms**, converting into knights at
+- Your **civilians may spontaneously take up arms**, converting into knights at
   random over the course of the draft.
 - Draftees are **levies** and serve **on credit**. Calling them up costs
   nothing, so a draft works even when the treasury is empty.
-- A **working core of farmers is always spared**, so a draft can't hollow out
+- A **working core of civilians is always spared**, so a draft can't hollow out
   your economy (or trip your knights into retreating home).
 
 Once the draft has ended and none of your villages has been under threat for a
 little while, the invasion counts as repelled and the levies **stand down**:
 
-- Each surviving levy is **paid 15 gold** and **goes back to farming**, keeping
-  any wounds from the fight. Levies who fell in battle are owed nothing.
+- Each surviving levy is **paid 15 gold** and **goes back to civilian work**,
+  keeping any wounds from the fight. Levies who fell in battle are owed nothing.
 - If the treasury can't cover everyone, the levies you can't pay **desert** and
   are gone for good.
 - An alert tells you the levies were paid, or that some deserted.

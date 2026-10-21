@@ -20,8 +20,11 @@ through the panel; your units carry them out on their own.
 | <kbd>Esc</kbd> | Return to the menu (from the menu on native builds: quit) |
 
 Left-click always does whatever the **Build** section of the panel is currently
-set to: place a house, a bridge, a mine, a wall, mark a tree for a hut, or drop
-a rally flag. See **[Building](building.md)** for what each mode does.
+set to: order a house, a bridge, a mine, or a wall, mark a tree for a hut, mark
+a builder zone, or drop a rally flag. Orders aren't built on the spot: a
+civilian walks over and builds the site over a few seconds, and clicking a
+pending site cancels and refunds it. See **[Building](building.md)** for what
+each mode does.
 
 ## The HUD panel
 
@@ -32,7 +35,7 @@ the top.
 
 ### Stockpile
 
-Your shared resources, filled by farmers:
+Your shared resources, filled by your civilians:
 
 - :lucide-tree-pine: **Wood**
 - :lucide-mountain: **Stone**
@@ -43,6 +46,7 @@ Everything you build is paid for out of this pool.
 ### Status
 
 - **Population:** current units versus your population cap (raised by houses).
+- **Civilians:** how many are **farming**, **mining**, and **building** right now.
 - **Enemies defeated:** running tally of enemy units killed.
 - **Units lost:** how many of your own units have died.
 
@@ -51,12 +55,12 @@ Everything you build is paid for out of this pool.
 - **:lucide-wheat: Agriculture / :lucide-swords: Military:** which kind
   of villager your houses favor raising when they spawn new workers.
 - **Gather: Balanced / :lucide-tree-pine: Wood / :lucide-mountain: Stone:**
-  biases which resource idle farmers seek out. *Balanced* lets them pick the nearest.
+  biases which resource idle civilians seek out. *Balanced* lets them pick the nearest.
 
 ### Proclamations
 
 - **:lucide-scroll-text: Proclaim draft:** declares a draft for a short spell.
-  While it runs, your farmers may spontaneously **take up arms as knights**. They
+  While it runs, your civilians may spontaneously **take up arms as knights**. They
   serve as **levies**: free to call up, but each survivor is owed gold once the
   fighting is over. The button is replaced by a countdown while a draft is in
   force, and while levies are serving the panel shows how many there are and
@@ -65,18 +69,24 @@ Everything you build is paid for out of this pool.
 
 ### Build (left-click)
 
-Radio buttons selecting what a left-click does, with costs shown:
+Radio buttons selecting what a left-click does, with costs shown. Every gold
+cost below includes the **builder's 5 gold pay** (bridges are free of it), and
+every order waits for a civilian to walk over and build it:
 
 | Mode | Cost | Notes |
 | ---- | ---- | ----- |
-| **House** | 8 wood, 8 stone, 30 gold | Must be next to your village |
+| **House** | 8 wood, 8 stone, 35 gold | Within 20 tiles of a house you own |
 | **Bridge** | 3 wood | Placed on open water |
-| **:lucide-pickaxe: Mine** | 12 stone, 40 gold | A bottomless stone source near your village |
-| **:lucide-brick-wall: Wall** | 2 wood, 4 stone, 5 gold | Defensive blocker |
-| **:lucide-tent: Hut** | 15 gold | Click a tree; a knight walks over and builds it |
+| **:lucide-pickaxe: Mine** | 12 stone, 45 gold | A bottomless stone source near your village |
+| **:lucide-brick-wall: Wall** | 2 wood, 4 stone, 10 gold | Defensive blocker |
+| **:lucide-tent: Hut** | 20 gold | Click a tree; a builder raises it |
+| **:lucide-map: Builder zone** | Free | Click to mark (or clear) an area for autonomous building |
 | **:lucide-flag: Rally knights** | Free | Left-click sets a flag your knights rush to |
 
-A **:lucide-x: Clear rally** button appears while a rally flag is active.
+Below the modes sits the **"Let builders build on their own in zones"** switch:
+while it's on, builders keep raising houses inside your
+**[builder zones](building.md#builder-zones)**. A **:lucide-x: Clear rally**
+button appears while a rally flag is active.
 
 The HUD's **Trade** and **Navy** sections add two more left-click modes on the
 water by your village:
@@ -111,7 +121,7 @@ kingdom:
 - **Village count:** how many villages you, the enemy, and the allies hold.
 - **Your villages:** one row per village, with where it is relative to the
   camera (for example *120 tiles northeast*, or *In view*), its houses, its
-  population against its own cap, and the knights and farmers standing in it.
+  population against its own cap, and the knights and civilians standing in it.
   A village **under attack** is flagged in
   red and one with **no defenders** in amber, since an empty village is easy to
   take. Those come first in the list. **:lucide-crosshair: Go** jumps the camera
@@ -123,7 +133,7 @@ When something needs your attention, a toast appears at the top of the screen
 saying what happened and where:
 
 - a village is **under attack** (an enemy is in or near it)
-- raiders are **attacking a hut** with farmers inside
+- raiders are **attacking a hut** with civilians inside
 - a village has **fallen** (your knights rally to retake it)
 - you **captured** a village
 - pirates **sank** a cargo ship or a warship

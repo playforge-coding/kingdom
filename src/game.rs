@@ -61,8 +61,20 @@ fn owner_hostile(a: u8, b: u8) -> bool {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Job {
-    Farmer,
+    /// A worker. Civilians take up whichever job the realm needs right now:
+    /// farming, mining, or building (see [`Role`]).
+    Civilian,
     Knight,
+}
+
+/// The job a civilian has taken up at the moment. Civilians switch on their
+/// own: idle hands claim a construction site (builder) or a mine slot (miner),
+/// and everyone else farms (chopping, harvesting, and replanting).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Farmer,
+    Miner,
+    Builder,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -109,15 +121,16 @@ pub struct Entity {
     target_node: Option<Tile>,
     harvest_timer: f32,
     repath: f32,
-    /// Cave (mine) tile a farmer has claimed to mine. Capacity-limited so only
-    /// a handful work one at a time.
+    /// Cave (mine) tile a civilian has claimed to mine. Capacity-limited so
+    /// only a handful work one at a time.
     mine_target: Option<Tile>,
-    /// Tree a knight is currently turning into a hut.
+    /// Construction site this civilian has claimed and is off building; for a
+    /// knight, the water tile it is bridging to get at something across it.
     build_site: Option<Tile>,
-    /// Set when a farmer has ducked into a hut this tick (removed afterward).
+    /// Set when a civilian has ducked into a hut this tick (removed afterward).
     sheltered: bool,
-    /// A farmer called up by the draft and still owed `LEVY_GOLD_PAY`. Levies
-    /// return to farming (paid) or desert (unpaid) once the danger has passed.
+    /// A civilian called up by the draft and still owed `LEVY_GOLD_PAY`. Levies
+    /// return to work (paid) or desert (unpaid) once the danger has passed.
     levy: bool,
     /// Simulation time owed to an off-screen entity. It accrues while the unit
     /// waits its turn and is spent (capped) when its rotating batch comes up,
@@ -128,9 +141,9 @@ pub struct Entity {
 fn max_hp_for(faction: Faction, job: Job) -> f32 {
     match (faction, job) {
         (_, Job::Knight) => 60.0,
-        (Faction::Player, Job::Farmer) => 28.0,
-        (Faction::Enemy, Job::Farmer) => 22.0,
-        (Faction::Ally, Job::Farmer) => 24.0,
+        (Faction::Player, Job::Civilian) => 28.0,
+        (Faction::Enemy, Job::Civilian) => 22.0,
+        (Faction::Ally, Job::Civilian) => 24.0,
     }
 }
 
@@ -156,6 +169,17 @@ impl Entity {
             sheltered: false,
             levy: false,
             pending: 0.0,
+        }
+    }
+
+    /// The job a civilian is working at the moment (meaningless for knights).
+    pub fn role(&self) -> Role {
+        if self.build_site.is_some() {
+            Role::Builder
+        } else if self.mine_target.is_some() {
+            Role::Miner
+        } else {
+            Role::Farmer
         }
     }
 
@@ -191,9 +215,13 @@ pub const WALL_STONE_COST: u32 = 4;
 
 /// Gold in the coffers at the start of a new world.
 pub const START_MONEY: u32 = 150;
-/// Gold every new knight costs to arm and equip; a house raises a (free) farmer
-/// instead when the treasury can't afford one.
+/// Gold every new knight costs to arm and equip; a house raises a (free)
+/// civilian instead when the treasury can't afford one.
 pub const KNIGHT_GOLD_COST: u32 = 25;
+/// Gold paid to the civilian who works a construction site, set aside with the
+/// rest of the cost when the order is placed and refunded if it is canceled.
+/// Bridges are exempt: they stay entirely gold-free (see `HOUSE_GOLD_COST`).
+pub const BUILDER_WAGE: u32 = 5;
 /// Gold cost of built structures (on top of their wood/stone). Bridges are the
 /// deliberate exception: they stay gold-free so you can always reach the coast
 /// to trade even when broke.
@@ -278,27 +306,36 @@ const PATROL_WANDER: i32 = 20;
 /// radius) even across the enlarged oceans.
 const SHIP_PATH_BUDGET: usize = 130_000;
 
-/// A new house must be within this many tiles of one you already own.
-pub const BUILD_NEAR_RADIUS: i32 = 5;
+/// A new structure must be ordered within this many tiles of a house you
+/// already own. Generous enough to plan a whole district ahead of time, while
+/// still keeping the realm growing outward from what it holds.
+pub const BUILD_NEAR_RADIUS: i32 = 20;
 
 /// A cargo ship may only launch from water within this many tiles of one of the
 /// player's own houses (its home port), not from any distant coast.
 pub const SHIP_NEAR_RADIUS: i32 = 8;
 
-const FARMER_SPEED: f32 = 2.4;
+const CIVILIAN_SPEED: f32 = 2.4;
 const KNIGHT_SPEED: f32 = 2.9;
 const HARVEST_TIME: f32 = 2.0;
-/// Farmers never roam further than this from their nearest house. A hard leash
-/// that keeps them tending the village instead of wandering off after resources.
-const FARMER_HOME_RADIUS: i32 = 16;
+/// Civilians never roam further than this from their nearest house. A hard
+/// leash that keeps them tending the village instead of wandering off after
+/// resources. Builders walking to a claimed site are exempt, so a bridge can
+/// run out past it. Kept a little past `BUILD_NEAR_RADIUS` so a mine or wall
+/// ordered at the far edge of the build range is still worked and tended.
+const CIVILIAN_HOME_RADIUS: i32 = 22;
 /// Seconds a sown sapling takes to mature into a harvestable tree.
 const SAPLING_GROW_TIME: f32 = 6.0;
-/// A cave (mine) is a bottomless stone source, but only so many farmers can
+/// A cave (mine) is a bottomless stone source, but only so many miners can
 /// work one at once.
 const CAVE_CAPACITY: u32 = 4;
-/// Knights hack through trees/rocks much slower than a farmer harvests, and
+/// Knights hack through trees/rocks much slower than a civilian harvests, and
 /// gain nothing, so they only bother when a node truly blocks their way.
 const KNIGHT_DEMOLISH_TIME: f32 = 5.0;
+/// Seconds a knight spends laying a single bridge tile when water is the only
+/// way to its target. The span costs wood but no gold: knights are already
+/// paid for serving.
+const KNIGHT_BRIDGE_TIME: f32 = 2.5;
 const COMBAT_RANGE: f32 = 0.9;
 /// How close a knight must get to the rally flag to count as "arrived" (which
 /// then lifts the flag for the whole group).
@@ -313,11 +350,9 @@ const WALL_MAX_HP: f32 = 220.0;
 const WALL_DPS: f32 = 18.0;
 /// Huts are sturdier than walls; attackers need a good while to break in.
 const HUT_MAX_HP: f32 = 400.0;
-/// Seconds a knight spends turning a tree into a hut.
-const HUT_BUILD_TIME: f32 = 4.0;
-/// Most farmers that can shelter in a single hut.
+/// Most civilians that can shelter in a single hut.
 const HUT_CAPACITY: u8 = 4;
-/// A farmer flees to a hut when an enemy comes within this range.
+/// A civilian flees to a hut when an enemy comes within this range.
 const DANGER_RADIUS: f32 = 6.0;
 /// A hut lets its occupants back out once no enemy is within this range.
 const HUT_SAFE_RADIUS: f32 = 9.0;
@@ -344,13 +379,15 @@ enum StepEvent {
     RaiseWall(Tile),
     /// A knight has smashed through a blocking tree/rock (no resources gained).
     Demolish(Tile),
-    /// A farmer has sown a sapling on a bare tile (grows into a tree).
+    /// A civilian has sown a sapling on a bare tile (grows into a tree).
     Plant(Tile),
-    /// A farmer pulled a unit of stone from a mine (bottomless).
+    /// A miner pulled a unit of stone from a mine (bottomless).
     MineStone,
-    /// A knight finished turning a tree into a hut at this tile.
-    BuildHut(Tile),
-    /// A farmer reached a hut and ducked inside to shelter.
+    /// A builder put a tick of work into the construction site at this tile.
+    Construct(Tile),
+    /// A knight finished laying a bridge tile to cross water in its way.
+    LayBridge(Tile),
+    /// A civilian reached a hut and ducked inside to shelter.
     Hide(Tile),
 }
 
@@ -380,16 +417,16 @@ const ALLY_POP_MAX: usize = 36;
 /// are spaced farther apart than this, so the attribution is unambiguous.
 const VILLAGE_ATTRIBUTION_RADIUS: f32 = 32.0;
 /// Houses only raise new workers while the faction has *more than* this many
-/// farmers to support them.
-const MIN_FARMERS_TO_GROW: usize = 3;
-/// Shortest possible spawn interval, however many farmers there are.
+/// civilians to support them.
+const MIN_CIVILIANS_TO_GROW: usize = 3;
+/// Shortest possible spawn interval, however many civilians there are.
 const MIN_SPAWN_INTERVAL: f32 = 1.5;
 
 /// Seconds a proclaimed **draft** stays in force. While it runs, the player's
-/// farmers may be called up as knights (see `run_draft`).
+/// civilians may be called up as knights (see `run_draft`).
 const DRAFT_DURATION: f32 = 15.0;
 /// Per-farmer, per-second chance of being conscripted during a draft. A core of
-/// farmers is always left behind to keep the village running.
+/// civilians is always left behind to keep the village running.
 const DRAFT_CHANCE_PER_SEC: f32 = 0.2;
 /// Gold each surviving levy is owed when the draft stands down. Draftees serve
 /// on credit: nothing is spent when they're called up, so a broke realm can
@@ -399,10 +436,10 @@ pub const LEVY_GOLD_PAY: u32 = 15;
 /// ended, before the levies stand down (see `stand_down_levies`).
 const LEVY_STAND_DOWN: f32 = 15.0;
 
-/// Spawn interval scaled by farmer count: each farmer beyond the minimum
+/// Spawn interval scaled by civilian count: each civilian beyond the minimum
 /// shortens the wait, so a larger workforce raises new units faster.
-fn spawn_interval(base: f32, farmers: usize) -> f32 {
-    let extra = farmers.saturating_sub(MIN_FARMERS_TO_GROW) as f32;
+fn spawn_interval(base: f32, civilians: usize) -> f32 {
+    let extra = civilians.saturating_sub(MIN_CIVILIANS_TO_GROW) as f32;
     (base / (1.0 + extra * 0.25)).max(MIN_SPAWN_INTERVAL)
 }
 
@@ -460,12 +497,15 @@ const MAX_CATCHUP_DT: f32 = 0.25;
 pub enum BuildMode {
     House,
     Bridge,
-    /// Build a mine (cave): a bottomless stone source farmers can work.
+    /// Build a mine (cave): a bottomless stone source civilians can work.
     Mine,
     /// Craft a defensive wall from wood + stone.
     Wall,
-    /// Order a tree turned into a hut: an idle knight walks over and builds it.
+    /// Order a tree turned into a hut.
     Hut,
+    /// Left-click marks (or clears) a builder zone: an area where builders may
+    /// raise houses on their own while the autonomous-building switch is on.
+    AutoZone,
     /// Left-click plants a rally flag: player knights drop everything (even a
     /// fight) and rush to it. The flag clears once they arrive.
     Rally,
@@ -476,6 +516,71 @@ pub enum BuildMode {
     /// the coast, hunts pirates, and shells enemies ashore.
     Warship,
 }
+
+/// What a construction site will become once a builder finishes it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SiteKind {
+    House,
+    Bridge,
+    Mine,
+    Wall,
+    Hut,
+}
+
+impl SiteKind {
+    /// Full order cost as (wood, stone, gold), with the builder's pay folded
+    /// into the gold. Bridges stay entirely gold-free (see `HOUSE_GOLD_COST`),
+    /// so their builder works for nothing but the realm's gratitude.
+    fn cost(self) -> (u32, u32, u32) {
+        match self {
+            SiteKind::House => (
+                HOUSE_WOOD_COST,
+                HOUSE_STONE_COST,
+                HOUSE_GOLD_COST + BUILDER_WAGE,
+            ),
+            SiteKind::Bridge => (BRIDGE_WOOD_COST, 0, 0),
+            SiteKind::Mine => (0, MINE_STONE_COST, MINE_GOLD_COST + BUILDER_WAGE),
+            SiteKind::Wall => (
+                WALL_WOOD_COST,
+                WALL_STONE_COST,
+                WALL_GOLD_COST + BUILDER_WAGE,
+            ),
+            SiteKind::Hut => (0, 0, HUT_GOLD_COST + BUILDER_WAGE),
+        }
+    }
+
+    /// Seconds of on-site work once a builder is in place.
+    fn build_time(self) -> f32 {
+        match self {
+            SiteKind::House | SiteKind::Mine | SiteKind::Hut => 4.0,
+            SiteKind::Bridge => 2.5,
+            SiteKind::Wall => 2.0,
+        }
+    }
+}
+
+/// A construction order waiting for (or under) a builder's hands. Its full cost
+/// is set aside when the order is placed and refunded if it is canceled.
+pub struct BuildSite {
+    pub tile: Tile,
+    pub kind: SiteKind,
+    /// Seconds of work left before the structure stands.
+    left: f32,
+    /// Placed by the autonomous builders; each zone queues one at a time.
+    auto: bool,
+}
+
+impl BuildSite {
+    /// How finished the work is, from 0 (just ordered) to 1 (about to stand).
+    pub fn progress(&self) -> f32 {
+        (1.0 - self.left / self.kind.build_time()).clamp(0.0, 1.0)
+    }
+}
+
+/// Half-width of a builder zone: the square area around its marker.
+pub const AUTO_ZONE_RADIUS: i32 = 5;
+/// Seconds between checks for new autonomous build orders.
+const AUTO_BUILD_INTERVAL: f32 = 2.0;
 
 /// A sown sapling growing toward a harvestable tree (`grow` runs from 0 to 1).
 struct Sapling {
@@ -594,7 +699,7 @@ pub struct Village {
     /// The owner's units inside the capture radius: the defenders whose presence
     /// keeps the village from being taken.
     pub knights: usize,
-    pub farmers: usize,
+    pub civilians: usize,
     /// A hostile unit is in or near the village.
     pub threatened: bool,
     /// Units attributed to this village: everyone of its faction whose nearest
@@ -638,13 +743,13 @@ impl Alert {
 /// Which kind of villager the player's houses favor raising.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
-    /// Mostly farmers (grow the economy).
+    /// Mostly civilians (grow the economy).
     Agriculture,
     /// Mostly knights (grow the army).
     Military,
 }
 
-/// Which resource the player's farmers prefer to gather.
+/// Which resource the player's civilians prefer to gather.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GatherPriority {
     Balanced,
@@ -705,7 +810,7 @@ pub struct Game {
     /// Round-robin position for stepping off-screen entities. Transient.
     offscreen_cursor: usize,
     /// Seconds left on a proclaimed draft (0 when none is in force). While it
-    /// counts down, farmers are conscripted into knights (see `run_draft`).
+    /// counts down, civilians are conscripted into knights (see `run_draft`).
     /// Transient, since a proclamation doesn't survive a save/load.
     draft_timer: f32,
     /// Seconds since the draft ended with no player village under threat; the
@@ -714,12 +819,18 @@ pub struct Game {
     levy_quiet: f32,
 
     player_house_tiles: Vec<Tile>,
-    /// Player-built mines (caves); farmers mine these for endless stone.
+    /// Player-built mines (caves); civilians mine these for endless stone.
     cave_tiles: Vec<Tile>,
     /// Every hut tile in the world (both factions), for shelter lookup.
     hut_tiles: Vec<Tile>,
-    /// Trees the player has ordered turned into huts, awaiting a free knight.
-    hut_orders: Vec<Tile>,
+    /// Construction orders awaiting a builder (or being built right now).
+    build_sites: Vec<BuildSite>,
+    /// Builder-zone markers: areas where autonomous building is permitted.
+    auto_zones: Vec<Tile>,
+    /// The switch permitting builders to raise houses in the zones on their own.
+    pub auto_build: bool,
+    /// Countdown to the next autonomous-build check. Transient.
+    auto_timer: f32,
     /// Saplings mid-growth (transient, not persisted across saves).
     saplings: Vec<Sapling>,
     /// Bridges the player has placed (anchors for extending spans).
@@ -794,15 +905,15 @@ impl Game {
             carve_river_to_sea(&mut world, w, &player_house_tiles);
         }
 
-        // Villagers: farmers to gather, knights to defend.
+        // Villagers: civilians to gather, knights to defend.
         let spawns = open_tiles_near(&world, anchor.0, anchor.1, 8);
         for (k, &t) in spawns.iter().step_by(3).take(6).enumerate() {
-            let job = if k < 4 { Job::Farmer } else { Job::Knight };
+            let job = if k < 4 { Job::Civilian } else { Job::Knight };
             entities.push(Entity::new(Faction::Player, job, t));
         }
 
         // Enemy settlements: several villages scattered around the map, each
-        // seeded with its own farmers (>3, so it can grow) and knights.
+        // seeded with its own civilians (>3, so it can grow) and knights.
         let mut erng = Rng::new(seed as u64 ^ 0xA24BAED4963EE407);
         let dirs = [
             (1.0, 0.2),
@@ -833,10 +944,10 @@ impl Game {
             }
             villages += 1;
             let roster = [
-                Job::Farmer,
-                Job::Farmer,
-                Job::Farmer,
-                Job::Farmer,
+                Job::Civilian,
+                Job::Civilian,
+                Job::Civilian,
+                Job::Civilian,
                 Job::Knight,
                 Job::Knight,
             ];
@@ -849,7 +960,7 @@ impl Game {
         }
 
         // Allied settlements: a friendly trade partner, planted on far-off coasts
-        // *across the sea* from the player. They keep their own farmers and
+        // *across the sea* from the player. They keep their own civilians and
         // knights, harass the enemy, but never join the player's fights.
         //
         // Map out the player's home landmass first so allied camps can be kept
@@ -893,7 +1004,7 @@ impl Game {
             if houses.is_empty() {
                 continue;
             }
-            let roster = [Job::Farmer, Job::Farmer, Job::Farmer, Job::Knight];
+            let roster = [Job::Civilian, Job::Civilian, Job::Civilian, Job::Knight];
             for (k, &job) in roster.iter().enumerate() {
                 let (hx, hy) = houses[k % houses.len()];
                 if let Some(t) = adjacent_walkable(&world, hx, hy) {
@@ -929,7 +1040,10 @@ impl Game {
             player_house_tiles,
             cave_tiles: Vec::new(),
             hut_tiles,
-            hut_orders: Vec::new(),
+            build_sites: Vec::new(),
+            auto_zones: Vec::new(),
+            auto_build: false,
+            auto_timer: 0.0,
             saplings: Vec::new(),
             player_bridges: Vec::new(),
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
@@ -984,10 +1098,10 @@ impl Game {
             .filter(|e| e.faction == Faction::Ally)
             .count()
     }
-    fn farmer_count(&self, faction: Faction) -> usize {
+    fn civilian_count(&self, faction: Faction) -> usize {
         self.entities
             .iter()
-            .filter(|e| e.faction == faction && e.job == Job::Farmer)
+            .filter(|e| e.faction == faction && e.job == Job::Civilian)
             .count()
     }
     /// The player's total population allowance: each village supports its own
@@ -1028,10 +1142,15 @@ impl Game {
 
     /// Is there a bridge *you placed* within a couple of tiles, so a span can
     /// be extended? (Natural bridges don't count, so the chain starts at land.)
+    /// Pending bridge sites count too, so a span can be ordered tile by tile
+    /// without waiting for the builder to finish each one.
     pub fn near_player_bridge(&self, x: i32, y: i32) -> bool {
-        self.player_bridges
-            .iter()
-            .any(|&(bx, by)| (bx - x).abs() <= 2 && (by - y).abs() <= 2)
+        let near = |(bx, by): Tile| (bx - x).abs() <= 2 && (by - y).abs() <= 2;
+        self.player_bridges.iter().any(|&b| near(b))
+            || self
+                .build_sites
+                .iter()
+                .any(|s| s.kind == SiteKind::Bridge && near(s.tile))
     }
 
     pub fn update(&mut self, dt: f32, sim: (i32, i32, i32, i32)) {
@@ -1043,6 +1162,7 @@ impl Game {
         // Survey first so spawning sees this frame's village populations.
         self.survey_villages();
         self.handle_spawns(dt);
+        self.plan_auto_builds(dt);
         self.run_draft(dt);
         self.stand_down_levies(dt);
         self.grow_saplings(dt);
@@ -1085,22 +1205,47 @@ impl Game {
         let snap: Vec<(Vec2, Faction)> = self.entities.iter().map(|e| (e.pos, e.faction)).collect();
         let grid = Grid::build(snap.iter().map(|&(p, _)| p));
 
-        // How many farmers are already working each mine, so we can cap the crowd.
+        // How many miners are already working each mine, so we can cap the crowd.
         let mut cave_use: std::collections::HashMap<Tile, u32> = std::collections::HashMap::new();
-        let sapling_tiles: std::collections::HashSet<Tile> =
+        // Tiles no sapling may be sown on: existing saplings and pending builds.
+        let mut sapling_tiles: std::collections::HashSet<Tile> =
             self.saplings.iter().map(|s| s.tile).collect();
+        let site_tiles: std::collections::HashSet<Tile> =
+            self.build_sites.iter().map(|s| s.tile).collect();
+        sapling_tiles.extend(site_tiles.iter().copied());
+        // Drop stale site claims (the site was canceled or finished), then note
+        // which sites are already spoken for so each gets a single builder.
+        // Knights use `build_site` for the water tile they're bridging, which
+        // is no construction site, so they're left alone here.
+        for e in &mut self.entities {
+            if e.job == Job::Civilian
+                && let Some(t) = e.build_site
+                && !site_tiles.contains(&t)
+            {
+                e.build_site = None;
+            }
+        }
+        let mut site_claims: std::collections::HashSet<Tile> = self
+            .entities
+            .iter()
+            .filter(|e| e.job == Job::Civilian)
+            .filter_map(|e| e.build_site)
+            .collect();
         for e in &self.entities {
             if let Some(c) = e.mine_target {
                 *cave_use.entry(c).or_insert(0) += 1;
             }
         }
 
-        // When a faction drops to the farmer floor, its knights fall back to
-        // the village to become farmers again (and wall it up on the way).
-        let player_under = self.farmer_count(Faction::Player) <= MIN_FARMERS_TO_GROW;
-        let enemy_under = self.farmer_count(Faction::Enemy) <= MIN_FARMERS_TO_GROW;
-        let ally_under = self.farmer_count(Faction::Ally) <= MIN_FARMERS_TO_GROW;
+        // When a faction drops to the civilian floor, its knights fall back to
+        // the village to become civilians again (and wall it up on the way).
+        let player_under = self.civilian_count(Faction::Player) <= MIN_CIVILIANS_TO_GROW;
+        let enemy_under = self.civilian_count(Faction::Enemy) <= MIN_CIVILIANS_TO_GROW;
+        let ally_under = self.civilian_count(Faction::Ally) <= MIN_CIVILIANS_TO_GROW;
         let pref = self.gather_priority.preferred();
+        // May the player's knights lay a bridge tile right now? They draw wood
+        // from the shared stockpile (no gold: knights are already paid).
+        let bridge_ok = self.wood >= BRIDGE_WOOD_COST;
 
         // Combat: knights damage the nearest opponent in range, or hack at an
         // adjacent enemy wall or hut if no opponent is close.
@@ -1152,7 +1297,7 @@ impl Game {
             self.world.damage_wall(tile.0, tile.1, dmg);
         }
         for (tile, dmg) in hut_damage {
-            // A hut under attack with farmers inside rallies the knights to save
+            // A hut under attack with civilians inside rallies the knights to save
             // them (overriding any manual rally flag).
             if let Some(h) = self.world.hut(tile.0, tile.1)
                 && h.owner == owner_of(Faction::Player)
@@ -1163,7 +1308,7 @@ impl Game {
                 self.alert_ongoing(AlertKind::HutRaided, tile_center(tile));
             }
             if let Some(hut) = self.world.damage_hut(tile.0, tile.1, dmg) {
-                // Razed with farmers still inside, so they're lost with it.
+                // Razed with civilians still inside, so they're lost with it.
                 let trapped = hut.occupants as u32;
                 if hut.owner == owner_of(Faction::Player) {
                     self.units_lost += trapped;
@@ -1190,12 +1335,14 @@ impl Game {
                     .is_none_or(|rad| self.entities[i].pos.distance_squared(*r) <= rad * rad)
             });
             let event = match (faction, self.entities[i].job) {
-                (Faction::Player, Job::Farmer) => {
+                (Faction::Player, Job::Civilian) => {
                     let mut farm = FarmCtx {
                         caves: &self.cave_tiles,
                         cave_use: &mut cave_use,
                         saplings: &sapling_tiles,
                         huts: &self.hut_tiles,
+                        sites: &self.build_sites,
+                        site_claims: &mut site_claims,
                     };
                     ai_step(
                         &self.world,
@@ -1209,7 +1356,7 @@ impl Game {
                         pref,
                         rally,
                         &self.hut_tiles,
-                        &self.hut_orders,
+                        false,
                         Some(&mut farm),
                         adt,
                     )
@@ -1226,7 +1373,7 @@ impl Game {
                     pref,
                     rally,
                     &self.hut_tiles,
-                    &self.hut_orders,
+                    bridge_ok,
                     None,
                     adt,
                 ),
@@ -1242,7 +1389,7 @@ impl Game {
                     None,
                     None,
                     &self.hut_tiles,
-                    &[],
+                    false,
                     None,
                     adt,
                 ),
@@ -1258,7 +1405,7 @@ impl Game {
                     None,
                     None,
                     &self.hut_tiles,
-                    &[],
+                    false,
                     None,
                     adt,
                 ),
@@ -1287,10 +1434,27 @@ impl Game {
                 Some(StepEvent::Demolish(t)) => {
                     self.world.clear_node(t.0, t.1);
                 }
-                Some(StepEvent::BuildHut(t)) => {
-                    self.world.set_hut(t.0, t.1, owner_of(faction), HUT_MAX_HP);
-                    self.hut_tiles.push(t);
-                    self.hut_orders.retain(|&o| o != t);
+                Some(StepEvent::LayBridge(t)) => {
+                    // A knight spans the water in its way: wood from the shared
+                    // stockpile, no gold. The tile joins the player's bridge
+                    // network, so spans can later be extended from it.
+                    if self.wood >= BRIDGE_WOOD_COST && self.world.is_open_water(t.0, t.1) {
+                        self.wood -= BRIDGE_WOOD_COST;
+                        self.world.set_bridge(t.0, t.1, true);
+                        self.player_bridges.push(t);
+                    }
+                }
+                Some(StepEvent::Construct(t)) => {
+                    if let Some(si) = self.build_sites.iter().position(|s| s.tile == t) {
+                        self.build_sites[si].left -= adt;
+                        if self.build_sites[si].left <= 0.0 {
+                            let site = self.build_sites.swap_remove(si);
+                            self.entities[i].build_site = None;
+                            self.complete_site(site);
+                        }
+                    } else {
+                        self.entities[i].build_site = None;
+                    }
                 }
                 Some(StepEvent::Hide(t)) => {
                     let has_room = self
@@ -1305,7 +1469,7 @@ impl Game {
             }
         }
 
-        // Remove the dead (tallying score) and any farmers who ducked into huts.
+        // Remove the dead (tallying score) and any civilians who ducked into huts.
         let mut i = 0;
         while i < self.entities.len() {
             if self.entities[i].hp <= 0.0 {
@@ -1672,7 +1836,7 @@ impl Game {
         self.ship_wood.min(self.wood) * WOOD_PRICE + self.ship_stone.min(self.stone) * STONE_PRICE
     }
 
-    /// Let sheltering farmers back out of any hut the enemy has left alone.
+    /// Let sheltering civilians back out of any hut the enemy has left alone.
     fn emerge_from_huts(&mut self) {
         let huts = self.hut_tiles.clone();
         for (hx, hy) in huts {
@@ -1695,7 +1859,7 @@ impl Game {
             let out = self.world.release_hut(hx, hy);
             for _ in 0..out {
                 if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
-                    self.entities.push(Entity::new(faction, Job::Farmer, t));
+                    self.entities.push(Entity::new(faction, Job::Civilian, t));
                 }
             }
         }
@@ -1826,7 +1990,7 @@ impl Game {
                     max,
                     houses: houses.len(),
                     knights: 0,
-                    farmers: 0,
+                    civilians: 0,
                     threatened: false,
                     pop: 0,
                     cap,
@@ -1844,7 +2008,7 @@ impl Game {
                     if e.faction == faction && d2 <= capture2 {
                         match e.job {
                             Job::Knight => v.knights += 1,
-                            Job::Farmer => v.farmers += 1,
+                            Job::Civilian => v.civilians += 1,
                         }
                     } else if hostile(e.faction, faction) && d2 <= threat2 {
                         v.threatened = true;
@@ -2045,14 +2209,14 @@ impl Game {
     fn handle_spawns(&mut self, dt: f32) {
         self.enemy_spawn_timer -= dt;
         if self.enemy_spawn_timer <= 0.0 {
-            let farmers = self.farmer_count(Faction::Enemy);
-            self.enemy_spawn_timer = spawn_interval(ENEMY_SPAWN_INTERVAL, farmers);
+            let civilians = self.civilian_count(Faction::Enemy);
+            self.enemy_spawn_timer = spawn_interval(ENEMY_SPAWN_INTERVAL, civilians);
             if self.enemy_count() < ENEMY_POP_MAX
-                && farmers > MIN_FARMERS_TO_GROW
+                && civilians > MIN_CIVILIANS_TO_GROW
                 && let Some(t) = self.spawn_site(Faction::Enemy)
             {
                 let job = if self.enemy_spawn_cycle % 3 == 2 {
-                    Job::Farmer
+                    Job::Civilian
                 } else {
                     Job::Knight
                 };
@@ -2063,13 +2227,13 @@ impl Game {
 
         self.player_spawn_timer -= dt;
         if self.player_spawn_timer <= 0.0 {
-            let farmers = self.farmer_count(Faction::Player);
-            self.player_spawn_timer = spawn_interval(PLAYER_SPAWN_INTERVAL, farmers);
+            let civilians = self.civilian_count(Faction::Player);
+            self.player_spawn_timer = spawn_interval(PLAYER_SPAWN_INTERVAL, civilians);
             if self.population() < self.pop_cap()
-                && farmers > MIN_FARMERS_TO_GROW
+                && civilians > MIN_CIVILIANS_TO_GROW
                 && let Some(t) = self.spawn_site(Faction::Player)
             {
-                // Agriculture favors farmers (2:1); Military favors
+                // Agriculture favors civilians (2:1); Military favors
                 // knights (1:2). Both still raise some of each.
                 let c = self.player_spawn_cycle % 3;
                 let mut job = match self.priority {
@@ -2077,24 +2241,24 @@ impl Game {
                         if c == 2 {
                             Job::Knight
                         } else {
-                            Job::Farmer
+                            Job::Civilian
                         }
                     }
                     Priority::Military => {
                         if c == 0 {
-                            Job::Farmer
+                            Job::Civilian
                         } else {
                             Job::Knight
                         }
                     }
                 };
                 // Knights must be paid for; an empty treasury raises a
-                // (free) farmer instead, so the village still grows.
+                // (free) civilian instead, so the village still grows.
                 if job == Job::Knight {
                     if self.money >= KNIGHT_GOLD_COST {
                         self.money -= KNIGHT_GOLD_COST;
                     } else {
-                        job = Job::Farmer;
+                        job = Job::Civilian;
                     }
                 }
                 self.player_spawn_cycle += 1;
@@ -2103,17 +2267,17 @@ impl Game {
         }
 
         // Allied camps raise their own units: mostly knights to press the
-        // enemy, with the odd farmer to keep the village supported.
+        // enemy, with the odd civilian to keep the village supported.
         self.ally_spawn_timer -= dt;
         if self.ally_spawn_timer <= 0.0 {
-            let farmers = self.farmer_count(Faction::Ally);
-            self.ally_spawn_timer = spawn_interval(ALLY_SPAWN_INTERVAL, farmers);
+            let civilians = self.civilian_count(Faction::Ally);
+            self.ally_spawn_timer = spawn_interval(ALLY_SPAWN_INTERVAL, civilians);
             if self.ally_count() < ALLY_POP_MAX
-                && farmers > MIN_FARMERS_TO_GROW
+                && civilians > MIN_CIVILIANS_TO_GROW
                 && let Some(t) = self.spawn_site(Faction::Ally)
             {
                 let job = if self.ally_spawn_cycle % 3 == 2 {
-                    Job::Farmer
+                    Job::Civilian
                 } else {
                     Job::Knight
                 };
@@ -2187,9 +2351,9 @@ impl Game {
             }
             self.enemy_villages_founded += 1;
             for (k, &job) in [
-                Job::Farmer,
-                Job::Farmer,
-                Job::Farmer,
+                Job::Civilian,
+                Job::Civilian,
+                Job::Civilian,
                 Job::Knight,
                 Job::Knight,
             ]
@@ -2240,7 +2404,7 @@ impl Game {
                 continue;
             }
             self.ally_villages_founded += 1;
-            for (k, &job) in [Job::Farmer, Job::Farmer, Job::Farmer, Job::Knight]
+            for (k, &job) in [Job::Civilian, Job::Civilian, Job::Civilian, Job::Knight]
                 .iter()
                 .enumerate()
             {
@@ -2254,90 +2418,27 @@ impl Game {
     }
 
     /// Handle a left-click at a world position according to the build mode.
+    /// Structures are no longer raised on the spot: the click places a
+    /// construction order (its cost set aside, builder's pay included) and a
+    /// civilian walks over to work the site. Clicking a pending site of the
+    /// same kind cancels it and refunds everything.
     pub fn try_build(&mut self, world_pos: Vec2) -> bool {
         let x = world_pos.x.floor() as i32;
         let y = world_pos.y.floor() as i32;
         match self.build_mode {
-            BuildMode::House => {
-                if !self.world.is_open_grass(x, y)
-                    || !self.near_player_house(x, y)
-                    || self.wood < HOUSE_WOOD_COST
-                    || self.stone < HOUSE_STONE_COST
-                    || self.money < HOUSE_GOLD_COST
-                {
-                    return false;
-                }
-                self.wood -= HOUSE_WOOD_COST;
-                self.stone -= HOUSE_STONE_COST;
-                self.money -= HOUSE_GOLD_COST;
-                self.world.set_house(x, y, true);
-                self.player_house_tiles.push((x, y));
-                true
-            }
-            BuildMode::Bridge => {
-                // A span must start from your land (near a house); further
-                // bridge tiles may extend from one you already placed. This way
-                // a bridge network always traces back to a house.
-                if !self.world.is_open_water(x, y)
-                    || self.wood < BRIDGE_WOOD_COST
-                    || !(self.near_player_house(x, y) || self.near_player_bridge(x, y))
-                {
-                    return false;
-                }
-                self.wood -= BRIDGE_WOOD_COST;
-                self.world.set_bridge(x, y, true);
-                self.player_bridges.push((x, y));
-                true
-            }
-            BuildMode::Mine => {
-                // A mine is a cave dug into open ground near your village. It's a
-                // bottomless stone source (but only a few farmers fit at once).
-                if !self.world.is_open_grass(x, y)
-                    || !self.near_player_house(x, y)
-                    || self.stone < MINE_STONE_COST
-                    || self.money < MINE_GOLD_COST
-                {
-                    return false;
-                }
-                self.stone -= MINE_STONE_COST;
-                self.money -= MINE_GOLD_COST;
-                self.world.set_cave(x, y, true);
-                self.cave_tiles.push((x, y));
-                true
-            }
-            BuildMode::Wall => {
-                // Craft a wall from wood + stone on open ground near your village.
-                if !self.world.is_open_grass(x, y)
-                    || !self.near_player_house(x, y)
-                    || self.wood < WALL_WOOD_COST
-                    || self.stone < WALL_STONE_COST
-                    || self.money < WALL_GOLD_COST
-                {
-                    return false;
-                }
-                self.wood -= WALL_WOOD_COST;
-                self.stone -= WALL_STONE_COST;
-                self.money -= WALL_GOLD_COST;
-                self.world
-                    .set_wall(x, y, owner_of(Faction::Player), WALL_MAX_HP);
-                true
-            }
-            BuildMode::Hut => {
-                // Order a tree turned into a hut. A free knight builds it; clicking
-                // the same tree again cancels the order.
-                if self.world.node(x, y).map(|n| n.kind) != Some(Resource::Wood) {
-                    return false;
-                }
-                if let Some(i) = self.hut_orders.iter().position(|&t| t == (x, y)) {
-                    // Canceling a pending order refunds its gold.
-                    self.hut_orders.remove(i);
-                    self.money += HUT_GOLD_COST;
+            BuildMode::House => self.order_build((x, y), SiteKind::House),
+            BuildMode::Bridge => self.order_build((x, y), SiteKind::Bridge),
+            BuildMode::Mine => self.order_build((x, y), SiteKind::Mine),
+            BuildMode::Wall => self.order_build((x, y), SiteKind::Wall),
+            BuildMode::Hut => self.order_build((x, y), SiteKind::Hut),
+            BuildMode::AutoZone => {
+                // Mark a builder zone, or clear the one the click landed in.
+                if let Some(i) = self.auto_zones.iter().position(|&(zx, zy)| {
+                    (zx - x).abs() <= AUTO_ZONE_RADIUS && (zy - y).abs() <= AUTO_ZONE_RADIUS
+                }) {
+                    self.auto_zones.remove(i);
                 } else {
-                    if self.money < HUT_GOLD_COST {
-                        return false;
-                    }
-                    self.money -= HUT_GOLD_COST;
-                    self.hut_orders.push((x, y));
+                    self.auto_zones.push((x, y));
                 }
                 true
             }
@@ -2419,9 +2520,208 @@ impl Game {
         }
     }
 
-    /// Trees the player has ordered turned into huts, for rendering markers.
-    pub fn hut_orders(&self) -> &[Tile] {
-        &self.hut_orders
+    /// Place a construction order of `kind` at `t`, or cancel the pending order
+    /// already there (same kind only), refunding its full cost.
+    fn order_build(&mut self, t: Tile, kind: SiteKind) -> bool {
+        if let Some(i) = self.build_sites.iter().position(|s| s.tile == t) {
+            if self.build_sites[i].kind != kind {
+                return false;
+            }
+            self.cancel_site(i);
+            return true;
+        }
+        if !self.site_placeable(t, kind) {
+            return false;
+        }
+        let (wood, stone, gold) = kind.cost();
+        if self.wood < wood || self.stone < stone || self.money < gold {
+            return false;
+        }
+        self.wood -= wood;
+        self.stone -= stone;
+        self.money -= gold;
+        self.build_sites.push(BuildSite {
+            tile: t,
+            kind,
+            left: kind.build_time(),
+            auto: false,
+        });
+        true
+    }
+
+    /// May a site of `kind` be ordered on `t` right now?
+    fn site_placeable(&self, (x, y): Tile, kind: SiteKind) -> bool {
+        match kind {
+            // On open grass next to the village you already hold.
+            SiteKind::House | SiteKind::Mine | SiteKind::Wall => {
+                self.world.is_open_grass(x, y) && self.near_player_house(x, y)
+            }
+            // A span must start from your land (near a house); further bridge
+            // tiles may extend from one you already placed or ordered. This way
+            // a bridge network always traces back to a house.
+            SiteKind::Bridge => {
+                self.world.is_open_water(x, y)
+                    && (self.near_player_house(x, y) || self.near_player_bridge(x, y))
+            }
+            // A hut is raised out of a standing tree.
+            SiteKind::Hut => self.world.node(x, y).map(|n| n.kind) == Some(Resource::Wood),
+        }
+    }
+
+    /// Remove the pending site at index `i` and refund everything set aside for
+    /// it, the builder's pay included.
+    fn cancel_site(&mut self, i: usize) {
+        let site = self.build_sites.swap_remove(i);
+        let (wood, stone, gold) = site.kind.cost();
+        self.wood += wood;
+        self.stone += stone;
+        self.money += gold;
+    }
+
+    /// A builder has finished a site: raise the structure, unless the tile was
+    /// lost in the meantime (overgrown, built over, flooded), in which case the
+    /// order is refunded instead.
+    fn complete_site(&mut self, site: BuildSite) {
+        let (x, y) = site.tile;
+        let ok = match site.kind {
+            SiteKind::House => {
+                let ok = self.world.is_open_grass(x, y);
+                if ok {
+                    self.world.set_house(x, y, true);
+                    self.player_house_tiles.push((x, y));
+                }
+                ok
+            }
+            SiteKind::Bridge => {
+                let ok = self.world.is_open_water(x, y);
+                if ok {
+                    self.world.set_bridge(x, y, true);
+                    self.player_bridges.push((x, y));
+                }
+                ok
+            }
+            SiteKind::Mine => {
+                let ok = self.world.is_open_grass(x, y);
+                if ok {
+                    self.world.set_cave(x, y, true);
+                    self.cave_tiles.push((x, y));
+                }
+                ok
+            }
+            SiteKind::Wall => {
+                let ok = self.world.is_open_grass(x, y);
+                if ok {
+                    self.world
+                        .set_wall(x, y, owner_of(Faction::Player), WALL_MAX_HP);
+                }
+                ok
+            }
+            SiteKind::Hut => {
+                let ok = self.world.node(x, y).map(|n| n.kind) == Some(Resource::Wood);
+                if ok {
+                    self.world
+                        .set_hut(x, y, owner_of(Faction::Player), HUT_MAX_HP);
+                    self.hut_tiles.push((x, y));
+                }
+                ok
+            }
+        };
+        if !ok {
+            let (wood, stone, gold) = site.kind.cost();
+            self.wood += wood;
+            self.stone += stone;
+            self.money += gold;
+        }
+    }
+
+    /// While the autonomous-building switch is on, keep each builder zone
+    /// growing: order a new house on the open ground nearest the zone's marker
+    /// whenever the treasury can afford one. Each zone queues a single
+    /// autonomous order at a time, so builders never run ahead of the player's
+    /// stockpile by more than one house.
+    fn plan_auto_builds(&mut self, dt: f32) {
+        self.auto_timer -= dt;
+        if self.auto_timer > 0.0 {
+            return;
+        }
+        self.auto_timer = AUTO_BUILD_INTERVAL;
+        if !self.auto_build {
+            return;
+        }
+        for zi in 0..self.auto_zones.len() {
+            let (zx, zy) = self.auto_zones[zi];
+            let in_zone = |(tx, ty): Tile| {
+                (tx - zx).abs() <= AUTO_ZONE_RADIUS && (ty - zy).abs() <= AUTO_ZONE_RADIUS
+            };
+            if self.build_sites.iter().any(|s| s.auto && in_zone(s.tile)) {
+                continue;
+            }
+            let (wood, stone, gold) = SiteKind::House.cost();
+            if self.wood < wood || self.stone < stone || self.money < gold {
+                continue;
+            }
+            // The open spot nearest the marker that the house rules allow, kept
+            // a tile apart from standing houses so the zone doesn't wall its
+            // own people in.
+            let mut best: Option<(Tile, i32)> = None;
+            for dy in -AUTO_ZONE_RADIUS..=AUTO_ZONE_RADIUS {
+                for dx in -AUTO_ZONE_RADIUS..=AUTO_ZONE_RADIUS {
+                    let t = (zx + dx, zy + dy);
+                    if !self.site_placeable(t, SiteKind::House)
+                        || self.build_sites.iter().any(|s| s.tile == t)
+                    {
+                        continue;
+                    }
+                    let spaced = self
+                        .player_house_tiles
+                        .iter()
+                        .all(|&(hx, hy)| (hx - t.0).abs().max((hy - t.1).abs()) >= 2);
+                    if !spaced {
+                        continue;
+                    }
+                    let d = dx.abs() + dy.abs();
+                    if best.is_none_or(|(_, bd)| d < bd) {
+                        best = Some((t, d));
+                    }
+                }
+            }
+            let Some((t, _)) = best else { continue };
+            self.wood -= wood;
+            self.stone -= stone;
+            self.money -= gold;
+            self.build_sites.push(BuildSite {
+                tile: t,
+                kind: SiteKind::House,
+                left: SiteKind::House.build_time(),
+                auto: true,
+            });
+        }
+    }
+
+    /// Pending construction sites, for rendering their ghosts.
+    pub fn build_sites(&self) -> &[BuildSite] {
+        &self.build_sites
+    }
+
+    /// Builder-zone markers, for rendering.
+    pub fn auto_zones(&self) -> &[Tile] {
+        &self.auto_zones
+    }
+
+    /// How the player's civilians are employed: (farming, mining, building).
+    pub fn role_counts(&self) -> (usize, usize, usize) {
+        let mut counts = (0, 0, 0);
+        for e in &self.entities {
+            if e.faction != Faction::Player || e.job != Job::Civilian {
+                continue;
+            }
+            match e.role() {
+                Role::Farmer => counts.0 += 1,
+                Role::Miner => counts.1 += 1,
+                Role::Builder => counts.2 += 1,
+            }
+        }
+        counts
     }
 
     /// Lift the rally flag; knights resume defending on their own.
@@ -2430,7 +2730,7 @@ impl Game {
         self.rally_response = None;
     }
 
-    /// Proclaim a draft: for the next `DRAFT_DURATION` seconds, farmers may be
+    /// Proclaim a draft: for the next `DRAFT_DURATION` seconds, civilians may be
     /// conscripted into knights, serving as levies on credit. Re-proclaiming
     /// refreshes the clock.
     pub fn proclaim_draft(&mut self) {
@@ -2449,11 +2749,11 @@ impl Game {
         (n, n as u32 * LEVY_GOLD_PAY)
     }
 
-    /// While a draft is in force, call up the player's farmers as knights at
+    /// While a draft is in force, call up the player's civilians as knights at
     /// random. Call-ups are free: each becomes a levy, paid when the draft
-    /// stands down (see `stand_down_levies`). A working core of farmers is
+    /// stands down (see `stand_down_levies`). A working core of civilians is
     /// always spared so the economy doesn't collapse. The floor is kept just
-    /// *above* `MIN_FARMERS_TO_GROW` so the draft never trips the low-farmer
+    /// *above* `MIN_CIVILIANS_TO_GROW` so the draft never trips the low-civilian
     /// retreat that would march the very knights it just raised back home.
     fn run_draft(&mut self, dt: f32) {
         if self.draft_timer <= 0.0 {
@@ -2461,14 +2761,14 @@ impl Game {
         }
         self.draft_timer -= dt;
         for i in 0..self.entities.len() {
-            if self.farmer_count(Faction::Player) <= MIN_FARMERS_TO_GROW + 1 {
+            if self.civilian_count(Faction::Player) <= MIN_CIVILIANS_TO_GROW + 1 {
                 break;
             }
             let e = &self.entities[i];
-            if e.faction != Faction::Player || e.job != Job::Farmer {
+            if e.faction != Faction::Player || e.job != Job::Civilian {
                 continue;
             }
-            // A small per-farmer chance each tick to be called up.
+            // A small per-civilian chance each tick to be called up.
             if (self.rng.next_u32() as f32) / (u32::MAX as f32) >= DRAFT_CHANCE_PER_SEC * dt {
                 continue;
             }
@@ -2477,7 +2777,7 @@ impl Game {
             e.job = Job::Knight;
             e.max_hp = max_hp_for(Faction::Player, Job::Knight);
             e.hp = e.max_hp;
-            // Shed any farming state so the fresh recruit acts as a soldier.
+            // Shed any work state so the fresh recruit acts as a soldier.
             e.mine_target = None;
             e.build_site = None;
             e.target_node = None;
@@ -2489,7 +2789,7 @@ impl Game {
     /// Once the draft is over and no player village has been threatened for
     /// `LEVY_STAND_DOWN` seconds, the invasion counts as repelled and the
     /// levies stand down. Each survivor is paid `LEVY_GOLD_PAY` and goes back
-    /// to farming; any the treasury can't cover desert. The fallen are owed
+    /// to civilian work; any the treasury can't cover desert. The fallen are owed
     /// nothing.
     fn stand_down_levies(&mut self, dt: f32) {
         if !self.entities.iter().any(|e| e.levy) {
@@ -2523,13 +2823,13 @@ impl Game {
             *money -= LEVY_GOLD_PAY;
             paid_at.get_or_insert(e.pos);
             e.levy = false;
-            // A levy that already fell back home is a farmer again; the rest
+            // A levy that already fell back home is a civilian again; the rest
             // lay down their arms, keeping their wounds.
             if e.job == Job::Knight {
-                let max_hp = max_hp_for(e.faction, Job::Farmer);
+                let max_hp = max_hp_for(e.faction, Job::Civilian);
                 e.hp = (e.hp / e.max_hp * max_hp).max(1.0);
                 e.max_hp = max_hp;
-                e.job = Job::Farmer;
+                e.job = Job::Civilian;
                 e.build_site = None;
                 e.target_node = None;
                 e.harvest_timer = 0.0;
@@ -2568,15 +2868,15 @@ fn ai_step(
     pref: Option<Resource>,
     rally: Option<Vec2>,
     huts: &[Tile],
-    hut_orders: &[Tile],
+    bridge_ok: bool,
     farm: Option<&mut FarmCtx>,
     dt: f32,
 ) -> Option<StepEvent> {
     e.repath -= dt;
     let owner = owner_of(e.faction);
     match (e.faction, e.job) {
-        (Faction::Player, Job::Farmer) => {
-            let farm = farm.expect("player farmers need farm context");
+        (Faction::Player, Job::Civilian) => {
+            let farm = farm.expect("player civilians need farm context");
             gather_behavior(world, e, owner, pref, home, farm, snap, grid, rng, dt)
         }
         (_, Job::Knight) => {
@@ -2584,12 +2884,12 @@ fn ai_step(
                 retreat_behavior(world, e, owner, home, dt)
             } else {
                 soldier_behavior(
-                    world, e, owner, rng, snap, rally, huts, hut_orders, acting, dt,
+                    world, e, owner, rng, snap, rally, huts, bridge_ok, acting, dt,
                 )
             }
         }
-        (_, Job::Farmer) => {
-            // Enemy and allied farmers shelter in their own huts when a hostile
+        (_, Job::Civilian) => {
+            // Enemy and allied civilians shelter in their own huts when a hostile
             // faction closes in, then putter around their village.
             if let Some(ev) = seek_shelter(world, e, owner, e.faction, snap, grid, huts, dt) {
                 return ev;
@@ -2600,13 +2900,70 @@ fn ai_step(
     }
 }
 
-/// Shared, per-frame context the player's farmers reason over: mines and their
-/// occupancy, sapling tiles, and every hut they might shelter in.
+/// Shared, per-frame context the player's civilians reason over: mines and
+/// their occupancy, sapling tiles, every hut they might shelter in, and the
+/// construction sites waiting on a builder (with the claims taken so far).
 struct FarmCtx<'a> {
     caves: &'a [Tile],
     cave_use: &'a mut std::collections::HashMap<Tile, u32>,
     saplings: &'a std::collections::HashSet<Tile>,
     huts: &'a [Tile],
+    sites: &'a [BuildSite],
+    site_claims: &'a mut std::collections::HashSet<Tile>,
+}
+
+/// Is any construction site still waiting for a builder?
+fn unclaimed_site(farm: &FarmCtx) -> bool {
+    farm.sites
+        .iter()
+        .any(|s| !farm.site_claims.contains(&s.tile))
+}
+
+/// Claim the nearest *reachable* unclaimed construction site, marking it taken
+/// so no one else walks there too. One multi-goal BFS routes to any tile from
+/// which such a site can be worked, so an unreachable site (a bridge span still
+/// waiting on its previous tile, say) is simply left for later.
+fn claim_site(
+    world: &World,
+    owner: u8,
+    start: Tile,
+    farm: &mut FarmCtx,
+) -> Option<(Tile, Vec<Tile>)> {
+    let open: HashSet<Tile> = farm
+        .sites
+        .iter()
+        .map(|s| s.tile)
+        .filter(|t| !farm.site_claims.contains(t))
+        .collect();
+    if open.is_empty() {
+        return None;
+    }
+    let neighbor_site = |x: i32, y: i32| {
+        [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .into_iter()
+            .map(|(dx, dy)| (x + dx, y + dy))
+            .find(|t| open.contains(t))
+    };
+    let path = pathfind::bfs(
+        start,
+        PATH_BUDGET,
+        |x, y| world.walkable_for(owner, x, y) && neighbor_site(x, y).is_some(),
+        |x, y| world.walkable_for(owner, x, y),
+    )?;
+    let dest = path.last().copied().unwrap_or(start);
+    let site = neighbor_site(dest.0, dest.1)?;
+    farm.site_claims.insert(site);
+    Some((site, path))
+}
+
+/// Route to any tile from which `site` can be worked (a walkable 4-neighbor).
+fn path_beside(world: &World, owner: u8, start: Tile, site: Tile) -> Option<Vec<Tile>> {
+    pathfind::bfs(
+        start,
+        PATH_BUDGET,
+        |x, y| world.walkable_for(owner, x, y) && adjacent((x, y), site),
+        |x, y| world.walkable_for(owner, x, y),
+    )
 }
 
 /// True when `(x, y)` is within the leash of some player house.
@@ -2621,7 +2978,7 @@ fn nearest_house(home: &[Tile], t: Tile) -> Option<Tile> {
         .min_by_key(|&(hx, hy)| (hx - t.0).abs() + (hy - t.1).abs())
 }
 
-/// A 4-neighbor of `t` a farmer can stand on to work it.
+/// A 4-neighbor of `t` a civilian can stand on to work it.
 fn stand_tile(world: &World, owner: u8, t: Tile) -> Option<Tile> {
     [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .into_iter()
@@ -2629,7 +2986,7 @@ fn stand_tile(world: &World, owner: u8, t: Tile) -> Option<Tile> {
         .find(|&(nx, ny)| world.walkable_for(owner, nx, ny))
 }
 
-/// Release a farmer's claim on a mine, freeing its slot for someone else.
+/// Release a civilian's claim on a mine, freeing its slot for someone else.
 fn release_cave(e: &mut Entity, cave_use: &mut std::collections::HashMap<Tile, u32>) {
     if let Some(c) = e.mine_target.take()
         && let Some(n) = cave_use.get_mut(&c)
@@ -2650,7 +3007,7 @@ fn claim_cave(
     for &c in farm.caves {
         if !world.is_cave(c.0, c.1)
             || farm.cave_use.get(&c).copied().unwrap_or(0) >= CAVE_CAPACITY
-            || !within_home(home, c.0, c.1, FARMER_HOME_RADIUS + 1)
+            || !within_home(home, c.0, c.1, CIVILIAN_HOME_RADIUS + 1)
             || stand_tile(world, owner, c).is_none()
         {
             continue;
@@ -2678,12 +3035,12 @@ fn plantable_neighbor(
         .map(|(dx, dy)| (stand.0 + dx, stand.1 + dy))
         .find(|&(nx, ny)| {
             world.is_open_grass(nx, ny)
-                && within_home(home, nx, ny, FARMER_HOME_RADIUS)
+                && within_home(home, nx, ny, CIVILIAN_HOME_RADIUS)
                 && !saplings.contains(&(nx, ny))
         })
 }
 
-/// Route to a spot where the farmer can sow a fresh sapling.
+/// Route to a spot where the civilian can sow a fresh sapling.
 fn plan_plant(
     world: &World,
     owner: u8,
@@ -2698,7 +3055,7 @@ fn plan_plant(
             world.walkable_for(owner, x, y)
                 && plantable_neighbor(world, home, saplings, (x, y)).is_some()
         },
-        |x, y| within_home(home, x, y, FARMER_HOME_RADIUS) && world.walkable_for(owner, x, y),
+        |x, y| within_home(home, x, y, CIVILIAN_HOME_RADIUS) && world.walkable_for(owner, x, y),
     )?;
     let dest = path.last().copied().unwrap_or(start);
     let spot = plantable_neighbor(world, home, saplings, dest)?;
@@ -2707,7 +3064,7 @@ fn plan_plant(
 
 /// Is a hostile unit within `r` of `pos`? (Allies don't scare the player, and
 /// vice versa. Only the enemy triggers a flight to shelter.) Answered from the
-/// spatial grid so every farmer can afford to ask it every frame.
+/// spatial grid so every civilian can afford to ask it every frame.
 fn enemy_within(
     snap: &[(Vec2, Faction)],
     grid: &Grid,
@@ -2736,7 +3093,7 @@ fn nearest_shelter(world: &World, owner: u8, huts: &[Tile], start: Tile) -> Opti
 }
 
 /// When an enemy is close and a friendly hut has room, run for it. Returns
-/// `Some(_)` when the farmer is fleeing (the inner event is `Hide` on arrival,
+/// `Some(_)` when the civilian is fleeing (the inner event is `Hide` on arrival,
 /// or `None` while still running); `None` means "no need to flee".
 #[allow(clippy::too_many_arguments)]
 fn seek_shelter(
@@ -2764,7 +3121,7 @@ fn seek_shelter(
         }
         e.repath = 0.7;
     }
-    let moved = follow_path(e, FARMER_SPEED, dt);
+    let moved = follow_path(e, CIVILIAN_SPEED, dt);
     set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
     Some(None)
 }
@@ -2790,9 +3147,40 @@ fn gather_behavior(
         return ev;
     }
 
+    // A claimed construction site: this civilian is its builder. Walk over and
+    // work it, exempt from the home leash so a bridge can run out past it.
+    if let Some(site) = e.build_site {
+        if !farm.sites.iter().any(|s| s.tile == site) {
+            // Canceled or finished under us; back to ordinary work.
+            e.build_site = None;
+        } else if adjacent(here, site) {
+            e.set_path(Vec::new());
+            e.facing = dir_from_vec(tile_center(site) - e.pos);
+            set_anim(e, Anim::Act, dt);
+            return Some(StepEvent::Construct(site));
+        } else {
+            if e.repath <= 0.0 || e.path_done() {
+                e.repath = 0.7;
+                if let Some(p) = path_beside(world, owner, here, site) {
+                    e.set_path(p);
+                } else {
+                    // No way in from here: give the site up for someone else.
+                    e.build_site = None;
+                    farm.site_claims.remove(&site);
+                    e.set_path(Vec::new());
+                }
+            }
+            if e.build_site.is_some() {
+                let moved = follow_path(e, CIVILIAN_SPEED, dt);
+                set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
+                return None;
+            }
+        }
+    }
+
     // Hard leash: if we've somehow strayed past the home radius, abandon any
-    // task and march straight back. Farmers never leave the village.
-    if !within_home(home, here.0, here.1, FARMER_HOME_RADIUS) {
+    // task and march straight back. Civilians never leave the village.
+    if !within_home(home, here.0, here.1, CIVILIAN_HOME_RADIUS) {
         release_cave(e, farm.cave_use);
         e.target_node = None;
         if let Some(h) = nearest_house(home, here)
@@ -2803,7 +3191,7 @@ fn gather_behavior(
             }
             e.repath = 0.7;
         }
-        let moved = follow_path(e, FARMER_SPEED, dt);
+        let moved = follow_path(e, CIVILIAN_SPEED, dt);
         set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
         return None;
     }
@@ -2817,9 +3205,15 @@ fn gather_behavior(
         e.harvest_timer -= dt;
         if e.harvest_timer <= 0.0 {
             if let Some(c) = e.mine_target {
-                // A mine never runs dry: bank the stone and keep swinging.
+                // A mine never runs dry: bank the stone and keep swinging,
+                // unless a construction site is waiting on a builder. Building
+                // outranks the endless mine, so put down the pick for it.
                 if world.is_cave(c.0, c.1) && adjacent(here, c) {
-                    e.harvest_timer = HARVEST_TIME;
+                    if unclaimed_site(farm) {
+                        release_cave(e, farm.cave_use);
+                    } else {
+                        e.harvest_timer = HARVEST_TIME;
+                    }
                     return Some(StepEvent::MineStone);
                 }
                 release_cave(e, farm.cave_use);
@@ -2839,29 +3233,34 @@ fn gather_behavior(
 
     // Walking somewhere.
     if !e.path_done() {
-        let moved = follow_path(e, FARMER_SPEED, dt);
+        let moved = follow_path(e, CIVILIAN_SPEED, dt);
         set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
         return None;
     }
 
-    // Hold a mine claim? Work it (walk in, then mine).
+    // Hold a mine claim? Work it (walk in, then mine), unless a construction
+    // site is waiting: building outranks the endless mine.
     if let Some(c) = e.mine_target {
-        if world.is_cave(c.0, c.1) {
-            if adjacent(here, c) {
-                e.harvest_timer = HARVEST_TIME;
-                e.facing = dir_from_vec(tile_center(c) - e.pos);
-                set_anim(e, Anim::Act, dt);
-                return None;
+        if unclaimed_site(farm) {
+            release_cave(e, farm.cave_use);
+        } else {
+            if world.is_cave(c.0, c.1) {
+                if adjacent(here, c) {
+                    e.harvest_timer = HARVEST_TIME;
+                    e.facing = dir_from_vec(tile_center(c) - e.pos);
+                    set_anim(e, Anim::Act, dt);
+                    return None;
+                }
+                if let Some(stand) = stand_tile(world, owner, c)
+                    && let Some(p) = pathfind::path_to(world, owner, here, stand, PATH_BUDGET)
+                {
+                    e.set_path(p);
+                    set_anim(e, Anim::Walk, dt);
+                    return None;
+                }
             }
-            if let Some(stand) = stand_tile(world, owner, c)
-                && let Some(p) = pathfind::path_to(world, owner, here, stand, PATH_BUDGET)
-            {
-                e.set_path(p);
-                set_anim(e, Anim::Walk, dt);
-                return None;
-            }
+            release_cave(e, farm.cave_use);
         }
-        release_cave(e, farm.cave_use);
     }
 
     // Reached our work tile? Start swinging at either a resource node to harvest
@@ -2875,6 +3274,20 @@ fn gather_behavior(
             return None;
         }
         e.target_node = None;
+    }
+
+    // Idle hands take up building before gathering: claim the nearest
+    // reachable site still waiting on a builder and head over.
+    if let Some((site, path)) = claim_site(world, owner, here, farm) {
+        e.build_site = Some(site);
+        e.target_node = None;
+        if path.is_empty() {
+            set_anim(e, Anim::Idle, dt);
+        } else {
+            e.set_path(path);
+            set_anim(e, Anim::Walk, dt);
+        }
+        return None;
     }
 
     // Gather the nearest reachable rock/tree within the leash.
@@ -2927,7 +3340,7 @@ fn gather_behavior(
     }
 
     // Truly idle: putter around, but stay on the leash.
-    wander_behavior(world, e, owner, Some((home, FARMER_HOME_RADIUS)), rng, dt);
+    wander_behavior(world, e, owner, Some((home, CIVILIAN_HOME_RADIUS)), rng, dt);
     None
 }
 
@@ -2940,25 +3353,26 @@ fn soldier_behavior(
     snap: &[(Vec2, Faction)],
     rally: Option<Vec2>,
     huts: &[Tile],
-    hut_orders: &[Tile],
+    bridge_ok: bool,
     acting: bool,
     dt: f32,
 ) -> Option<StepEvent> {
-    // Mid-action: building a hut, or hacking a tree/rock we already started.
+    // Mid-action: laying a bridge tile, or hacking down a tree/rock we already
+    // started on.
     if e.harvest_timer > 0.0 {
-        if let Some(site) = e.build_site {
-            // Turning a tree into a hut.
-            if world.node(site.0, site.1).map(|n| n.kind) == Some(Resource::Wood) {
-                e.facing = dir_from_vec(tile_center(site) - e.pos);
+        if let Some(span) = e.build_site {
+            // Spanning the water tile in our way. Abandon the work if the tile
+            // got bridged under us or the wood for it ran out.
+            if world.is_open_water(span.0, span.1) && bridge_ok {
+                e.facing = dir_from_vec(tile_center(span) - e.pos);
                 set_anim(e, Anim::Act, dt);
                 e.harvest_timer -= dt;
                 if e.harvest_timer <= 0.0 {
                     e.build_site = None;
-                    return Some(StepEvent::BuildHut(site));
+                    return Some(StepEvent::LayBridge(span));
                 }
                 return None;
             }
-            // Tree's gone (chopped or already a hut), so abandon the build.
             e.harvest_timer = 0.0;
             e.build_site = None;
         } else if let Some(node) = e.target_node {
@@ -2995,6 +3409,13 @@ fn soldier_behavior(
                 world.walkable_for_siege(owner, x, y)
             }) {
                 e.set_path(p);
+            } else if bridge_ok
+                && let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
+                    amphibious(world, owner, x, y)
+                })
+            {
+                // Only water bars the way: take the crossing and bridge it.
+                e.set_path(p);
             } else {
                 // The flag is unreachable from here; don't re-exhaust the
                 // search budget every replan tick while it stands.
@@ -3002,7 +3423,7 @@ fn soldier_behavior(
                 e.repath = 2.0;
             }
         }
-        return advance_or_hack(world, e, dt);
+        return advance_or_hack(world, e, bridge_ok, dt);
     }
 
     // No rally: stop and fight when a foe is already in range.
@@ -3045,6 +3466,15 @@ fn soldier_behavior(
             }) {
                 e.set_path(p);
                 true
+            } else if bridge_ok
+                && let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
+                    amphibious(world, owner, x, y)
+                })
+            {
+                // No way in by land at all: route across the water and lay
+                // bridges as we come to it.
+                e.set_path(p);
+                true
             } else {
                 false
             }
@@ -3054,7 +3484,7 @@ fn soldier_behavior(
             // rather than grinding down trees along a dead route.
             e.set_path(Vec::new());
             if !foes.is_empty() || siege {
-                // There were targets, but both searches exhausted their budget
+                // There were targets, but every search exhausted its budget
                 // without a route (foes across the sea, say). Burning that
                 // budget again every replan tick is the costliest thing a big
                 // map does, so back off (with jitter) before trying again.
@@ -3063,47 +3493,26 @@ fn soldier_behavior(
         }
     }
 
-    // Nothing to fight: build a pending hut order if one's within reach,
+    // Nothing to fight anywhere: just putter around.
     if e.path_done() {
-        if let Some(order) = pick_hut_order(world, owner, e.tile(), hut_orders) {
-            if adjacent(e.tile(), order) {
-                e.build_site = Some(order);
-                e.harvest_timer = HUT_BUILD_TIME;
-                e.facing = dir_from_vec(tile_center(order) - e.pos);
-                set_anim(e, Anim::Act, dt);
-                return None;
-            }
-            if let Some(stand) = stand_tile(world, owner, order)
-                && let Some(p) = pathfind::path_to(world, owner, e.tile(), stand, PATH_BUDGET)
-            {
-                e.set_path(p);
-                set_anim(e, Anim::Walk, dt);
-                return None;
-            }
-        }
-        // otherwise just putter around.
         wander_behavior(world, e, owner, None, rng, dt);
         return None;
     }
 
-    advance_or_hack(world, e, dt)
+    advance_or_hack(world, e, bridge_ok, dt)
 }
 
-/// The nearest ordered tree a knight can reach to build into a hut.
-fn pick_hut_order(world: &World, owner: u8, start: Tile, orders: &[Tile]) -> Option<Tile> {
-    orders
-        .iter()
-        .copied()
-        .filter(|&t| {
-            world.node(t.0, t.1).map(|n| n.kind) == Some(Resource::Wood)
-                && stand_tile(world, owner, t).is_some()
-        })
-        .min_by_key(|&t| (t.0 - start.0).abs() + (t.1 - start.1).abs())
+/// Can a knight pass `(x, y)` given it may also bridge open water? Everything
+/// siege-walkable plus bare water; what a knight's last-resort route search
+/// treats as passable.
+fn amphibious(world: &World, owner: u8, x: i32, y: i32) -> bool {
+    world.walkable_for_siege(owner, x, y) || world.is_open_water(x, y)
 }
 
 /// Advance a knight along its path: if the next step is a tree/rock, start
-/// hacking it down; otherwise walk the step.
-fn advance_or_hack(world: &World, e: &mut Entity, dt: f32) -> Option<StepEvent> {
+/// hacking it down; if it's open water (an amphibious route), start laying a
+/// bridge tile over it; otherwise walk the step.
+fn advance_or_hack(world: &World, e: &mut Entity, bridge_ok: bool, dt: f32) -> Option<StepEvent> {
     if !e.path_done() {
         let (wx, wy) = e.path[e.path_cursor];
         if world.node(wx, wy).is_some() {
@@ -3113,13 +3522,26 @@ fn advance_or_hack(world: &World, e: &mut Entity, dt: f32) -> Option<StepEvent> 
             set_anim(e, Anim::Act, dt);
             return None;
         }
+        if world.is_open_water(wx, wy) {
+            if bridge_ok {
+                e.build_site = Some((wx, wy));
+                e.harvest_timer = KNIGHT_BRIDGE_TIME;
+                e.facing = dir_from_vec(tile_center((wx, wy)) - e.pos);
+                set_anim(e, Anim::Act, dt);
+            } else {
+                // The wood for the span ran out; drop the route and replan.
+                e.set_path(Vec::new());
+                set_anim(e, Anim::Idle, dt);
+            }
+            return None;
+        }
     }
     let moved = follow_path(e, KNIGHT_SPEED, dt);
     set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
     None
 }
 
-/// A knight recalled to the village: march home, then convert to a farmer and
+/// A knight recalled to the village: march home, then convert to a civilian and
 /// raise a wall on the settlement's frontier.
 fn retreat_behavior(
     world: &World,
@@ -3138,9 +3560,9 @@ fn retreat_behavior(
     };
 
     if adjacent(here, target) || here == target {
-        // Home: become a farmer and raise a wall on the frontier.
-        e.job = Job::Farmer;
-        e.max_hp = max_hp_for(e.faction, Job::Farmer);
+        // Home: become a civilian and raise a wall on the frontier.
+        e.job = Job::Civilian;
+        e.max_hp = max_hp_for(e.faction, Job::Civilian);
         e.hp = e.max_hp;
         e.set_path(Vec::new());
         e.target_node = None;
@@ -3159,7 +3581,7 @@ fn retreat_behavior(
     None
 }
 
-/// Idle roaming. When `home` is set (player farmers), wandering is confined to
+/// Idle roaming. When `home` is set (player civilians), wandering is confined to
 /// the leash so they never drift out of the village.
 fn wander_behavior(
     world: &World,
@@ -3170,7 +3592,7 @@ fn wander_behavior(
     dt: f32,
 ) {
     if !e.path_done() {
-        let moved = follow_path(e, FARMER_SPEED, dt);
+        let moved = follow_path(e, CIVILIAN_SPEED, dt);
         set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
         return;
     }
@@ -3443,12 +3865,12 @@ fn plan_gather_kind(
     kind: Option<Resource>,
     home: &[Tile],
 ) -> Option<(Vec<Tile>, Tile)> {
-    // Search stays inside the leash so a farmer never chases a node out of town.
+    // Search stays inside the leash so a civilian never chases a node out of town.
     let path = pathfind::bfs(
         start,
         PATH_BUDGET,
         |x, y| world.walkable_for(owner, x, y) && neighbor_node(world, x, y, kind).is_some(),
-        |x, y| within_home(home, x, y, FARMER_HOME_RADIUS) && world.walkable_for(owner, x, y),
+        |x, y| within_home(home, x, y, CIVILIAN_HOME_RADIUS) && world.walkable_for(owner, x, y),
     )?;
     let dest = path.last().copied().unwrap_or(start);
     let node = neighbor_node(world, dest.0, dest.1, kind)?;
@@ -3941,7 +4363,7 @@ fn open_tiles_near(world: &World, cx: i32, cy: i32, r: i32) -> Vec<Tile> {
 // ---------------------------------------------------------------------------
 
 const MAGIC: &[u8; 4] = b"KGDM";
-const VERSION: u8 = 11;
+const VERSION: u8 = 12;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
     b.push(v);
@@ -3992,8 +4414,26 @@ fn faction_u8(f: Faction) -> u8 {
 }
 fn job_u8(j: Job) -> u8 {
     match j {
-        Job::Farmer => 0,
+        Job::Civilian => 0,
         Job::Knight => 1,
+    }
+}
+fn site_kind_u8(k: SiteKind) -> u8 {
+    match k {
+        SiteKind::House => 0,
+        SiteKind::Bridge => 1,
+        SiteKind::Mine => 2,
+        SiteKind::Wall => 3,
+        SiteKind::Hut => 4,
+    }
+}
+fn site_kind_of(v: u8) -> SiteKind {
+    match v {
+        1 => SiteKind::Bridge,
+        2 => SiteKind::Mine,
+        3 => SiteKind::Wall,
+        4 => SiteKind::Hut,
+        _ => SiteKind::House,
     }
 }
 fn dir_u8(d: Dir) -> u8 {
@@ -4095,6 +4535,23 @@ impl Game {
             wf32(&mut b, w.pos.x);
             wf32(&mut b, w.pos.y);
             wf32(&mut b, w.hp);
+        }
+
+        // The builders: the autonomous switch, zone markers, and pending
+        // construction sites (their reserved costs live in these entries).
+        wu8(&mut b, self.auto_build as u8);
+        wu32(&mut b, self.auto_zones.len() as u32);
+        for &(x, y) in &self.auto_zones {
+            wi32(&mut b, x);
+            wi32(&mut b, y);
+        }
+        wu32(&mut b, self.build_sites.len() as u32);
+        for s in &self.build_sites {
+            wi32(&mut b, s.tile.0);
+            wi32(&mut b, s.tile.1);
+            wu8(&mut b, site_kind_u8(s.kind));
+            wf32(&mut b, s.left);
+            wu8(&mut b, s.auto as u8);
         }
 
         let chunks: Vec<_> = self.world.chunks_iter().collect();
@@ -4207,7 +4664,7 @@ impl Game {
             let job = if r.u8()? == 1 {
                 Job::Knight
             } else {
-                Job::Farmer
+                Job::Civilian
             };
             let px = r.f32()?;
             let py = r.f32()?;
@@ -4298,6 +4755,27 @@ impl Game {
                 reload: WARSHIP_RELOAD,
                 bob: 0.0,
                 hp,
+            });
+        }
+
+        let auto_build = r.u8()? != 0;
+        let zcount = r.u32()? as usize;
+        let mut auto_zones = Vec::with_capacity(zcount);
+        for _ in 0..zcount {
+            auto_zones.push((r.i32()?, r.i32()?));
+        }
+        let sitecount = r.u32()? as usize;
+        let mut build_sites = Vec::with_capacity(sitecount);
+        for _ in 0..sitecount {
+            let tile = (r.i32()?, r.i32()?);
+            let kind = site_kind_of(r.u8()?);
+            let left = r.f32()?;
+            let auto = r.u8()? != 0;
+            build_sites.push(BuildSite {
+                tile,
+                kind,
+                left,
+                auto,
             });
         }
 
@@ -4443,7 +4921,10 @@ impl Game {
             player_house_tiles,
             cave_tiles,
             hut_tiles,
-            hut_orders: Vec::new(),
+            build_sites,
+            auto_zones,
+            auto_build,
+            auto_timer: 0.0,
             saplings: Vec::new(),
             player_bridges,
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
@@ -4596,12 +5077,12 @@ mod tests {
     #[test]
     fn knight_spawn_needs_gold() {
         // Directly assert the treasury gates knight production: with gold a
-        // knight is affordable; drained, the village must fall back to farmers.
+        // knight is affordable; drained, the village must fall back to civilians.
         let game = Game::new(1);
         assert!(game.money >= KNIGHT_GOLD_COST);
     }
 
-    /// A broke fresh world with extra farmers at home and a draft run to its
+    /// A broke fresh world with extra civilians at home and a draft run to its
     /// end. Drives `run_draft` directly so spawns and combat can't muddy the
     /// count.
     fn drafted_game() -> Game {
@@ -4611,10 +5092,10 @@ mod tests {
         let tile = (home.x as i32, home.y as i32);
         for _ in 0..10 {
             game.entities
-                .push(Entity::new(Faction::Player, Job::Farmer, tile));
+                .push(Entity::new(Faction::Player, Job::Civilian, tile));
         }
         assert!(
-            game.farmer_count(Faction::Player) > MIN_FARMERS_TO_GROW + 1,
+            game.civilian_count(Faction::Player) > MIN_CIVILIANS_TO_GROW + 1,
             "need bodies to draft"
         );
         game.proclaim_draft();
@@ -4630,18 +5111,18 @@ mod tests {
 
     #[test]
     fn draft_raises_levies_on_credit() {
-        let farmers0 = Game::new(1).farmer_count(Faction::Player) + 10;
+        let farmers0 = Game::new(1).civilian_count(Faction::Player) + 10;
         let game = drafted_game();
 
         // Even a broke realm can call up levies, and none of it is paid yet.
         let (levies, owed) = game.levies_owed();
-        let converted = farmers0 - game.farmer_count(Faction::Player);
+        let converted = farmers0 - game.civilian_count(Faction::Player);
         assert!(levies >= 1, "a draft with bodies should call some up");
         assert_eq!(levies, converted, "every call-up is a levy");
         assert_eq!(owed, levies as u32 * LEVY_GOLD_PAY);
         assert_eq!(game.money, 0, "levies are paid later, not up front");
-        // A working core of farmers is always spared, and the draft expires.
-        assert!(game.farmer_count(Faction::Player) > MIN_FARMERS_TO_GROW);
+        // A working core of civilians is always spared, and the draft expires.
+        assert!(game.civilian_count(Faction::Player) > MIN_CIVILIANS_TO_GROW);
         assert!(game.draft_remaining().is_none(), "draft must expire");
     }
 
@@ -4650,7 +5131,7 @@ mod tests {
         let mut game = drafted_game();
         let (levies, owed) = game.levies_owed();
         assert!(levies >= 1);
-        let farmers0 = game.farmer_count(Faction::Player);
+        let farmers0 = game.civilian_count(Faction::Player);
         game.money = owed;
 
         // While a village is under threat, the levies stay under arms however
@@ -4662,7 +5143,7 @@ mod tests {
             max: (0, 0),
             houses: 1,
             knights: 0,
-            farmers: 0,
+            civilians: 0,
             threatened: true,
             pop: 0,
             cap: 0,
@@ -4679,7 +5160,7 @@ mod tests {
         }
         assert_eq!(game.levies_owed(), (0, 0));
         assert_eq!(game.money, 0, "each levy is paid exactly once");
-        assert_eq!(game.farmer_count(Faction::Player), farmers0 + levies);
+        assert_eq!(game.civilian_count(Faction::Player), farmers0 + levies);
         assert!(
             game.alerts()
                 .iter()
@@ -4693,7 +5174,7 @@ mod tests {
         let (levies, _) = game.levies_owed();
         assert!(levies >= 1);
         let units0 = game.entities.len();
-        let farmers0 = game.farmer_count(Faction::Player);
+        let farmers0 = game.civilian_count(Faction::Player);
         // Enough gold for all but one.
         game.money = (levies as u32 - 1) * LEVY_GOLD_PAY;
         for _ in 0..(LEVY_STAND_DOWN as usize * 10 + 1) {
@@ -4702,7 +5183,7 @@ mod tests {
         assert_eq!(game.levies_owed(), (0, 0));
         assert_eq!(game.money, 0);
         assert_eq!(game.entities.len(), units0 - 1, "the unpaid levy deserts");
-        assert_eq!(game.farmer_count(Faction::Player), farmers0 + levies - 1);
+        assert_eq!(game.civilian_count(Faction::Player), farmers0 + levies - 1);
         assert!(
             game.alerts()
                 .iter()
@@ -4869,6 +5350,263 @@ mod tests {
         panic!("no test seed had a home port");
     }
 
+    /// An open-grass tile next to the player's village fit for a house order.
+    fn find_house_spot(game: &Game) -> Tile {
+        for &(hx, hy) in game.player_houses() {
+            for dy in -BUILD_NEAR_RADIUS..=BUILD_NEAR_RADIUS {
+                for dx in -BUILD_NEAR_RADIUS..=BUILD_NEAR_RADIUS {
+                    let t = (hx + dx, hy + dy);
+                    if game.world.is_open_grass(t.0, t.1) && stand_tile(&game.world, 0, t).is_some()
+                    {
+                        return t;
+                    }
+                }
+            }
+        }
+        panic!("no open ground near the village");
+    }
+
+    #[test]
+    fn build_orders_cost_a_wage_and_wait_for_a_builder() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        game.wood = 100;
+        game.stone = 100;
+        game.money = 100;
+        let spot = find_house_spot(&game);
+        game.build_mode = BuildMode::House;
+        assert!(game.try_build(tile_center(spot)));
+        assert_eq!(game.build_sites().len(), 1);
+        // Materials and the builder's pay are set aside up front...
+        assert_eq!(game.wood, 100 - HOUSE_WOOD_COST);
+        assert_eq!(game.stone, 100 - HOUSE_STONE_COST);
+        assert_eq!(game.money, 100 - HOUSE_GOLD_COST - BUILDER_WAGE);
+        // ...but nothing stands yet, and nothing will without a builder.
+        let sim = (spot.0 - 20, spot.1 - 20, spot.0 + 20, spot.1 + 20);
+        for _ in 0..100 {
+            game.update(0.1, sim);
+        }
+        assert!(
+            !game.world.is_house(spot.0, spot.1),
+            "the house built itself with no civilians around"
+        );
+
+        // A civilian takes up the builder's job and the house goes up.
+        let start = stand_tile(&game.world, 0, spot).expect("the site must be workable");
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Civilian, start));
+        let mut built = false;
+        for _ in 0..2000 {
+            game.update(0.1, sim);
+            if game.world.is_house(spot.0, spot.1) {
+                built = true;
+                break;
+            }
+        }
+        assert!(built, "the builder never finished the house");
+        assert!(game.build_sites().is_empty());
+        assert_eq!(
+            game.money,
+            100 - HOUSE_GOLD_COST - BUILDER_WAGE,
+            "a finished build must not refund the order"
+        );
+    }
+
+    #[test]
+    fn orders_reach_far_from_the_village() {
+        let mut game = Game::new(1);
+        game.wood = 100;
+        game.stone = 100;
+        game.money = 100;
+        // An open spot a good way out: 10+ tiles from every house (far beyond
+        // the old 5-tile limit) yet still inside the new build range.
+        let (hx, hy) = game.player_houses()[0];
+        let mut spot = None;
+        'scan: for r in 10..=BUILD_NEAR_RADIUS {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs().max(dy.abs()) != r {
+                        continue;
+                    }
+                    let t = (hx + dx, hy + dy);
+                    let far_from_all = game
+                        .player_houses()
+                        .iter()
+                        .all(|&(ax, ay)| (ax - t.0).abs().max((ay - t.1).abs()) >= 10);
+                    if far_from_all
+                        && game.world.is_open_grass(t.0, t.1)
+                        && game.near_player_house(t.0, t.1)
+                    {
+                        spot = Some(t);
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        let spot = spot.expect("no open ground 10+ tiles out");
+        game.build_mode = BuildMode::Wall;
+        assert!(game.try_build(tile_center(spot)));
+        assert_eq!(game.build_sites().len(), 1);
+    }
+
+    #[test]
+    fn knights_bridge_water_to_answer_a_rally() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        game.wood = 50;
+        // An empty treasury: spans must still go up, since knights charge no
+        // gold for them (they're already paid for serving).
+        game.money = 0;
+        game.world.ensure_region(-6, -10, 20, 10);
+        // Clear a working lane near the origin (forced land), then moat the
+        // middle in: a 2-tile ring of water around (10, 0) that no land or
+        // siege route can cross.
+        for y in -6..=6 {
+            for x in -2..=16 {
+                game.world.clear_node(x, y);
+            }
+        }
+        for y in -6i32..=6 {
+            for x in -2i32..=16 {
+                let d = (x - 10).abs().max(y.abs());
+                if (2..=3).contains(&d) {
+                    game.world.carve_water(x, y);
+                }
+            }
+        }
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Knight, (0, 0)));
+        // Enough civilians at home that the knight isn't recalled to farm (the
+        // low-civilian retreat would turn it into a civilian otherwise).
+        let (hx, hy) = game.player_houses()[0];
+        for _ in 0..4 {
+            let t = adjacent_walkable(&game.world, hx, hy).expect("room by the house");
+            game.entities
+                .push(Entity::new(Faction::Player, Job::Civilian, t));
+        }
+
+        // Plant the rally flag on the moated island. The only way there is
+        // across the water, so the knight must lay its own bridges.
+        game.build_mode = BuildMode::Rally;
+        assert!(game.try_build(tile_center((10, 0))));
+
+        let sim = (-6, -10, 20, 10);
+        let mut arrived = false;
+        for _ in 0..1500 {
+            game.update(0.1, sim);
+            // The flag lifts itself once a knight reaches it.
+            if game.rally_point.is_none() {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "no knight ever reached the flag across the moat");
+        let bridged = (-6i32..=6).any(|y| {
+            (-2i32..=16).any(|x| {
+                let d = (x - 10).abs().max(y.abs());
+                (2..=3).contains(&d) && game.world.is_bridge(x, y)
+            })
+        });
+        assert!(bridged, "a broke realm must still get its knight bridges");
+    }
+
+    #[test]
+    fn clicking_a_pending_site_cancels_and_refunds() {
+        let mut game = Game::new(1);
+        game.wood = 50;
+        game.stone = 50;
+        game.money = 50;
+        let spot = find_house_spot(&game);
+        game.build_mode = BuildMode::House;
+        assert!(game.try_build(tile_center(spot)));
+        // A different structure can't be ordered onto an occupied tile.
+        game.build_mode = BuildMode::Wall;
+        assert!(!game.try_build(tile_center(spot)));
+        // Clicking it again in its own mode cancels and refunds everything.
+        game.build_mode = BuildMode::House;
+        assert!(game.try_build(tile_center(spot)));
+        assert!(game.build_sites().is_empty());
+        assert_eq!((game.wood, game.stone, game.money), (50, 50, 50));
+    }
+
+    #[test]
+    fn autonomous_builders_raise_houses_in_marked_zones() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        game.wood = 1000;
+        game.stone = 1000;
+        game.money = 1000;
+        let center = game.start_center();
+        let anchor = (center.x.floor() as i32, center.y.floor() as i32);
+        game.build_mode = BuildMode::AutoZone;
+        assert!(game.try_build(tile_center(anchor)));
+        assert_eq!(game.auto_zones().len(), 1);
+
+        // The switch is off, so no orders appear on their own.
+        let sim = (anchor.0 - 24, anchor.1 - 24, anchor.0 + 24, anchor.1 + 24);
+        for _ in 0..60 {
+            game.update(0.1, sim);
+        }
+        assert!(
+            game.build_sites().is_empty(),
+            "builders ordered a house without permission"
+        );
+
+        // Flip it on with a civilian at hand, and the zone grows a house.
+        game.auto_build = true;
+        let houses0 = game.player_houses().len();
+        game.update(0.1, sim);
+        let site = game
+            .build_sites()
+            .first()
+            .expect("the zone should order a house")
+            .tile;
+        let start = stand_tile(&game.world, 0, site).expect("the site must be workable");
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Civilian, start));
+        let mut grew = false;
+        for _ in 0..1200 {
+            game.update(0.1, sim);
+            if game.player_houses().len() > houses0 {
+                grew = true;
+                break;
+            }
+        }
+        assert!(grew, "autonomous builders never raised a house in the zone");
+
+        // Clicking inside the zone again clears it.
+        game.build_mode = BuildMode::AutoZone;
+        assert!(game.try_build(tile_center(anchor)));
+        assert!(game.auto_zones().is_empty());
+    }
+
+    #[test]
+    fn builder_state_survives_a_save() {
+        let mut game = Game::new(1);
+        game.wood = 100;
+        game.stone = 100;
+        game.money = 100;
+        let spot = find_house_spot(&game);
+        game.build_mode = BuildMode::House;
+        assert!(game.try_build(tile_center(spot)));
+        game.build_mode = BuildMode::AutoZone;
+        assert!(game.try_build(tile_center(spot)));
+        game.auto_build = true;
+
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+        assert!(loaded.auto_build);
+        assert_eq!(loaded.auto_zones(), game.auto_zones());
+        assert_eq!(loaded.build_sites().len(), 1);
+        assert_eq!(loaded.build_sites()[0].tile, spot);
+        assert!(loaded.build_sites()[0].kind == SiteKind::House);
+        assert_eq!(
+            (loaded.wood, loaded.stone, loaded.money),
+            (game.wood, game.stone, game.money),
+            "the reserved cost must ride along with the site"
+        );
+    }
+
     #[test]
     fn naval_cannon_fire_hits_the_right_targets() {
         let mut game = Game::new(1);
@@ -4923,7 +5661,7 @@ mod tests {
         // A navy shell cuts down an enemy ashore and tallies the kill.
         let defeated0 = game.enemies_defeated;
         game.entities
-            .push(Entity::new(Faction::Enemy, Job::Farmer, (40, 0)));
+            .push(Entity::new(Faction::Enemy, Job::Civilian, (40, 0)));
         let before = game.entities.len();
         game.cannonballs.push(ball(tile_center((40, 0)), false));
         game.update_cannonballs(0.01);
@@ -5139,7 +5877,7 @@ mod tests {
             .push(Entity::new(Faction::Player, Job::Knight, house));
         game.survey_villages();
         let v = home_village(&game);
-        assert_eq!((v.knights, v.farmers), (1, 0));
+        assert_eq!((v.knights, v.civilians), (1, 0));
         assert!(!v.threatened);
         assert!(game.alerts().is_empty());
 
@@ -5184,14 +5922,14 @@ mod tests {
     }
 
     #[test]
-    fn offscreen_farmers_keep_gathering() {
+    fn offscreen_civilians_keep_gathering() {
         let mut game = Game::new(1);
         // Keep the economy pure: no knights, no enemies to raid the workers.
         game.entities
-            .retain(|e| e.faction == Faction::Player && e.job == Job::Farmer);
+            .retain(|e| e.faction == Faction::Player && e.job == Job::Civilian);
         let wood0 = game.wood;
         let stone0 = game.stone;
-        // Simulate with the view parked far away, so the capital's farmers are
+        // Simulate with the view parked far away, so the capital's civilians are
         // all off-screen and only the rotating catch-up batches advance them.
         let sim = (5000, 5000, 5010, 5010);
         for _ in 0..600 {
@@ -5199,7 +5937,7 @@ mod tests {
         }
         assert!(
             game.wood + game.stone > wood0 + stone0,
-            "off-screen farmers must keep stocking the pile"
+            "off-screen civilians must keep stocking the pile"
         );
     }
 
@@ -5242,8 +5980,8 @@ mod tests {
     fn spawns_go_to_villages_with_room() {
         let mut game = Game::new(1);
         game.entities.clear();
-        // Stuff one enemy village to its cap (with farmers, so the global
-        // farmer gate stays open) and leave the others empty.
+        // Stuff one enemy village to its cap (with civilians, so the global
+        // civilian gate stays open) and leave the others empty.
         let full = cluster(&game.world.enemy_house_tiles)
             .into_iter()
             .next()
@@ -5252,7 +5990,7 @@ mod tests {
         for _ in 0..ENEMY_VILLAGE_POP {
             if let Some(t) = adjacent_walkable(&game.world, full[0].0, full[0].1) {
                 game.entities
-                    .push(Entity::new(Faction::Enemy, Job::Farmer, t));
+                    .push(Entity::new(Faction::Enemy, Job::Civilian, t));
             }
         }
         game.survey_villages();

@@ -32,12 +32,16 @@ both natively and in the browser (via WebGL) using **Trunk**.
   captures the seed, stockpile, stats, every unit, and all edited chunks
   (buildings, bridges, depleted resources). Native builds write a file
   (`kingdom_save.dat`); the web build stores the blob in **IndexedDB**.
-- **Farmers** walk to the nearest reachable resource, then **chop wood** and
-  **mine stone** (with a swing animation). Everything they gather goes into your
-  shared stockpile.
+- **Civilians** take up whichever job the realm needs: **farmers** walk to the
+  nearest reachable resource and chop wood or quarry stone (with a swing
+  animation), **miners** work your bottomless mines, and **builders** walk to
+  your construction orders and put the structures up. Everything they gather
+  goes into your shared stockpile.
 - **Knights** seek out and **attack** the enemy faction. Both sides take damage
   in melee; HP bars appear above wounded units. With no foe left in the field
-  they **press the assault on enemy huts and walls** instead of idling. Set a
+  they **press the assault on enemy huts and walls** instead of idling. When the
+  only way to a target is across water, they **lay their own bridges** as they
+  march (3 wood a tile, no gold: they're already paid for serving). Set a
   **rally flag** (left-click in rally mode; right-click to clear) to pull them to
   a point.
 - **Three factions** (you = blue, enemy = red, allies = green). The **enemy** is
@@ -57,15 +61,16 @@ both natively and in the browser (via WebGL) using **Trunk**.
   Every village supports its own population (more houses, more people), and
   alerts plus the Realm panel keep you posted on trouble far away.
 - **Priorities.** Toggle **Agriculture / Military** to bias which workers your
-  houses raise, and **Balanced / Wood / Stone** to steer what farmers gather.
+  houses raise, and **Balanced / Wood / Stone** to steer what civilians gather.
 - **Proclaim a draft.** Need soldiers now? Declare a draft and, for a short
-  spell, your **farmers spontaneously take up arms as knights**. These levies
-  serve on credit, so even a broke realm can raise them, while a core of farmers
-  is always spared. Once the realm is quiet again, each survivor is paid and goes
-  back to farming. Any you can't pay will desert.
+  spell, your **civilians spontaneously take up arms as knights**. These levies
+  serve on credit, so even a broke realm can raise them, while a core of
+  civilians is always spared. Once the realm is quiet again, each survivor is
+  paid and goes back to work. Any you can't pay will desert.
 - **Economy.** Alongside wood and stone you keep a purse of **gold**. You start
   with some seed gold; every new **knight** costs gold to arm (a broke village
-  raises a free farmer instead), and most structures cost gold too.
+  raises a free civilian instead), and most structures cost gold too, the
+  builder's pay included.
 - **Trade.** Load wood and stone onto a **cargo ship** and left-click open water
   **in your harbor** (ships launch only from near your village) to send it off.
   It charts a water route to the **nearest allied coast** (never crossing land)
@@ -79,16 +84,23 @@ both natively and in the browser (via WebGL) using **Trunk**.
   ashore with cannonballs**, holding **off in the water** so it never beaches.
   Warships have a hull bar and can be sunk by pirate fire, so escort convoys with
   a few.
-- **Building.** Left-click to build:
-  - a **House** on open grass (wood + stone + gold), only *next to your existing
-    village*, so your territory grows organically. Houses raise your population
-    cap and spawn new workers (while you have 4+ farmers).
-  - a **Bridge** on open water (wood), which makes that tile walkable.
+- **Building.** Left-click places a **construction order**: the cost (builder's
+  pay included) is set aside, a ghost marks the site, and a civilian walks over
+  and builds it over a few real seconds. Clicking a pending site cancels and
+  refunds it. The orders:
+  - a **House** on open grass (wood + stone + gold), within **20 tiles of a
+    house you own**, so your territory grows organically while leaving room to
+    plan ahead. Houses raise your population cap and spawn new workers (while
+    you have 4+ civilians).
+  - a **Bridge** on open water (wood, no gold), which makes that tile walkable.
   - a **Mine** on open ground (stone + gold): a bottomless stone source, worked
-    by up to four farmers at once.
+    by up to four miners at once.
   - a **Wall** (wood + stone + gold): a defensive blocker units path around.
-  - a **Hut** (click a tree, gold). A knight builds it, and it shelters farmers from
-    raids, and knights rush to defend an attacked one.
+  - a **Hut** (click a tree, gold). It shelters civilians from raids, and
+    knights rush to defend an attacked one.
+  - a **Builder zone** (free): mark an area and flip the autonomous-building
+    switch, and your builders keep raising houses there on their own while the
+    stockpile lasts.
 - Units navigate with grid **pathfinding** (BFS) and treat water, buildings and
   resource nodes as obstacles, routing around them or across bridges.
 

@@ -11,10 +11,11 @@ use winit::window::Window;
 
 use crate::atlas::MapColors;
 use crate::game::{
-    AlertKind, BRIDGE_WOOD_COST, BuildMode, Faction, Game, GatherPriority, HOUSE_GOLD_COST,
-    HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST, KNIGHT_GOLD_COST, LEVY_GOLD_PAY,
-    MINE_GOLD_COST, MINE_STONE_COST, Priority, STONE_PRICE, WALL_GOLD_COST, WALL_STONE_COST,
-    WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
+    AlertKind, BRIDGE_WOOD_COST, BUILD_NEAR_RADIUS, BUILDER_WAGE, BuildMode, Faction, Game,
+    GatherPriority, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST,
+    KNIGHT_GOLD_COST, LEVY_GOLD_PAY, MINE_GOLD_COST, MINE_STONE_COST, Priority, STONE_PRICE,
+    WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST,
+    WARSHIP_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -263,6 +264,10 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 game.population(),
                 game.pop_cap()
             ));
+            let (farming, mining, building) = game.role_counts();
+            ui.small(format!(
+                "Civilians: {farming} farming, {mining} mining, {building} building"
+            ));
             ui.label(format!("Enemies defeated: {}", game.enemies_defeated));
             ui.label(format!("Units lost: {}", game.units_lost));
             ui.separator();
@@ -317,17 +322,25 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 });
             }
             ui.small(format!(
-                "Draft: farmers take up arms for free. Once the realm is quiet, each \
-                 survivor is paid {LEVY_GOLD_PAY} gold and goes back to farming. \
+                "Draft: civilians take up arms for free. Once the realm is quiet, each \
+                 survivor is paid {LEVY_GOLD_PAY} gold and goes back to work. \
                  Any you can't pay will desert."
             ));
             ui.separator();
 
             ui.heading("Build (left-click)");
+            ui.small(format!(
+                "A click places an order; a civilian walks over and builds it. Gold \
+                 costs include the builder's {BUILDER_WAGE} gold pay (bridges are free of \
+                 it). Click a pending site to cancel and refund it."
+            ));
             ui.radio_value(
                 &mut game.build_mode,
                 BuildMode::House,
-                format!("House  ({HOUSE_WOOD_COST} wood, {HOUSE_STONE_COST} stone, {HOUSE_GOLD_COST} gold)"),
+                format!(
+                    "House  ({HOUSE_WOOD_COST} wood, {HOUSE_STONE_COST} stone, {} gold)",
+                    HOUSE_GOLD_COST + BUILDER_WAGE
+                ),
             );
             ui.radio_value(
                 &mut game.build_mode,
@@ -339,7 +352,10 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 BuildMode::Mine,
                 (
                     icon(ui, icons::PICKAXE),
-                    format!("Mine  ({MINE_STONE_COST} stone, {MINE_GOLD_COST} gold)"),
+                    format!(
+                        "Mine  ({MINE_STONE_COST} stone, {} gold)",
+                        MINE_GOLD_COST + BUILDER_WAGE
+                    ),
                 ),
             );
             ui.radio_value(
@@ -347,7 +363,10 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 BuildMode::Wall,
                 (
                     icon(ui, icons::BRICK_WALL),
-                    format!("Wall  ({WALL_WOOD_COST} wood, {WALL_STONE_COST} stone, {WALL_GOLD_COST} gold)"),
+                    format!(
+                        "Wall  ({WALL_WOOD_COST} wood, {WALL_STONE_COST} stone, {} gold)",
+                        WALL_GOLD_COST + BUILDER_WAGE
+                    ),
                 ),
             );
             ui.radio_value(
@@ -355,9 +374,22 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 BuildMode::Hut,
                 (
                     icon(ui, icons::TENT),
-                    format!("Hut  (click a tree; {HUT_GOLD_COST} gold)"),
+                    format!("Hut  (click a tree; {} gold)", HUT_GOLD_COST + BUILDER_WAGE),
                 ),
             );
+            ui.radio_value(
+                &mut game.build_mode,
+                BuildMode::AutoZone,
+                (
+                    icon(ui, icons::MAP),
+                    "Builder zone  (click to mark or clear an area)",
+                ),
+            );
+            ui.checkbox(
+                &mut game.auto_build,
+                "Let builders build on their own in zones",
+            );
+            ui.small("While this is on, builders keep raising houses inside your zones.");
             ui.radio_value(
                 &mut game.build_mode,
                 BuildMode::Rally,
@@ -436,17 +468,21 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             egui::CollapsingHeader::new("Help")
                 .default_open(false)
                 .show(ui, |ui| {
-                ui.small("Houses must be built next to your village.");
-                ui.small("Houses raise new workers only while you have 4 or more farmers.");
                 ui.small(format!(
-                    "Each new knight costs {KNIGHT_GOLD_COST} gold; a broke village raises a farmer instead."
+                    "Structures go up to {BUILD_NEAR_RADIUS} tiles from a house you own."
+                ));
+                ui.small("Houses raise new workers only while you have 4 or more civilians.");
+                ui.small(format!(
+                    "Each new knight costs {KNIGHT_GOLD_COST} gold; a broke village raises a civilian instead."
                 ));
                 ui.small("Trade: load a ship on the coast and it sails to an allied shore for gold.");
                 ui.small("Allies fight the enemy on their own, but never join your battles.");
-                ui.small("Farmers gather and knights defend.");
-                ui.small("Farmers replant trees and mine caves once resources run dry.");
-                ui.small("Mines never run out, but only 4 farmers can work one at a time.");
-                ui.small("Huts shelter farmers from raids; knights rush to defend an attacked one.");
+                ui.small("Civilians farm, mine, and build as needed; knights defend.");
+                ui.small("Builds take a few seconds; the builder's pay is part of the cost.");
+                ui.small("Civilians replant trees and mine caves once resources run dry.");
+                ui.small("Mines never run out, but only 4 miners can work one at a time.");
+                ui.small("Huts shelter civilians from raids; knights rush to defend an attacked one.");
+                ui.small("Knights lay their own bridges (wood, no gold) when water blocks their way.");
                 ui.small("Rally: knights drop combat and rush the flag; it clears on arrival.");
                 ui.small("Right-click clears the rally flag.");
                 ui.small("Pan with WASD or the arrow keys; zoom with Q and E.");
@@ -727,7 +763,7 @@ fn realm_ui(
                 .filter(|v| v.faction == Faction::Player)
                 .collect();
             mine.sort_by(|a, b| {
-                let rank = |v: &crate::game::Village| (!v.threatened, v.knights + v.farmers > 0);
+                let rank = |v: &crate::game::Village| (!v.threatened, v.knights + v.civilians > 0);
                 rank(a).cmp(&rank(b)).then(
                     a.center
                         .distance_squared(view.center)
@@ -757,7 +793,7 @@ fn realm_ui(
                                         v.pop,
                                         v.cap,
                                         plural(v.knights, "knight", "knights"),
-                                        plural(v.farmers, "farmer", "farmers"),
+                                        plural(v.civilians, "civilian", "civilians"),
                                     ));
                                     if v.threatened {
                                         let warn = icon(ui, icons::TRIANGLE_ALERT).tint(ALARM);
@@ -765,7 +801,7 @@ fn realm_ui(
                                             warn,
                                             RichText::new("Under attack").color(ALARM),
                                         )));
-                                    } else if v.knights + v.farmers == 0 {
+                                    } else if v.knights + v.civilians == 0 {
                                         ui.label(
                                             RichText::new("No defenders, easy to take")
                                                 .small()

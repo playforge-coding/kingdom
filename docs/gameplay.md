@@ -5,9 +5,9 @@ comments: true
 # Gameplay
 
 Kingdom is a hands-off builder. You don't pilot a hero. You set priorities,
-place buildings, and let your farmers and knights act on their own AI. Your job
-is to grow a self-sustaining settlement and outlast the enemy camps sharing your
-continent.
+place build orders, and let your civilians and knights act on their own AI. Your
+job is to grow a self-sustaining settlement and outlast the enemy camps sharing
+your continent.
 
 ## Worlds and seeds
 
@@ -26,7 +26,7 @@ See **[The World](world.md)** for how a seed becomes terrain.
 ## Your starting position
 
 You begin controlling **a single village** on the **coast** near the origin, a
-small cluster of houses with a handful of **farmers** to gather and **knights**
+small cluster of houses with a handful of **civilians** to work and **knights**
 to defend. It sits right by the sea, giving your cargo ships a home port. That
 village is the only settlement you own; everything grows outward from it.
 
@@ -52,18 +52,22 @@ Three factions share the world:
 
 ## The core loop
 
-1. **Gather.** Farmers walk to the nearest reachable resource and chop wood or
+1. **Gather.** Civilians walk to the nearest reachable resource and chop wood or
    mine stone. Everything lands in your shared **stockpile**.
 2. **Trade.** Load surplus wood and stone onto a [cargo ship](building.md#ship-goods)
    and launch it from your **harbor** to the nearest **allied coast** to sell for
    **:lucide-coins: gold** (stone sells for more). Mind the open water, though:
    **pirates** prowl the ocean and will sink a cargo ship they catch.
 3. **Build.** Spend wood, stone, and gold on [houses, bridges, mines, walls, and huts](building.md).
-   Houses raise their own village's population cap and periodically spawn new
-   workers, so each settlement grows on its own.
-4. **Grow.** More houses mean more population, and so more farmers and knights.
+   A click places an order; a civilian takes up the **builder's** job, walks
+   over, and puts the structure up over a few seconds (the builder's pay is part
+   of the cost). Houses raise their own village's population cap and
+   periodically spawn new workers, so each settlement grows on its own. Mark
+   [builder zones](building.md#builder-zones) and flip the autonomous-building
+   switch to let builders raise houses there without further clicks.
+4. **Grow.** More houses mean more population, and so more civilians and knights.
    You start with some **seed gold**, but every new **knight** costs gold to arm. A
-   broke village raises a (free) farmer instead, so keep the trade routes running.
+   broke village raises a (free) civilian instead, so keep the trade routes running.
 5. **Defend & expand.** Keep knights around to fend off raids, then push into
    enemy territory and take their villages.
 
@@ -71,9 +75,9 @@ Use the **Priority** and **Gather** toggles in the HUD to steer this loop:
 lean **Agriculture** while you're building up, swing to **Military** when a camp
 starts pressing you.
 
-!!! note "Houses only raise workers while you have 4 or more farmers"
+!!! note "Houses only raise workers while you have 4 or more civilians"
     New workers are spawned by houses, but only while your economy can support
-    it, so you need at least a few farmers gathering before the population grows.
+    it, so you need at least a few civilians gathering before the population grows.
 
 ## Capturing villages
 

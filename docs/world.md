@@ -56,10 +56,10 @@ build yourself or by **[ship](building.md#warship-the-navy)**.
 
 - **Trees** and **rocks** occupy a full tile and act as obstacles, so units path
   around them.
-- Farmers **deplete** nodes as they gather, then move on. They **replant trees**
-  and fall back to **mines** when the easy pickings are gone.
+- Civilians **deplete** nodes as they gather, then move on. They **replant
+  trees** and fall back to **mines** when the easy pickings are gone.
 - A player-built **[mine](building.md#mine)** is a bottomless stone source (worked
-  by up to four farmers at once) for when natural ore runs low.
+  by up to four miners at once) for when natural ore runs low.
 
 ## Settlements
 
