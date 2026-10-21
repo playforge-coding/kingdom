@@ -250,6 +250,18 @@ pub const STONE_PRICE: u32 = 5;
 /// How fast a laden cargo ship sails out to sea (tiles/second).
 const SHIP_SPEED: f32 = 3.2;
 
+// Autonomous trade: with the switch on, the harbor keeps dispatching laden
+// cargo ships on its own.
+/// Seconds between autonomous-trade checks, which also paces the dispatches.
+const AUTO_TRADE_INTERVAL: f32 = 20.0;
+/// Most cargo ships at sea at once while the autonomous-trade switch is on.
+/// Manual launches count toward it, so the fleet can't balloon.
+const MAX_AUTO_TRADE_SHIPS: usize = 3;
+/// Open-water tiles tried for a sea route when picking the harbor's launch
+/// spot. Nearby tiles share the same water, so a route that fails from a few
+/// of them would keep failing from the rest.
+const AUTO_DOCK_TRIES: usize = 6;
+
 // Pirates: a rare hazard that patrols the open ocean and shells cargo ships.
 /// Most pirate ships prowling at once, kept small so they stay a rare menace.
 const MAX_PIRATES: usize = 3;
@@ -309,6 +321,12 @@ const NAVY_PATH_BUDGET: usize = 8_000;
 /// it was when the route was laid, so it commits to a steady heading and only
 /// recomputes when a pirate has genuinely moved on.
 const WARSHIP_REPLAN_MOVE: f32 = 5.0;
+/// A warship within this range of the navy rally flag counts as arrived, which
+/// lifts the flag for the whole fleet (the ships' `RALLY_ARRIVE_RADIUS`).
+const NAVY_RALLY_ARRIVE: f32 = 6.0;
+/// Seconds between course replans while answering a navy rally. Long, because
+/// the flag never moves and a failed plan is a wide, pricey search.
+const NAVY_RALLY_REPLAN: f32 = 6.0;
 /// How far around an idle warship to generate the sea when planning a patrol, so
 /// its search for the open ocean has real tiles to find.
 const PATROL_SCAN: i32 = 48;
@@ -537,6 +555,9 @@ pub enum BuildMode {
     /// Left-click open water by the village to lay down a warship: it patrols
     /// the coast, hunts pirates, and shells enemies ashore.
     Warship,
+    /// Left-click open water to plant a navy rally flag: warships drop their
+    /// hunts and patrols and sail to it. The flag clears once one arrives.
+    NavyRally,
 }
 
 /// What a construction site will become once a builder finishes it.
@@ -762,6 +783,28 @@ impl Alert {
     }
 }
 
+/// A one-click action an alert can offer, shown as a button on its toast. The
+/// wiring is modular: to give another alert kind a button, return a response
+/// from `AlertKind::response` and handle the new variant in
+/// `Game::can_respond` (which gates the button) and `Game::respond_to_alert`
+/// (which carries it out).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AlertResponse {
+    /// Lay down a warship in the home harbor at the usual cost and rally the
+    /// whole navy to where the alert happened.
+    SummonWarship,
+}
+
+impl AlertKind {
+    /// The one-click response this kind of alert offers, if any.
+    pub fn response(self) -> Option<AlertResponse> {
+        match self {
+            AlertKind::CargoSunk => Some(AlertResponse::SummonWarship),
+            _ => None,
+        }
+    }
+}
+
 /// Which kind of villager the player's houses favor raising.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
@@ -811,6 +854,10 @@ pub struct Game {
     pub ship_stone: u32,
     /// Cargo ships currently at sea, sailing out to sell their goods.
     ships: Vec<Ship>,
+    /// The switch letting the harbor send laden cargo ships out on its own.
+    pub auto_trade: bool,
+    /// Countdown to the next autonomous-trade check. Transient.
+    trade_timer: f32,
     /// The player's navy: warships patrolling the water.
     warships: Vec<Warship>,
     /// Pirate raiders prowling the open ocean (transient, not saved).
@@ -829,6 +876,10 @@ pub struct Game {
     /// `None` for a flag the player planted (it calls every knight); for an
     /// auto-raised flag, only knights within this range answer. Transient.
     rally_response: Option<f32>,
+    /// Waypoint the navy sails to, overriding hunts and patrols; cleared once
+    /// a warship arrives. Planted by the player or raised by the
+    /// summon-warship alert response. Transient.
+    pub navy_rally: Option<Vec2>,
     /// Round-robin position for stepping off-screen entities. Transient.
     offscreen_cursor: usize,
     /// Seconds left on a proclaimed draft (0 when none is in force). While it
@@ -1047,6 +1098,8 @@ impl Game {
             ship_wood: 20,
             ship_stone: 20,
             ships: Vec::new(),
+            auto_trade: false,
+            trade_timer: 0.0,
             warships: Vec::new(),
             pirates: Vec::new(),
             cannonballs: Vec::new(),
@@ -1058,6 +1111,7 @@ impl Game {
             units_lost: 0,
             rally_point: None,
             rally_response: None,
+            navy_rally: None,
             offscreen_cursor: 0,
             draft_timer: 0.0,
             levy_quiet: 0.0,
@@ -1188,6 +1242,7 @@ impl Game {
         self.survey_villages();
         self.handle_spawns(dt);
         self.plan_auto_builds(dt);
+        self.plan_auto_trade(dt);
         self.run_draft(dt);
         self.stand_down_levies(dt);
         self.grow_saplings(dt);
@@ -1764,6 +1819,9 @@ impl Game {
     /// leaving the water. With nothing to fight it makes for the open ocean and
     /// patrols the deep sea.
     fn update_navy(&mut self, dt: f32) {
+        // Set once a warship reaches the navy rally flag, lifting it for the
+        // whole fleet after the loop (mirrors the knights' flag).
+        let mut rally_arrived = false;
         for i in 0..self.warships.len() {
             self.warships[i].bob += dt;
             self.warships[i].reload -= dt;
@@ -1802,7 +1860,35 @@ impl Game {
             // target across an inlet no longer sends it circling the shore, and
             // it commits to a heading instead of twitching every frame.
             let holding = self.warships[i].path_cursor >= self.warships[i].path.len();
-            if let Some(t) = target {
+            if let Some(r) = self.navy_rally {
+                // A rally flag overrides the hunt: make for the flag (the guns
+                // stay hot on the way; see the firing block below). Close
+                // enough counts as arrived, which lifts the flag after the loop.
+                if (r - wp).length() <= NAVY_RALLY_ARRIVE {
+                    rally_arrived = true;
+                    self.warships[i].path.clear();
+                    self.warships[i].path_cursor = 0;
+                } else {
+                    // Plan toward a fresh flag at once; after that the flag
+                    // never moves, so only retry on the long stuck-timeout.
+                    let new_flag = (r - self.warships[i].plan_pos).length() > 0.5;
+                    if new_flag || (holding && self.warships[i].repath <= 0.0) {
+                        self.warships[i].repath = NAVY_RALLY_REPLAN;
+                        self.warships[i].plan_pos = r;
+                        // The flag can be far across the map, so this search
+                        // gets a voyage-sized budget, not the local chase one.
+                        let raw = plan_course_near(
+                            &self.world,
+                            wt,
+                            r,
+                            NAVY_RALLY_ARRIVE - 1.0,
+                            SHIP_PATH_BUDGET,
+                        );
+                        self.warships[i].path = smooth_water_path(&self.world, wt, &raw);
+                        self.warships[i].path_cursor = 0;
+                    }
+                }
+            } else if let Some(t) = target {
                 // Hysteresis: hold a little past firing range once stopped, so the
                 // ship doesn't flip-flop between chasing and holding at the edge.
                 let hold_dist = if holding {
@@ -1856,6 +1942,9 @@ impl Game {
                     self.warships[i].reload = WARSHIP_RELOAD;
                 }
             }
+        }
+        if rally_arrived {
+            self.navy_rally = None;
         }
     }
 
@@ -2138,6 +2227,68 @@ impl Game {
         if i < self.alerts.len() {
             self.alerts.remove(i);
         }
+    }
+
+    /// Can the realm take `response` right now? A toast only shows its action
+    /// button while this is true, so the button never offers what the
+    /// stockpile can't cover.
+    pub fn can_respond(&self, response: AlertResponse) -> bool {
+        match response {
+            AlertResponse::SummonWarship => {
+                self.wood >= WARSHIP_WOOD_COST
+                    && self.stone >= WARSHIP_STONE_COST
+                    && self.money >= WARSHIP_GOLD_COST
+            }
+        }
+    }
+
+    /// Take alert `i`'s one-click action; the toast is dismissed once the
+    /// action actually went through.
+    pub fn respond_to_alert(&mut self, i: usize) {
+        let Some(alert) = self.alerts.get(i).copied() else {
+            return;
+        };
+        let Some(response) = alert.kind.response() else {
+            return;
+        };
+        if !self.can_respond(response) {
+            return;
+        }
+        let done = match response {
+            AlertResponse::SummonWarship => self.summon_warship(alert.pos),
+        };
+        if done {
+            self.alerts.remove(i);
+        }
+    }
+
+    /// Summon a warship against a threat at `pos`: lay one down on open water
+    /// in the home harbor at the usual cost and rally the whole navy to the
+    /// spot. False (and nothing spent) if no open water is free by a house to
+    /// launch from.
+    fn summon_warship(&mut self, pos: Vec2) -> bool {
+        let Some(spot) = self.harbor_water() else {
+            return false;
+        };
+        self.launch_warship(spot);
+        self.navy_rally = Some(pos);
+        true
+    }
+
+    /// The first open-water tile in the home harbor (within `SHIP_NEAR_RADIUS`
+    /// of one of the player's houses), where a summoned warship can launch.
+    fn harbor_water(&self) -> Option<Tile> {
+        for &(hx, hy) in &self.player_house_tiles {
+            for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                    let t = (hx + dx, hy + dy);
+                    if self.world.is_open_water(t.0, t.1) {
+                        return Some(t);
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn player_houses(&self) -> &[Tile] {
@@ -2534,23 +2685,7 @@ impl Game {
                 else {
                     return false;
                 };
-                self.wood -= wood;
-                self.stone -= stone;
-                let reward = wood * WOOD_PRICE + stone * STONE_PRICE;
-                let start = tile_center((x, y));
-                let facing = path
-                    .first()
-                    .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
-                self.ships.push(Ship {
-                    pos: start,
-                    path,
-                    path_cursor: 0,
-                    wood,
-                    stone,
-                    reward,
-                    bob: 0.0,
-                    facing,
-                });
+                self.dispatch_ship((x, y), path, wood, stone);
                 true
             }
             BuildMode::Warship => {
@@ -2564,23 +2699,122 @@ impl Game {
                 {
                     return false;
                 }
-                self.wood -= WARSHIP_WOOD_COST;
-                self.stone -= WARSHIP_STONE_COST;
-                self.money -= WARSHIP_GOLD_COST;
-                self.warships.push(Warship {
-                    pos: tile_center((x, y)),
-                    facing: Dir::Down,
-                    path: Vec::new(),
-                    path_cursor: 0,
-                    plan_pos: Vec2::ZERO,
-                    repath: 0.0,
-                    reload: WARSHIP_RELOAD,
-                    bob: 0.0,
-                    hp: WARSHIP_MAX_HP,
-                });
+                self.launch_warship((x, y));
+                true
+            }
+            BuildMode::NavyRally => {
+                // Plant (or lift) the navy rally flag on open water: warships
+                // drop their hunts and patrols and sail to it, and the flag
+                // clears once one arrives. Clicking the flagged tile lifts it.
+                if !self.world.is_open_water(x, y) {
+                    return false;
+                }
+                let here = tile_center((x, y));
+                self.navy_rally = if self.navy_rally == Some(here) {
+                    None
+                } else {
+                    Some(here)
+                };
                 true
             }
         }
+    }
+
+    /// Load and launch a cargo ship from `port` along `path`, debiting the
+    /// stockpile; its reward is banked when it docks. The caller has already
+    /// validated the launch spot, the route, and the stockpile.
+    fn dispatch_ship(&mut self, port: Tile, path: Vec<Tile>, wood: u32, stone: u32) {
+        self.wood -= wood;
+        self.stone -= stone;
+        let reward = wood * WOOD_PRICE + stone * STONE_PRICE;
+        let start = tile_center(port);
+        let facing = path
+            .first()
+            .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
+        self.ships.push(Ship {
+            pos: start,
+            path,
+            path_cursor: 0,
+            wood,
+            stone,
+            reward,
+            bob: 0.0,
+            facing,
+        });
+    }
+
+    /// Debit a warship's cost and set its hull in the water at `spot`. The
+    /// caller has already checked the spot and the stockpile.
+    fn launch_warship(&mut self, spot: Tile) {
+        self.wood -= WARSHIP_WOOD_COST;
+        self.stone -= WARSHIP_STONE_COST;
+        self.money -= WARSHIP_GOLD_COST;
+        self.warships.push(Warship {
+            pos: tile_center(spot),
+            facing: Dir::Down,
+            path: Vec::new(),
+            path_cursor: 0,
+            plan_pos: Vec2::ZERO,
+            repath: 0.0,
+            reload: WARSHIP_RELOAD,
+            bob: 0.0,
+            hp: WARSHIP_MAX_HP,
+        });
+    }
+
+    /// While the autonomous-trade switch is on, keep the harbor busy: on each
+    /// check, if the fleet at sea is small enough and the stockpile covers the
+    /// configured cargo load in full, launch a laden ship on its own. Only
+    /// full loads go out, so autonomous trade skims the surplus instead of
+    /// scraping the stockpile bare.
+    fn plan_auto_trade(&mut self, dt: f32) {
+        self.trade_timer -= dt;
+        if self.trade_timer > 0.0 {
+            return;
+        }
+        self.trade_timer = AUTO_TRADE_INTERVAL;
+        if !self.auto_trade || self.ships.len() >= MAX_AUTO_TRADE_SHIPS {
+            return;
+        }
+        let (wood, stone) = (self.ship_wood, self.ship_stone);
+        if wood + stone == 0 || self.wood < wood || self.stone < stone {
+            return;
+        }
+        let Some((port, path)) = self.plan_harbor_route() else {
+            // No launch spot, or no route to an ally: back off for a few
+            // checks, since the failed route searches are the expensive part.
+            self.trade_timer = AUTO_TRADE_INTERVAL * 3.0;
+            return;
+        };
+        self.dispatch_ship(port, path, wood, stone);
+    }
+
+    /// A spot the harbor can launch a cargo ship from on its own: open water
+    /// within `SHIP_NEAR_RADIUS` of one of the player's houses that has a sea
+    /// route to an allied coast, plus that route. Only a handful of water
+    /// tiles are tried, since the harbor's tiles share the same water and a
+    /// route that fails from a few of them would keep failing from the rest.
+    fn plan_harbor_route(&self) -> Option<(Tile, Vec<Tile>)> {
+        let mut tried = 0;
+        for &(hx, hy) in &self.player_house_tiles {
+            for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                    let t = (hx + dx, hy + dy);
+                    if !self.world.is_open_water(t.0, t.1) {
+                        continue;
+                    }
+                    if let Some(path) = plan_sea_route(&self.world, t, &self.world.ally_house_tiles)
+                    {
+                        return Some((t, path));
+                    }
+                    tried += 1;
+                    if tried >= AUTO_DOCK_TRIES {
+                        return None;
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Place a construction order of `kind` at `t`, or cancel the pending order
@@ -2791,6 +3025,11 @@ impl Game {
     pub fn clear_rally(&mut self) {
         self.rally_point = None;
         self.rally_response = None;
+    }
+
+    /// Lift the navy rally flag; warships resume hunting and patrolling.
+    pub fn clear_navy_rally(&mut self) {
+        self.navy_rally = None;
     }
 
     /// Proclaim a draft: for the next `DRAFT_DURATION` seconds, civilians may be
@@ -3789,12 +4028,31 @@ fn advance_warship(w: &mut Warship, dt: f32) -> bool {
 /// against the shore. Empty vec: already in a firing spot. Empty on failure too
 /// (target unreachable by water), which simply leaves the ship holding station.
 fn plan_firing_position(world: &World, start: Tile, target: Vec2) -> Vec<Tile> {
-    let reach2 = (WARSHIP_FIRE_RANGE - 1.0).powi(2);
+    plan_course_near(
+        world,
+        start,
+        target,
+        WARSHIP_FIRE_RANGE - 1.0,
+        NAVY_PATH_BUDGET,
+    )
+}
+
+/// BFS a water route from `start` (a water tile) to open water within `reach`
+/// tiles of `target`, exploring at most `budget` tiles. Empty vec: already
+/// there, or unreachable by water, which leaves the ship holding station.
+fn plan_course_near(
+    world: &World,
+    start: Tile,
+    target: Vec2,
+    reach: f32,
+    budget: usize,
+) -> Vec<Tile> {
+    let reach2 = reach * reach;
     let is_goal = |x: i32, y: i32| {
         world.is_open_water(x, y) && (tile_center((x, y)) - target).length_squared() <= reach2
     };
     let passable = |x: i32, y: i32| world.is_open_water(x, y);
-    pathfind::bfs(start, NAVY_PATH_BUDGET, is_goal, passable).unwrap_or_default()
+    pathfind::bfs(start, budget, is_goal, passable).unwrap_or_default()
 }
 
 /// Collapse a tile-by-tile BFS route into a short list of waypoints joined by
@@ -4437,7 +4695,7 @@ fn open_tiles_near(world: &World, cx: i32, cy: i32, r: i32) -> Vec<Tile> {
 // ---------------------------------------------------------------------------
 
 const MAGIC: &[u8; 4] = b"KGDM";
-const VERSION: u8 = 12;
+const VERSION: u8 = 13;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
     b.push(v);
@@ -4586,6 +4844,8 @@ impl Game {
             wi32(&mut b, y);
         }
 
+        // The trade fleet, and the switch letting the harbor dispatch it.
+        wu8(&mut b, self.auto_trade as u8);
         wu32(&mut b, self.ships.len() as u32);
         for s in &self.ships {
             wf32(&mut b, s.pos.x);
@@ -4786,6 +5046,7 @@ impl Game {
             player_bridges.push((r.i32()?, r.i32()?));
         }
 
+        let auto_trade = r.u8()? != 0;
         let scount = r.u32()? as usize;
         let mut ships = Vec::with_capacity(scount);
         for _ in 0..scount {
@@ -4983,6 +5244,8 @@ impl Game {
             ship_wood,
             ship_stone,
             ships,
+            auto_trade,
+            trade_timer: 0.0,
             warships,
             pirates: Vec::new(),
             cannonballs: Vec::new(),
@@ -4994,6 +5257,7 @@ impl Game {
             units_lost,
             rally_point: None,
             rally_response: None,
+            navy_rally: None,
             offscreen_cursor: 0,
             draft_timer: 0.0,
             levy_quiet: 0.0,
@@ -5192,6 +5456,165 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_trade_dispatches_the_configured_load() {
+        for seed in 0..16 {
+            let mut game = Game::new(seed);
+            if find_player_port(&game).is_none() {
+                continue;
+            }
+            // Nobody gathers or fights, so the dispatches below are the only
+            // thing touching the fleet.
+            game.entities.clear();
+            game.ship_wood = 10;
+            game.ship_stone = 0;
+            game.wood = 25;
+            let c = game.start_center();
+            let sim = (
+                c.x as i32 - 40,
+                c.y as i32 - 40,
+                c.x as i32 + 40,
+                c.y as i32 + 40,
+            );
+
+            // Switch off: the harbor launches nothing on its own.
+            for _ in 0..600 {
+                game.update(0.1, sim);
+            }
+            assert!(game.ships().is_empty(), "seed {seed}: launched unbidden");
+
+            // Switch on: a ship goes out with exactly the configured load.
+            game.auto_trade = true;
+            let mut steps = 0;
+            while game.ships().is_empty() && steps < 600 {
+                game.update(0.1, sim);
+                steps += 1;
+            }
+            assert_eq!(game.ships().len(), 1, "seed {seed}: no autonomous launch");
+            let s = &game.ships()[0];
+            assert_eq!((s.wood, s.stone), (10, 0));
+            assert_eq!(s.reward, 10 * WOOD_PRICE);
+            return;
+        }
+        panic!("no test seed had an allied coast");
+    }
+
+    #[test]
+    fn autonomous_trade_waits_for_a_full_load() {
+        // With the stockpile short of the configured load, nothing launches:
+        // autonomous trade skims the surplus, it doesn't scrape the barrel.
+        let mut game = Game::new(3);
+        game.entities.clear();
+        game.auto_trade = true;
+        game.ship_wood = 50;
+        game.ship_stone = 0;
+        game.wood = 10;
+        let c = game.start_center();
+        let sim = (
+            c.x as i32 - 40,
+            c.y as i32 - 40,
+            c.x as i32 + 40,
+            c.y as i32 + 40,
+        );
+        for _ in 0..600 {
+            game.update(0.1, sim);
+        }
+        assert!(game.ships().is_empty());
+        assert_eq!(game.wood, 10);
+    }
+
+    #[test]
+    fn cargo_sunk_alert_summons_a_warship_and_rallies_the_navy() {
+        for seed in 0..16 {
+            let mut game = Game::new(seed);
+            if game.harbor_water().is_none() {
+                continue;
+            }
+            game.wood = WARSHIP_WOOD_COST;
+            game.stone = WARSHIP_STONE_COST;
+            game.money = WARSHIP_GOLD_COST;
+            let wreck = game.start_center() + Vec2::new(60.0, 0.0);
+            game.push_alert(AlertKind::CargoSunk, wreck);
+
+            let r = AlertKind::CargoSunk
+                .response()
+                .expect("a sunk cargo ship offers the summon response");
+            assert!(game.can_respond(r));
+            game.respond_to_alert(0);
+
+            assert_eq!(game.warships().len(), 1, "seed {seed}: no warship summoned");
+            assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
+            assert_eq!(
+                game.navy_rally,
+                Some(wreck),
+                "the navy rallies to the wreck"
+            );
+            assert!(game.alerts().is_empty(), "the toast goes once acted on");
+            // Broke now, so the response is gated off again.
+            assert!(!game.can_respond(r));
+            return;
+        }
+        panic!("no test seed had harbor water");
+    }
+
+    /// Open water a real sail away from `from`: the nearest open-water tile at
+    /// least `range` tiles out, found over water so a ship can actually reach it.
+    fn open_water_at_range(game: &mut Game, from: Tile, range: f32) -> Option<Tile> {
+        let c = tile_center(from);
+        game.world
+            .ensure_region(from.0 - 40, from.1 - 40, from.0 + 40, from.1 + 40);
+        let world = &game.world;
+        pathfind::bfs(
+            from,
+            50_000,
+            |x, y| world.is_open_water(x, y) && (tile_center((x, y)) - c).length() >= range,
+            |x, y| world.is_open_water(x, y),
+        )
+        .and_then(|p| p.last().copied())
+    }
+
+    #[test]
+    fn navy_rally_calls_a_warship_and_lifts_on_arrival() {
+        for seed in 0..16 {
+            let mut game = Game::new(seed);
+            let Some(spot) = game.harbor_water() else {
+                continue;
+            };
+            game.wood = WARSHIP_WOOD_COST;
+            game.stone = WARSHIP_STONE_COST;
+            game.money = WARSHIP_GOLD_COST;
+            game.build_mode = BuildMode::Warship;
+            assert!(game.try_build(tile_center(spot)));
+
+            // A flag out at sea, far enough that arriving means real sailing.
+            let Some(flag) = open_water_at_range(&mut game, spot, 12.0) else {
+                continue;
+            };
+            game.build_mode = BuildMode::NavyRally;
+            assert!(game.try_build(tile_center(flag)));
+            assert_eq!(game.navy_rally, Some(tile_center(flag)));
+
+            game.entities.clear();
+            let sim = (spot.0 - 20, spot.1 - 20, spot.0 + 20, spot.1 + 20);
+            let mut steps = 0;
+            while game.navy_rally.is_some() && steps < 2_000 {
+                game.update(0.1, sim);
+                steps += 1;
+            }
+            assert!(
+                game.navy_rally.is_none(),
+                "seed {seed}: the flag never lifted"
+            );
+            let w = &game.warships()[0];
+            assert!(
+                (w.pos - tile_center(flag)).length() <= NAVY_RALLY_ARRIVE + 1.0,
+                "seed {seed}: the flag lifted before the warship arrived"
+            );
+            return;
+        }
+        panic!("no test seed had harbor water and open sea");
+    }
+
+    #[test]
     fn knight_spawn_needs_gold() {
         // Directly assert the treasury gates knight production: with gold a
         // knight is affordable; drained, the village must fall back to civilians.
@@ -5380,6 +5803,7 @@ mod tests {
             game.money = 321;
             game.ship_wood = 15;
             game.ship_stone = 35;
+            game.auto_trade = true;
             game.build_mode = BuildMode::Ship;
             assert!(game.try_build(tile_center(port)));
             assert_eq!(game.ships().len(), 1);
@@ -5397,6 +5821,7 @@ mod tests {
             assert_eq!(loaded.money, game.money);
             assert_eq!(loaded.ship_wood, 15);
             assert_eq!(loaded.ship_stone, 35);
+            assert!(loaded.auto_trade, "trade switch lost across save");
             assert_eq!(loaded.world.ally_house_tiles.len(), ally_houses);
             assert_eq!(loaded.ships().len(), 1);
             assert_eq!(loaded.ships()[0].reward, game.ships()[0].reward);

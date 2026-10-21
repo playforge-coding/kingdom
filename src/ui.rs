@@ -11,11 +11,11 @@ use winit::window::Window;
 
 use crate::atlas::MapColors;
 use crate::game::{
-    AlertKind, BRIDGE_WOOD_COST, BUILD_NEAR_RADIUS, BUILDER_WAGE, BuildMode, Faction, Game,
-    GatherPriority, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST,
-    KNIGHT_GOLD_COST, LEVY_GOLD_PAY, MINE_GOLD_COST, MINE_STONE_COST, Priority, STONE_PRICE,
-    WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST,
-    WARSHIP_WOOD_COST, WOOD_PRICE,
+    AlertKind, AlertResponse, BRIDGE_WOOD_COST, BUILD_NEAR_RADIUS, BUILDER_WAGE, BuildMode,
+    Faction, Game, GatherPriority, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
+    HUT_GOLD_COST, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, MINE_GOLD_COST, MINE_STONE_COST, Priority,
+    STONE_PRICE, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST,
+    WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -440,6 +440,11 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 ),
             );
             ui.small("Ships sail to the nearest allied coast, banking gold on arrival.");
+            ui.checkbox(
+                &mut game.auto_trade,
+                "Send cargo ships out on their own",
+            );
+            ui.small("While this is on, a ship launches with the load above whenever the stockpile covers it in full.");
             ui.separator();
 
             ui.heading("Navy");
@@ -454,6 +459,17 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 ),
             );
             ui.small("Launch on open water by your village; it hunts pirates and shells enemies ashore.");
+            ui.radio_value(
+                &mut game.build_mode,
+                BuildMode::NavyRally,
+                (icon(ui, icons::FLAG), "Rally warships"),
+            );
+            if game.navy_rally.is_some()
+                && ui.button((icon(ui, icons::X), "Clear navy rally")).clicked()
+            {
+                game.clear_navy_rally();
+            }
+            ui.small("Click open water to call every warship there; the flag lifts when one arrives.");
             ui.separator();
 
             ui.horizontal(|ui| {
@@ -476,6 +492,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                     "Each new knight costs {KNIGHT_GOLD_COST} gold; a broke village raises a civilian instead."
                 ));
                 ui.small("Trade: load a ship on the coast and it sails to an allied shore for gold.");
+                ui.small("Autonomous trade keeps launching ships while the stockpile covers the load.");
                 ui.small("Allies fight the enemy on their own, but never join your battles.");
                 ui.small("Civilians farm, mine, and build as needed; knights defend.");
                 ui.small("Builds take a few seconds; the builder's pay is part of the cost.");
@@ -484,7 +501,9 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 ui.small("Huts shelter civilians from raids; knights rush to defend an attacked one.");
                 ui.small("Knights lay their own bridges (wood, no gold) when water blocks their way.");
                 ui.small("Rally: knights drop combat and rush the flag; it clears on arrival.");
-                ui.small("Right-click clears the rally flag.");
+                ui.small("Navy rally: warships rush their own flag the same way, guns still hot.");
+                ui.small("Right-click clears both rally flags.");
+                ui.small("Some alerts offer a one-click action, like summoning a warship on a sinking.");
                 ui.small("Pan with WASD or the arrow keys; zoom with Q and E.");
                 ui.small("Press M to jump to the overview map and back.");
                 ui.small("Villages off screen keep working and fighting at a slower pace.");
@@ -654,6 +673,9 @@ fn minimap_ui(
     if let Some(r) = game.rally_point {
         painter.circle_stroke(to_screen(r), 3.0, Stroke::new(1.5, CAUTION));
     }
+    if let Some(r) = game.navy_rally {
+        painter.circle_stroke(to_screen(r), 3.0, Stroke::new(1.5, color32(colors.player)));
+    }
 
     let seen = Rect::from_min_max(
         to_screen(view.center - view.half),
@@ -822,6 +844,7 @@ fn realm_ui(
 fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action> {
     let mut action = None;
     let mut dismiss = None;
+    let mut respond = None;
     egui::Area::new(egui::Id::unique("alerts"))
         .anchor(Align2::CENTER_TOP, [0.0, 12.0])
         .show(ctx, |ui| {
@@ -873,6 +896,30 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                     zoom_in: true,
                                 });
                             }
+                            // The alert's one-click action, only while the
+                            // realm can actually afford to take it.
+                            if let Some(r) = alert.kind.response()
+                                && game.can_respond(r)
+                            {
+                                let (glyph, label, hover) = match r {
+                                    AlertResponse::SummonWarship => (
+                                        icons::ANCHOR,
+                                        "Summon warship",
+                                        format!(
+                                            "Lays down a warship in your harbor ({WARSHIP_WOOD_COST} wood, \
+                                             {WARSHIP_STONE_COST} stone, {WARSHIP_GOLD_COST} gold) and \
+                                             rallies the navy to the spot"
+                                        ),
+                                    ),
+                                };
+                                if ui
+                                    .button((icon(ui, glyph), label))
+                                    .on_hover_text(hover)
+                                    .clicked()
+                                {
+                                    respond = Some(i);
+                                }
+                            }
                             if ui.small_button(icon(ui, icons::X)).clicked() {
                                 dismiss = Some(i);
                             }
@@ -881,7 +928,9 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                 });
             }
         });
-    if let Some(i) = dismiss {
+    if let Some(i) = respond {
+        game.respond_to_alert(i);
+    } else if let Some(i) = dismiss {
         game.dismiss_alert(i);
     }
     action

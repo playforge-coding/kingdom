@@ -75,15 +75,22 @@ both natively and in the browser (via WebGL) using **Trunk**.
   **in your harbor** (ships launch only from near your village) to send it off.
   It charts a water route to the **nearest allied coast** (never crossing land)
   and sells the goods for gold on arrival, and **stone fetches more than wood**.
+  Flip the **autonomous-trade switch** and the harbor keeps dispatching laden
+  ships on its own whenever the stockpile covers the configured load in full.
 - **Pirates.** Rare **pirate ships** roam the open ocean, hunt your ships, and
   fire **cannonballs**; a hit **sinks a cargo ship and its cargo**. They keep to
   the deep sea, never enter rivers or lakes, and hold a **standoff** to shell
-  their quarry instead of piling onto it.
+  their quarry instead of piling onto it. A sinking raises an alert as usual,
+  and that alert carries a one-click **Summon warship** button (shown only when
+  you can afford one) that lays a fresh warship down in your harbor and rallies
+  the whole navy to the wreck.
 - **Navy.** Build a **warship** (wood + stone + gold) on the water by your
   village and it fights on its own: it **hunts pirates** and **bombards enemies
   ashore with cannonballs**, holding **off in the water** so it never beaches.
   Warships have a hull bar and can be sunk by pirate fire, so escort convoys with
-  a few.
+  a few. Plant a **navy rally flag** (left-click open water in rally-warships
+  mode) and every warship drops its hunt and sails there, guns still hot; the
+  flag lifts once one arrives, just like the knights' flag.
 - **Building.** Left-click places a **construction order**: the cost (builder's
   pay included) is set aside, a ghost marks the site, and a civilian walks over
   and builds it over a few real seconds. Clicking a pending site cancels and
@@ -112,8 +119,8 @@ both natively and in the browser (via WebGL) using **Trunk**.
 | `E` or `=` (hold) | Zoom in |
 | `Q` or `-` (hold) | Zoom out (far out, the map becomes a flat overview) |
 | `M` | Jump to the overview and back |
-| Left-click | Perform the current build action / place the rally flag |
-| Right-click | Clear the rally flag |
+| Left-click | Perform the current build action / place a rally flag |
+| Right-click | Clear the rally flags (knights' and navy's) |
 | `Esc` | Return to menu (from the menu: quit on native) |
 
 The **egui** panel in the top-left shows your stockpile, population, score, and

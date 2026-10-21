@@ -359,14 +359,11 @@ impl Renderer {
     }
 
     /// Draw one frame. If the surface can't hand out a texture right now (the
-    /// window is hidden, or it needs reconfiguring) the frame is skipped.
-    pub fn render(&mut self, instances: &[Instance], ui: &mut crate::ui::UiOutput) {
-        self.ensure_capacity(instances.len());
-        if !instances.is_empty() {
-            self.queue
-                .write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
-        }
-
+    /// window is hidden, mid-drag between displays, or needs reconfiguring)
+    /// the frame is skipped. Returns whether a frame was actually presented,
+    /// so the caller can pace itself while frames are being skipped: with
+    /// nothing presented there is no vsync to throttle the redraw loop.
+    pub fn render(&mut self, instances: &[Instance], ui: &mut crate::ui::UiOutput) -> bool {
         // Upload egui textures before acquiring the frame, so a skipped frame
         // doesn't lose them.
         for (id, deltas) in &ui.textures_delta.set {
@@ -376,18 +373,33 @@ impl Renderer {
             }
         }
 
-        if let Some((frame, reconfigure)) = self.acquire_frame() {
-            self.draw(frame, instances, ui);
-            if reconfigure {
-                self.surface.configure(&self.device, &self.config);
+        let presented = match self.acquire_frame() {
+            Some((frame, reconfigure)) => {
+                // Stage the instance upload only once a frame (and so a
+                // `submit`) is certain. A `write_buffer` is held by the queue
+                // until the next submit flushes it, and a skipped frame never
+                // submits, so staging here on every skipped frame would pile
+                // up copies of the whole instance list without bound.
+                self.ensure_capacity(instances.len());
+                if !instances.is_empty() {
+                    self.queue
+                        .write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
+                }
+                self.draw(frame, instances, ui);
+                if reconfigure {
+                    self.surface.configure(&self.device, &self.config);
+                }
+                true
             }
-        }
+            None => false,
+        };
 
         // Free what egui is done with only after painting (or skipping) the frame.
         for id in &ui.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
         ui.textures_delta.clear();
+        presented
     }
 
     /// The next surface texture, plus whether the surface should be

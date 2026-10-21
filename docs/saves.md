@@ -15,8 +15,15 @@ A save captures everything needed to reconstruct your session exactly:
 - Your **stockpile** (wood, stone, and gold).
 - **Stats:** enemies defeated and units lost.
 - **Every unit:** position, faction, role, and state.
-- **Cargo ships** currently at sea, with their load and payout.
+- **Cargo ships** currently at sea, with their load and payout, plus the
+  **autonomous-trade switch** and the configured cargo load.
+- **Warships** afloat, with their remaining hull.
+- **Construction orders** in progress, your **builder zones**, and the
+  **autonomous-building switch**.
 - **All edited chunks:** buildings, bridges, and depleted resources.
+
+Rally flags (the knights' and the navy's) are deliberately transient: they
+direct a moment, not a realm, so a loaded game starts with none planted.
 
 Loading replays the seed to regenerate untouched terrain, then applies your
 saved edits on top, so even an "infinite" world round-trips from a small file.

@@ -15,8 +15,8 @@ through the panel; your units carry them out on their own.
 | <kbd>E</kbd> or <kbd>=</kbd> (hold) | Zoom in |
 | <kbd>Q</kbd> or <kbd>-</kbd> (hold) | Zoom out (past full detail, the map turns into the [overview](#the-overview)) |
 | <kbd>M</kbd> | Jump to the [overview](#the-overview) and back |
-| **Left-click** | Perform the current build action, or place the rally flag |
-| **Right-click** | Clear the rally flag |
+| **Left-click** | Perform the current build action, or place a rally flag |
+| **Right-click** | Clear the rally flags (the knights' and the navy's) |
 | <kbd>Esc</kbd> | Return to the menu (from the menu on native builds: quit) |
 
 Left-click always does whatever the **Build** section of the panel is currently
@@ -88,13 +88,21 @@ while it's on, builders keep raising houses inside your
 **[builder zones](building.md#builder-zones)**. A **:lucide-x: Clear rally**
 button appears while a rally flag is active.
 
-The HUD's **Trade** and **Navy** sections add two more left-click modes on the
-water by your village:
+The HUD's **Trade** and **Navy** sections add three more left-click modes on the
+water:
 
 | Mode | Cost | Notes |
 | ---- | ---- | ----- |
-| **:lucide-ship: Ship goods** | the wood + stone you load | Sails to an allied coast for gold |
-| **:lucide-anchor: Warship** | 20 wood, 10 stone, 60 gold | Patrols, hunts pirates, shells the enemy coast |
+| **:lucide-ship: Ship goods** | the wood + stone you load | Sails to an allied coast for gold; launches by your village |
+| **:lucide-anchor: Warship** | 20 wood, 10 stone, 60 gold | Patrols, hunts pirates, shells the enemy coast; launches by your village |
+| **:lucide-flag: Rally warships** | Free | Click open water and every warship sails there; the flag lifts when one arrives |
+
+The Trade section also holds the **"Send cargo ships out on their own"** switch:
+while it's on, the harbor keeps launching laden ships whenever the stockpile
+covers the configured load in full (see
+**[Autonomous trade](building.md#autonomous-trade)**). A
+**:lucide-x: Clear navy rally** button appears in the Navy section while the
+navy's flag is planted.
 
 ### Buttons
 
@@ -114,7 +122,8 @@ kingdom:
 
 - **Minimap:** your villages and everything around them. Villages show as dots
   in their faction's color (bigger for more houses), cargo ships as white
-  specks, warships blue, pirates black, and the rally flag as a yellow ring. The
+  specks, warships blue, pirates black, the knights' rally flag as a yellow
+  ring, and the navy's rally flag as a blue one. The
   white box is what's on screen. Land that hasn't been explored yet is dark.
   **Click or drag** on the minimap to move the camera there.
 - **:lucide-map: Overview (M):** toggles the [overview](#the-overview).
@@ -143,6 +152,13 @@ saying what happened and where:
 Press **:lucide-crosshair: Go** to jump there, or **:lucide-x:** to dismiss it.
 Alerts fade after a few seconds. An ongoing raid only raises one alert, and the
 same spot won't alert again until it has been quiet for a while.
+
+Some alerts also carry a **one-click action button**, shown only on that kind
+of alert and only while you can afford to take it. Right now that's the
+sunk-cargo-ship alert: its **:lucide-anchor: Summon warship** button appears
+when the stockpile covers a warship's cost (20 wood, 10 stone, 60 gold), lays
+one down in your harbor, and **rallies the whole navy to the wreck**. Taking
+the action dismisses the toast.
 
 ## The overview
 

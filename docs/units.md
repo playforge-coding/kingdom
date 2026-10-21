@@ -110,6 +110,11 @@ rather than a faction you fight on land. They:
 They're uncommon, but a laden ship is a tempting target. Losing a stone-heavy
 hold to pirates stings, so time your shipments or send a warship escort.
 
+When pirates do sink a cargo ship, the **alert** it raises carries a one-click
+**Summon warship** button whenever you can afford one: it lays a fresh warship
+down in your harbor and **rallies the whole navy to the wreck**. See
+**[Alerts](controls.md#alerts)**.
+
 ## The navy
 
 Build a **[warship](building.md#warship-the-navy)** and the player gains a
@@ -124,6 +129,8 @@ seafaring military that fights on its own:
 - **Makes for the open ocean when idle.** With no quarry in sight, a warship
   sails out to the **deep sea** and patrols there, so it's already on the shipping
   lanes when the next raider appears.
+- **Answers the navy rally flag.** A planted flag outranks the hunt and the
+  patrol alike; see **[Rallying your warships](#rallying-your-warships)**.
 - **Has a hull bar** and can be **sunk by pirate fire**; pair up warships against
   a pack of raiders.
 
@@ -150,3 +157,21 @@ Rallying is also triggered automatically when you **lose a village** or a
 ground, while those stationed farther away hold their own posts. Only a flag
 you plant yourself calls every knight in the realm, and an automatic alarm
 with no knight close enough to answer simply lifts itself.
+
+## Rallying your warships
+
+The navy has a flag of its own. The **:lucide-flag: Rally warships** mode in
+the HUD's **Navy** section turns a left-click on **open water** into a navy
+rally flag, drawn in your faction's blue:
+
+- Every warship **drops its hunt or patrol** and sails for the flag, though its
+  **guns stay hot**: it still fires on any pirate or shore enemy that comes
+  into range along the way.
+- The flag **lifts once one warship arrives**, and the fleet goes back to
+  hunting and patrolling on its own, right where you pointed it.
+- **Right-click** (or the **:lucide-x: Clear navy rally** button) removes it
+  manually. Clicking the flagged tile again also lifts it.
+
+The **Summon warship** button on a sunk-cargo [alert](controls.md#alerts)
+uses this same flag: it plants one at the wreck, so the new hull and the rest
+of the navy converge on the raiders.

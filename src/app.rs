@@ -96,7 +96,8 @@ impl State {
         let ui = crate::ui::Ui::new(&window);
         save::init(); // begin loading any existing save (async on web)
         let mut camera = Camera::new(Vec2::ZERO);
-        camera.aspect = renderer.size.width as f32 / renderer.size.height.max(1) as f32;
+        camera.aspect =
+            (renderer.size.width as f32 / renderer.size.height.max(1) as f32).clamp(0.1, 10.0);
         State {
             window,
             renderer,
@@ -113,9 +114,18 @@ impl State {
         }
     }
 
+    /// Track a window resize. macOS delivers degenerate (zero) sizes while a
+    /// window is dragged between displays or minimized; adopting one would
+    /// blow the camera's aspect up to the window's whole width, and the aspect
+    /// scales the tile rectangle that terrain generation and the draw list
+    /// cover every frame, so those sizes are ignored (and the aspect clamped
+    /// well past any real monitor, as a backstop).
     fn resize(&mut self, w: u32, h: u32) {
+        if w == 0 || h == 0 {
+            return;
+        }
         self.renderer.resize(w, h);
-        self.camera.aspect = w as f32 / h.max(1) as f32;
+        self.camera.aspect = (w as f32 / h as f32).clamp(0.1, 10.0);
     }
 
     fn cam_state(&self) -> CamState {
@@ -518,6 +528,15 @@ impl State {
             out.push(quad([r.x - 0.5, r.y - 0.5], [1.0, 1.0], rally));
         }
 
+        // Navy rally flag: the warships' waypoint, tinted the player's blue to
+        // tell it apart from the knights' flag.
+        if let Some(r) = game.navy_rally {
+            let rally = self.atlas.uv("rally");
+            let mut tint = self.colors.player;
+            tint[3] = 1.0;
+            out.push(tinted([r.x - 0.5, r.y - 0.5], [1.0, 1.0], rally, tint));
+        }
+
         out
     }
 
@@ -708,10 +727,28 @@ impl State {
             ));
         }
 
+        // The navy's flag keeps its player-blue tint out here too.
+        if let Some(r) = game.navy_rally {
+            let size = 1.5 * kf;
+            let uv = self.atlas.uv("rally");
+            let mut tint = c.player;
+            tint[3] = 1.0;
+            out.push(Instance {
+                pos: [r.x - size * 0.5, r.y - size * 0.5],
+                size: [size, size],
+                uv_min: [uv[0], uv[1]],
+                uv_max: [uv[2], uv[3]],
+                color: tint,
+            });
+        }
+
         out
     }
 
-    fn render(&mut self) {
+    /// Build and draw one frame. Returns whether it was actually presented
+    /// (false while the surface can't hand out textures, e.g. mid window-drag
+    /// between displays), so the event loop can pace itself in the meantime.
+    fn render(&mut self) -> bool {
         // Ensure visible chunks are generated before we read them.
         if self.scene == Scene::Playing {
             let (minx, miny, maxx, maxy) = self.visible_bounds();
@@ -771,11 +808,12 @@ impl State {
             }
         };
 
-        self.renderer.render(&instances, &mut ui_out);
+        let presented = self.renderer.render(&instances, &mut ui_out);
 
         if let Some(action) = action {
             self.apply_action(action);
         }
+        presented
     }
 }
 
@@ -947,6 +985,7 @@ impl ApplicationHandler<State> for App {
             } if !ui_consumed => {
                 if let Some(game) = &mut state.game {
                     game.clear_rally();
+                    game.clear_navy_rally();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -982,7 +1021,16 @@ impl ApplicationHandler<State> for App {
             }
             WindowEvent::RedrawRequested => {
                 state.update();
-                state.render();
+                #[allow(unused_variables)]
+                let presented = state.render();
+                // Presenting (vsync) is the only thing pacing the Poll +
+                // request_redraw loop. While frames are being skipped, rest a
+                // moment instead of spinning flat out; on the web the browser
+                // paces redraws itself.
+                #[cfg(not(target_arch = "wasm32"))]
+                if !presented {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
             }
             _ => {}
         }

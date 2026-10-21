@@ -56,8 +56,11 @@ Three factions share the world:
    mine stone. Everything lands in your shared **stockpile**.
 2. **Trade.** Load surplus wood and stone onto a [cargo ship](building.md#ship-goods)
    and launch it from your **harbor** to the nearest **allied coast** to sell for
-   **:lucide-coins: gold** (stone sells for more). Mind the open water, though:
-   **pirates** prowl the ocean and will sink a cargo ship they catch.
+   **:lucide-coins: gold** (stone sells for more). Flip the
+   [autonomous-trade switch](building.md#autonomous-trade) and the harbor keeps
+   dispatching laden ships on its own. Mind the open water, though:
+   **pirates** prowl the ocean and will sink a cargo ship they catch (the alert
+   it raises offers a one-click **Summon warship** when you can afford one).
 3. **Build.** Spend wood, stone, and gold on [houses, bridges, mines, walls, and huts](building.md).
    A click places an order; a civilian takes up the **builder's** job, walks
    over, and puts the structure up over a few seconds (the builder's pay is part

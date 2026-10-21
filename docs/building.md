@@ -152,6 +152,21 @@ there the goods are sold and the gold is banked. **Stone fetches more than wood*
     the sea, by a coast or a river that leads to it, so a route out is normally
     at hand.)
 
+### Autonomous trade
+
+Like [builder zones](#builder-zones), trade has a hands-off mode: flip the
+**"Send cargo ships out on their own"** switch in the Trade section and the
+harbor keeps dispatching laden ships without another click. Every so often it
+checks the stockpile, and if it covers the configured load **in full** (and no
+more than a few ships are already at sea), a ship launches from open water by
+your village and sails off as if you had sent it yourself.
+
+Only full loads go out, so autonomous trade skims your surplus rather than
+scraping the stockpile bare: set the load to what you want each shipment to
+carry, and anything below that stays home. Flip the switch off and the harbor
+goes quiet again. The switch is saved with the world, and autonomous shipments
+run the same pirate gauntlet as manual ones.
+
 ## :lucide-anchor: Warship (the navy)
 
 | | |
@@ -177,10 +192,18 @@ Once afloat, a warship acts entirely on its own:
 Warships have a **hull bar** and can be **sunk by pirate fire**, so escort a
 valuable convoy with more than one.
 
+You can also pull the navy somewhere yourself with the **navy rally flag**
+(see **[Units & Combat](units.md#rallying-your-warships)**), and a sunk cargo
+ship's alert offers a one-click **Summon warship** that lays a new one down in
+your harbor and rallies the fleet to the wreck (see
+**[Controls](controls.md#alerts)**).
+
 See **[Units & Combat](units.md#the-navy)**.
 
 ## :lucide-flag: Rally
 
 Not a building, but it lives in the same list. See
 **[Units & Combat](units.md#rallying-your-knights)** for how the rally flag
-directs your knights.
+directs your knights, and
+**[Rallying your warships](units.md#rallying-your-warships)** for the navy's
+own flag.
