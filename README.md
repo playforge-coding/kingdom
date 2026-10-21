@@ -186,8 +186,8 @@ publishes both to GitHub Pages (see [`.github/workflows/docs.yml`](.github/workf
 - Docs: <https://playforge-coding.github.io/kingdom/>
 - Play: <https://playforge-coding.github.io/kingdom/play/>
 
-Pushing a `v*` tag builds native binaries for Windows, macOS and Linux and
-attaches them to a GitHub Release (see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
+Publishing a GitHub Release builds native binaries for Windows, macOS and
+Linux and attaches them to that release (see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
 ## Art
 

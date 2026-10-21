@@ -1,12 +1,13 @@
 name: Release
 
-# Build and publish native binaries for Windows, macOS and Linux whenever a
-# version tag (e.g. v0.1.0) is pushed. Textures are embedded into the executable
-# via `include_bytes!`, so each archive is a single self-contained binary.
+# Build native binaries for Windows, macOS and Linux and attach them to a
+# GitHub Release when it is published. Textures are embedded into the
+# executable via `include_bytes!`, so each archive is a single self-contained
+# binary.
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types:
+      - published
 
 permissions:
   contents: write
@@ -61,7 +62,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          archive="kingdom-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          archive="kingdom-${{ matrix.target }}.tar.gz"
           tar -czf "$archive" -C "target/${{ matrix.target }}/release" kingdom
           echo "ASSET=$archive" >> "$GITHUB_ENV"
 
@@ -69,11 +70,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $archive = "kingdom-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
+          $archive = "kingdom-${{ matrix.target }}.zip"
           Compress-Archive -Path "target/${{ matrix.target }}/release/kingdom.exe" -DestinationPath $archive
           echo "ASSET=$archive" >> $env:GITHUB_ENV
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.event.release.tag_name }}
           files: ${{ env.ASSET }}
