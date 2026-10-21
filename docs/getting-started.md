@@ -19,7 +19,9 @@ There are three ways to play Kingdom:
 *(Only needed to build from source.)*
 
 
-- A recent **Rust toolchain** (install via [rustup](https://rustup.rs)).
+- **[rustup](https://rustup.rs)**. The repository pins a **nightly** toolchain
+  in `rust-toolchain.toml`, and rustup fetches it (with the Cranelift backend
+  and the wasm target) the first time you run `cargo` in the project.
 - A GPU and drivers that support one of wgpu's backends (Vulkan, Metal, DX12, or
   WebGL in the browser). Most machines from the last decade qualify.
 
@@ -44,13 +46,18 @@ cargo run --release
 The first build downloads and compiles dependencies, so it takes a while;
 subsequent runs are fast. A window opens on the [main menu](gameplay.md#worlds-and-seeds).
 
+!!! tip "Faster debug builds"
+    A plain `cargo run` (no `--release`) compiles with
+    [Cranelift](https://github.com/rust-lang/rustc_codegen_cranelift) instead of
+    LLVM, which turns out unoptimised code much faster. Release builds always
+    use LLVM.
+
 ## Web
 
 The web build targets WebAssembly and uses [Trunk](https://trunkrs.dev) as the
-bundler. Install the wasm target and Trunk once:
+bundler. The wasm target comes with the pinned toolchain; install Trunk once:
 
 ```sh
-rustup target add wasm32-unknown-unknown
 cargo install --locked trunk
 ```
 
@@ -61,6 +68,9 @@ trunk serve            # dev server at http://127.0.0.1:8080
 # or
 trunk build --release  # static bundle written to dist/
 ```
+
+Cranelift has no WebAssembly backend, so the non-release web build uses a
+`web-dev` Cargo profile that keeps LLVM.
 
 wgpu is compiled with the `webgl` feature so the game runs in browsers without
 native WebGPU support. The static `dist/` bundle is plain files — host it on any

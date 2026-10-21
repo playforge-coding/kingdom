@@ -100,18 +100,24 @@ the current build mode, plus priority toggles and **Save** and **Menu** buttons.
 
 ## Running
 
+The toolchain is pinned to **nightly** in `rust-toolchain.toml`; rustup installs
+it, along with the Cranelift backend and the wasm target, on first use.
+
 ### Native
 
 ```sh
 cargo run --release
 ```
 
+Debug builds (`cargo run` without `--release`) use the
+[Cranelift](https://github.com/rust-lang/rustc_codegen_cranelift) codegen
+backend, which compiles much faster than LLVM. Release builds use LLVM.
+
 ### Web
 
-Requires [Trunk](https://trunkrs.dev) and the wasm target:
+Requires [Trunk](https://trunkrs.dev):
 
 ```sh
-rustup target add wasm32-unknown-unknown
 cargo install --locked trunk
 
 trunk serve            # dev server at http://127.0.0.1:8080
@@ -120,7 +126,8 @@ trunk build --release  # static bundle in dist/
 ```
 
 wgpu is built with the `webgl` feature so the game runs on browsers without
-native WebGPU support.
+native WebGPU support. Cranelift cannot target wasm, so `trunk serve` builds
+with the `web-dev` profile, which is the debug profile on LLVM.
 
 ## Project layout
 

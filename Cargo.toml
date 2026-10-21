@@ -40,5 +40,23 @@ wgpu = { version = "24", features = ["webgl"] }
 opt-level = 3
 
 # Keep wasm debug builds small-ish and fast to iterate.
+#
+# Debug builds go through cranelift, which produces unoptimised code a good deal
+# faster than LLVM does. The first block covers this crate, the second every
+# dependency, since `package."*"` does not reach the crate being built.
 [profile.dev]
 opt-level = 1
+codegen-backend = "cranelift"
+
+[profile.dev.package."*"]
+codegen-backend = "cranelift"
+
+# Cranelift has no wasm32 backend, so `trunk serve` and `trunk build` (without
+# `--release`) use this profile instead, which is `dev` back on LLVM. index.html
+# points Trunk at it with `data-cargo-profile-dev`.
+[profile.web-dev]
+inherits = "dev"
+codegen-backend = "llvm"
+
+[profile.web-dev.package."*"]
+codegen-backend = "llvm"

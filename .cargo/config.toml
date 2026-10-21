@@ -1,0 +1,4 @@
+# `codegen-backend` is still unstable, which is what pins the toolchain to
+# nightly (see rust-toolchain.toml).
+[unstable]
+codegen-backend = true

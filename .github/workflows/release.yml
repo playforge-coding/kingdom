@@ -36,7 +36,9 @@ jobs:
           lfs: true
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # Nightly, to match rust-toolchain.toml; .cargo/config.toml turns on
+        # the unstable `codegen-backend` option, which stable cargo rejects.
+        uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
 

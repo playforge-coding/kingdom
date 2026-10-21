@@ -57,7 +57,9 @@ jobs:
         run: zensical build --strict
 
       - name: Install Rust toolchain (wasm)
-        uses: dtolnay/rust-toolchain@stable
+        # Nightly, to match rust-toolchain.toml; .cargo/config.toml turns on
+        # the unstable `codegen-backend` option, which stable cargo rejects.
+        uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32-unknown-unknown
 
