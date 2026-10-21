@@ -18,7 +18,7 @@ through the panel; your units carry them out on their own.
 | <kbd>Esc</kbd> | Return to the menu (from the menu on native builds: quit) |
 
 Left-click always does whatever the **Build** section of the panel is currently
-set to — place a house, a bridge, a mine, a wall, mark a tree for a hut, or drop
+set to: place a house, a bridge, a mine, a wall, mark a tree for a hut, or drop
 a rally flag. See **[Building](building.md)** for what each mode does.
 
 ## The HUD panel
@@ -30,29 +30,30 @@ control surface in-game.
 
 Your shared resources, filled by farmers:
 
-- 🪵 **Wood**
-- 🪨 **Stone**
+- :lucide-tree-pine: **Wood**
+- :lucide-mountain: **Stone**
+- :lucide-coins: **Gold**
 
 Everything you build is paid for out of this pool.
 
 ### Status
 
-- **Population** — current units versus your population cap (raised by houses).
-- **Enemies defeated** — running tally of enemy units killed.
-- **Units lost** — how many of your own units have died.
+- **Population:** current units versus your population cap (raised by houses).
+- **Enemies defeated:** running tally of enemy units killed.
+- **Units lost:** how many of your own units have died.
 
 ### Priority
 
-- **🌾 Agriculture / ⚔ Military** — which kind of villager your houses favour
-  raising when they spawn new workers.
-- **Gather: Balanced / 🪵 Wood / 🪨 Stone** — biases which resource idle farmers
-  seek out. *Balanced* lets them pick the nearest.
+- **:lucide-wheat: Agriculture / :lucide-swords: Military:** which kind
+  of villager your houses favor raising when they spawn new workers.
+- **Gather: Balanced / :lucide-tree-pine: Wood / :lucide-mountain: Stone:**
+  biases which resource idle farmers seek out. *Balanced* lets them pick the nearest.
 
 ### Proclamations
 
-- **📜 Proclaim draft** — declares a draft for a short spell. While it runs,
-  your farmers may spontaneously **take up arms as knights** — each still costs
-  the usual gold, and an empty treasury stops the call-ups. The button is
+- **:lucide-scroll-text: Proclaim draft:** declares a draft for a short spell.
+  While it runs, your farmers may spontaneously **take up arms as knights**. Each
+  still costs the usual gold, and an empty treasury stops the call-ups. The button is
   replaced by a countdown while a draft is in force. See
   **[Units & Combat](units.md#the-draft)**.
 
@@ -62,27 +63,27 @@ Radio buttons selecting what a left-click does, with costs shown:
 
 | Mode | Cost | Notes |
 | ---- | ---- | ----- |
-| **House** | 8 wood, 8 stone | Must be next to your village |
+| **House** | 8 wood, 8 stone, 30 gold | Must be next to your village |
 | **Bridge** | 3 wood | Placed on open water |
-| **⛏ Mine** | 12 stone | A bottomless stone source near your village |
-| **🧱 Wall** | 2 wood, 4 stone | Defensive blocker |
-| **🛖 Hut** | click a tree | A knight walks over and builds it |
-| **⚑ Rally knights** | — | Left-click sets a flag your knights rush to |
+| **:lucide-pickaxe: Mine** | 12 stone, 40 gold | A bottomless stone source near your village |
+| **:lucide-brick-wall: Wall** | 2 wood, 4 stone, 5 gold | Defensive blocker |
+| **:lucide-tent: Hut** | 15 gold | Click a tree; a knight walks over and builds it |
+| **:lucide-flag: Rally knights** | Free | Left-click sets a flag your knights rush to |
 
-A **✖ Clear rally** button appears while a rally flag is active.
+A **:lucide-x: Clear rally** button appears while a rally flag is active.
 
 The HUD's **Trade** and **Navy** sections add two more left-click modes on the
 water by your village:
 
 | Mode | Cost | Notes |
 | ---- | ---- | ----- |
-| **🚢 Ship goods** | the wood + stone you load | Sails to an allied coast for gold |
-| **⚓ Warship** | 20 wood, 10 stone, 60 gold | Patrols, hunts pirates, shells the enemy coast |
+| **:lucide-ship: Ship goods** | the wood + stone you load | Sails to an allied coast for gold |
+| **:lucide-anchor: Warship** | 20 wood, 10 stone, 60 gold | Patrols, hunts pirates, shells the enemy coast |
 
 ### Buttons
 
-- **💾 Save** — write the current world to disk / IndexedDB (see **[Saves & Files](saves.md)**).
-- **☰ Menu** — return to the main menu (your session stays resumable).
+- **:lucide-save: Save:** write the current world to disk / IndexedDB (see **[Saves & Files](saves.md)**).
+- **:lucide-menu: Menu:** return to the main menu (your session stays resumable).
 
 The panel also lists reminders about the building and unit rules described on
 the **[Building](building.md)** and **[Units & Combat](units.md)** pages.

@@ -1,6 +1,6 @@
 //! Window/event-loop glue: owns the renderer + game, translates input, and
 //! assembles the per-frame instance list. Uses the winit 0.30
-//! `ApplicationHandler` pattern with an async-initialised `State` delivered back
+//! `ApplicationHandler` pattern with an async-initialized `State` delivered back
 //! through an `EventLoopProxy` (needed because device creation is async on web).
 
 use std::sync::Arc;
@@ -305,7 +305,7 @@ impl State {
         }
 
         // Entities: pick an animation frame and draw an HP bar when hurt. We cap
-        // how many same-type units are drawn on any one tile — small crowds show
+        // how many same-type units are drawn on any one tile. Small crowds show
         // fully (so you see newcomers arrive), but a pathological pile-up of
         // hundreds costs a handful of quads instead of hundreds.
         let mut stack: std::collections::HashMap<(i32, i32, bool, bool), u32> =
@@ -347,7 +347,7 @@ impl State {
         }
 
         // Cargo ships at sea: a 32x32 directional sprite (columns face left, up,
-        // down, right), drawn over a 2x2-tile footprint, centred on the hull.
+        // down, right), drawn over a 2x2-tile footprint, centered on the hull.
         for s in game.ships() {
             let col = match s.facing {
                 Dir::Left => 0,
@@ -412,7 +412,7 @@ impl State {
             }
         }
 
-        // Cannonballs in flight: a small sprite centred on the shot.
+        // Cannonballs in flight: a small sprite centered on the shot.
         let cannonball = self.atlas.uv("cannonball");
         for b in game.cannonballs() {
             out.push(quad([b.pos.x - 0.2, b.pos.y - 0.2], [0.4, 0.4], cannonball));
@@ -480,17 +480,7 @@ impl State {
             }
         };
 
-        match self.renderer.render(&instances, &mut ui_out) {
-            Ok(()) => {}
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                let (w, h) = (self.renderer.size.width, self.renderer.size.height);
-                self.renderer.resize(w, h);
-            }
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                log::error!("surface out of memory");
-            }
-            Err(e) => log::warn!("surface error: {e:?}"),
-        }
+        self.renderer.render(&instances, &mut ui_out);
 
         if let Some(action) = action {
             self.apply_action(action);
@@ -627,7 +617,7 @@ impl ApplicationHandler<State> for App {
         }
     }
 
-    // Delivery of the async-initialised State (web path).
+    // Delivery of the async-initialized State (web path).
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, state: State) {
         state.window.request_redraw();
         self.state = Some(state);

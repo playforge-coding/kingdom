@@ -7,13 +7,13 @@ comments: true
 You don't move units directly. Each one follows its own AI according to its
 role; you influence them through [priorities, buildings, and the rally flag](controls.md).
 All units navigate the tile grid with **BFS pathfinding**, routing around water,
-buildings, walls, and resource nodes — or across bridges.
+buildings, walls, and resource nodes, or across bridges.
 
 ## Farmers
 
 Farmers are your economy. They:
 
-- Walk to the **nearest reachable resource** and gather it — **chopping wood**
+- Walk to the **nearest reachable resource** and gather it, **chopping wood**
   from trees and **mining stone** from ore, with a swing animation.
 - Deposit everything into your **shared stockpile**.
 - **Replant trees** and dig into **mines (caves)** once nearby resources run dry,
@@ -28,7 +28,7 @@ Use the **Gather** toggle (Balanced / Wood / Stone) to bias what they collect.
 Knights are your military. They:
 
 - Seek out and **attack the enemy faction** wherever they find them.
-- Fight in melee — both sides take damage, and HP bars appear above wounded
+- Fight in melee. Both sides take damage, and HP bars appear above wounded
   units.
 - **Press the assault on enemy settlements** once the field is clear: with no
   foe left to chase, knights march on the nearest enemy **huts and walls** and
@@ -36,7 +36,7 @@ Knights are your military. They:
 - **Rush to defend** an occupied hut or a village that comes under attack.
 - Follow the **rally flag** when you set one.
 
-Lean on the **⚔ Military priority** to raise more of them when you're under
+Lean on the **:lucide-swords: Military priority** to raise more of them when you're under
 pressure.
 
 ## The draft
@@ -46,13 +46,13 @@ the HUD (see **[Controls](controls.md#proclamations)**). For a short spell:
 
 - Your **farmers may spontaneously take up arms**, converting into knights at
   random over the course of the draft.
-- Each call-up **still costs gold**, exactly like raising a knight normally — so
+- Each call-up **still costs gold**, exactly like raising a knight normally, so
   the size of your treasury, not the number of farmers, is the real limit. When
   the coffers run dry, the call-ups stop.
 - A **working core of farmers is always spared**, so a draft can't hollow out
   your economy (or trip your knights into retreating home).
 
-It's a burst of military muscle when a raid is bearing down — at the price of
+It's a burst of military muscle when a raid is bearing down, at the price of
 gold and a thinner workforce until you rebuild it.
 
 ## Enemies
@@ -60,27 +60,27 @@ gold and a thinner workforce until you rebuild it.
 The enemy villages each field their own units, and **more are founded over time**
 as the map expands. Enemy soldiers **stream out to hunt your units**, so an
 undefended settlement won't stay yours for long. Enemy villages can be
-**captured** the same way yours can be lost — see
-[Capturing villages](gameplay.md#capturing-villages).
+**captured** the same way yours can be lost (see
+[Capturing villages](gameplay.md#capturing-villages)).
 
 ## Pirates
 
-Out on the **open ocean** lurk rare **pirate ships** — a hazard to your trade
+Out on the **open ocean** lurk rare **pirate ships**, a hazard to your trade
 rather than a faction you fight on land. They:
 
 - **Keep to the open sea.** Pirates never enter rivers or lakes, so they can't
-  reach inland water or come ashore — they haunt the deep water your shipping
+  reach inland water or come ashore. They haunt the deep water your shipping
   lanes cross.
 - **Hunt your vessels.** A pirate that spots one of your
-  [cargo ships](building.md#ship-goods) — or a [warship](building.md#warship-the-navy) —
+  [cargo ships](building.md#ship-goods) (or a [warship](building.md#warship-the-navy))
   gives chase and, once in range, opens fire with **cannonballs**. It holds a
   short **standoff** and shells from there rather than piling onto the hull.
 - **Sink cargo on a hit.** A cannonball that strikes a cargo ship **sinks it,
-  cargo and all** — the goods are lost at sea and no gold is paid. Warships are
-  armoured and instead lose **hull** with each hit, sinking only when it runs out.
+  cargo and all**. The goods are lost at sea and no gold is paid. Warships are
+  armored and instead lose **hull** with each hit, sinking only when it runs out.
 
 They're uncommon, but a laden ship is a tempting target. Losing a stone-heavy
-hold to pirates stings, so time your shipments — or send a warship escort.
+hold to pirates stings, so time your shipments or send a warship escort.
 
 ## The navy
 
@@ -91,7 +91,7 @@ seafaring military that fights on its own:
   and **shells it with cannonballs**. It's tougher and quicker-firing than a
   pirate, so it wins a straight duel and keeps the shipping lanes clear.
 - **Shells enemies ashore.** It also fires on enemy land units, holding position
-  **out in the water** — it never leaves the sea, so it bombards the coast from a
+  **out in the water**. It never leaves the sea, so it bombards the coast from a
   distance and can't reach foes far inland.
 - **Makes for the open ocean when idle.** With no quarry in sight, a warship
   sails out to the **deep sea** and patrols there, so it's already on the shipping
@@ -111,11 +111,11 @@ seafaring military that fights on its own:
 
 ## Rallying your knights
 
-The **⚑ Rally** build mode turns a left-click into a **rally flag**:
+The **:lucide-flag: Rally** build mode turns a left-click into a **rally flag**:
 
 - Your knights **drop whatever they're doing** and rush to the flag.
 - The flag **clears automatically once they arrive**.
-- **Right-click** (or the **✖ Clear rally** button) removes the flag manually.
+- **Right-click** (or the **:lucide-x: Clear rally** button) removes the flag manually.
 
-Rallying is also triggered automatically when you **lose a village** — your
+Rallying is also triggered automatically when you **lose a village**: your
 knights converge on it to retake the ground.

@@ -10,7 +10,8 @@ on:
       - main
     paths:
       - "docs/**"
-      - "mkdocs.yml"
+      - "zensical.toml"
+      - "scripts/**"
       - "src/**"
       - "assets/**"
       - "index.html"
@@ -36,19 +37,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (with LFS assets)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # The textures are embedded via `include_bytes!`; without the real
           # LFS files the web build would compile pointer files instead.
           lfs: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
       - name: Install Zensical
-        run: pip install zensical==0.0.46
+        run: pip install zensical==0.0.71
 
       - name: Download self-hosted fonts
         run: python scripts/fetch-fonts.py
@@ -67,7 +68,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install Trunk
-        uses: jetli/trunk-action@v0.5.0
+        uses: jetli/trunk-action@v0.5.1
         with:
           version: latest
 
@@ -77,7 +78,7 @@ jobs:
         run: trunk build --release --public-url /kingdom/play/ --dist site/play
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
@@ -90,4 +91,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

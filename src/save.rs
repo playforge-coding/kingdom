@@ -51,8 +51,8 @@ mod backend {
 mod backend {
     use std::cell::RefCell;
 
-    use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::prelude::*;
 
     const DB_NAME: &str = "kingdom_db";
     const STORE: &str = "saves";
@@ -83,12 +83,10 @@ mod backend {
             if let Some(req) = e
                 .target()
                 .and_then(|t| t.dyn_into::<web_sys::IdbOpenDbRequest>().ok())
+                && let Ok(result) = req.result()
+                && let Ok(db) = result.dyn_into::<web_sys::IdbDatabase>()
             {
-                if let Ok(result) = req.result() {
-                    if let Ok(db) = result.dyn_into::<web_sys::IdbDatabase>() {
-                        let _ = db.create_object_store(STORE);
-                    }
-                }
+                let _ = db.create_object_store(STORE);
             }
         });
         open.set_onupgradeneeded(Some(upgrade.as_ref().unchecked_ref()));
@@ -97,12 +95,11 @@ mod backend {
         let open_clone = open.clone();
         let mut f_opt = Some(f);
         let onsuccess = Closure::<dyn FnMut()>::new(move || {
-            if let Ok(result) = open_clone.result() {
-                if let Ok(db) = result.dyn_into::<web_sys::IdbDatabase>() {
-                    if let Some(f) = f_opt.take() {
-                        f(db);
-                    }
-                }
+            if let Ok(result) = open_clone.result()
+                && let Ok(db) = result.dyn_into::<web_sys::IdbDatabase>()
+                && let Some(f) = f_opt.take()
+            {
+                f(db);
             }
         });
         open.set_onsuccess(Some(onsuccess.as_ref().unchecked_ref()));
@@ -122,11 +119,11 @@ mod backend {
             };
             let req_clone = req.clone();
             let onsuccess = Closure::<dyn FnMut()>::new(move || {
-                if let Ok(result) = req_clone.result() {
-                    if let Ok(arr) = result.dyn_into::<js_sys::Uint8Array>() {
-                        let bytes = arr.to_vec();
-                        SLOT.with(|s| *s.borrow_mut() = Some(bytes));
-                    }
+                if let Ok(result) = req_clone.result()
+                    && let Ok(arr) = result.dyn_into::<js_sys::Uint8Array>()
+                {
+                    let bytes = arr.to_vec();
+                    SLOT.with(|s| *s.borrow_mut() = Some(bytes));
                 }
             });
             req.set_onsuccess(Some(onsuccess.as_ref().unchecked_ref()));

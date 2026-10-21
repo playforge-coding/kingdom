@@ -66,18 +66,21 @@ impl Renderer {
         let size = window.inner_size();
         let size = winit::dpi::PhysicalSize::new(size.width.max(1), size.height.max(1));
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        // GLES (and so WebGL) needs the display connection up front to present.
+        // Some browsers expose WebGPU without being able to hand out an adapter,
+        // so probe for real support first and fall back to WebGL without it.
+        let instance = wgpu::util::new_instance_with_webgpu_detection(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+            ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
+        })
+        .await;
 
         let surface = instance.create_surface(window.clone()).unwrap();
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
                 compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
+                ..Default::default()
             })
             .await
             .expect("no suitable GPU adapter found");
@@ -89,15 +92,11 @@ impl Renderer {
         };
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits,
-                    memory_hints: wgpu::MemoryHints::default(),
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("device"),
+                required_limits,
+                ..Default::default()
+            })
             .await
             .expect("failed to create device");
 
@@ -112,6 +111,7 @@ impl Renderer {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: size.width,
             height: size.height,
             present_mode: wgpu::PresentMode::Fifo,
@@ -234,8 +234,8 @@ impl Renderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline_layout"),
-            bind_group_layouts: &[&camera_bgl, &texture_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&camera_bgl), Some(&texture_bgl)],
+            immediate_size: 0,
         });
 
         let vertex_layout = wgpu::VertexBufferLayout {
@@ -265,7 +265,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[vertex_layout, instance_layout],
+                buffers: &[Some(vertex_layout), Some(instance_layout)],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -285,7 +285,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -303,7 +303,11 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1, false);
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &device,
+            config.format,
+            egui_wgpu::RendererOptions::default(),
+        );
 
         Self {
             surface,
@@ -354,18 +358,63 @@ impl Renderer {
         self.instance_cap = cap;
     }
 
-    pub fn render(
-        &mut self,
-        instances: &[Instance],
-        ui: &mut crate::ui::UiOutput,
-    ) -> Result<(), wgpu::SurfaceError> {
+    /// Draw one frame. If the surface can't hand out a texture right now (the
+    /// window is hidden, or it needs reconfiguring) the frame is skipped.
+    pub fn render(&mut self, instances: &[Instance], ui: &mut crate::ui::UiOutput) {
         self.ensure_capacity(instances.len());
         if !instances.is_empty() {
             self.queue
                 .write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         }
 
-        let frame = self.surface.get_current_texture()?;
+        // Upload egui textures before acquiring the frame, so a skipped frame
+        // doesn't lose them.
+        for (id, deltas) in &ui.textures_delta.set {
+            for delta in deltas {
+                self.egui_renderer
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
+        }
+
+        if let Some((frame, reconfigure)) = self.acquire_frame() {
+            self.draw(frame, instances, ui);
+            if reconfigure {
+                self.surface.configure(&self.device, &self.config);
+            }
+        }
+
+        // Free what egui is done with only after painting (or skipping) the frame.
+        for id in &ui.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+        ui.textures_delta.clear();
+    }
+
+    /// The next surface texture, plus whether the surface should be
+    /// reconfigured once it has been presented. `None` skips this frame.
+    fn acquire_frame(&mut self) -> Option<(wgpu::SurfaceTexture, bool)> {
+        match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => Some((frame, false)),
+            // Still drawable, but reconfigure once this frame is out.
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some((frame, true)),
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                None
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => None,
+            wgpu::CurrentSurfaceTexture::Validation => {
+                log::warn!("surface validation error; skipping frame");
+                None
+            }
+        }
+    }
+
+    fn draw(
+        &mut self,
+        frame: wgpu::SurfaceTexture,
+        instances: &[Instance],
+        ui: &crate::ui::UiOutput,
+    ) {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -373,15 +422,11 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
 
-        // Upload egui textures + geometry for this frame.
+        // Upload egui geometry for this frame.
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
             pixels_per_point: ui.pixels_per_point,
         };
-        for (id, delta) in &ui.textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.device, &self.queue, *id, delta);
-        }
         self.egui_renderer.update_buffers(
             &self.device,
             &self.queue,
@@ -396,6 +441,7 @@ impl Renderer {
                 label: Some("sprite_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -410,6 +456,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             if !instances.is_empty() {
@@ -428,6 +475,7 @@ impl Renderer {
                 label: Some("egui_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -437,6 +485,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             let mut pass = pass.forget_lifetime();
             self.egui_renderer
@@ -444,11 +493,6 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
-
-        for id in &ui.textures_delta.free {
-            self.egui_renderer.free_texture(id);
-        }
-        Ok(())
+        self.queue.present(frame);
     }
 }

@@ -175,7 +175,7 @@ fn pack(mut sources: Vec<Source>) -> Atlas {
     const PAD: u32 = 1;
     const ATLAS_W: u32 = 512;
 
-    sources.sort_by(|a, b| b.img.height().cmp(&a.img.height()));
+    sources.sort_by_key(|s| std::cmp::Reverse(s.img.height()));
 
     let mut cursor_x = PAD;
     let mut cursor_y = PAD;

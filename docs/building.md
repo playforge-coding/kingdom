@@ -5,15 +5,15 @@ comments: true
 # Building
 
 Pick a build mode in the HUD's **Build** section, then **left-click** a tile to
-place it. Everything is paid for from your shared stockpile — wood, stone, and
-**🪙 gold** — and most buildings can only go **near your existing village**, so
+place it. Everything is paid for from your shared stockpile of wood, stone, and
+**:lucide-coins: gold**, and most buildings can only go **near your existing village**, so
 your territory grows organically outward instead of letting you drop structures
 anywhere on the map.
 
 !!! note "Most things cost gold"
     Alongside wood and stone, most structures now also cost **gold**, and every
     new **knight** does too. Gold is earned by shipping goods off to a far-away
-    village — see **[Trade](#ship-goods)**. Bridges are the one exception: they
+    village (see **[Trade](#ship-goods)**). Bridges are the one exception: they
     stay gold-free, so you can always reach the coast to trade even when broke.
 
 ## House
@@ -29,7 +29,7 @@ and periodically **spawns new workers** (farmers or knights, depending on your
 what you already own, building houses is how you expand your borders.
 
 !!! note "Growth needs farmers"
-    Houses only raise new workers while you have **4 or more farmers** — keep
+    Houses only raise new workers while you have **4 or more farmers**, so keep
     your economy running or growth stalls.
 
 ## Bridge
@@ -43,18 +43,18 @@ A bridge turns a water tile into walkable ground. The world already auto-spans
 narrow channels with bridges at generation time, but you can build your own to
 cross wider water, reach an island, or open a shortcut for your units.
 
-## ⛏ Mine
+## :lucide-pickaxe: Mine
 
 | | |
 | --- | --- |
 | **Cost** | 12 stone, 40 gold |
 | **Where** | Open ground near your village |
 
-A mine is a **bottomless stone source** — it never runs out. The catch: only
+A mine is a **bottomless stone source** that never runs out. The catch: only
 **four farmers** can work a single mine at once. Mines are the answer once the
 natural ore around you has been depleted.
 
-## 🧱 Wall
+## :lucide-brick-wall: Wall
 
 | | |
 | --- | --- |
@@ -65,19 +65,19 @@ Walls are defensive blockers. Units path around them, so a line of walls funnels
 attackers and shields your workers. Enemies can batter them down over time, so
 back them up with knights.
 
-## 🛖 Hut
+## :lucide-tent: Hut
 
 | | |
 | --- | --- |
-| **Cost** | 15 gold — a knight builds it |
+| **Cost** | 15 gold (a knight builds it) |
 | **Where** | On a tree |
 
 Select **Hut** mode and left-click a **tree**; one of your knights walks over and
-constructs it. Huts **shelter farmers from raids** — workers duck inside when
-danger is near — and if an occupied hut is attacked, knights rush to defend it.
+constructs it. Huts **shelter farmers from raids**: workers duck inside when
+danger is near, and if an occupied hut is attacked, knights rush to defend it.
 Clicking a pending order again cancels it and refunds the gold.
 
-## 🚢 Ship goods
+## :lucide-ship: Ship goods
 
 | | |
 | --- | --- |
@@ -85,8 +85,8 @@ Clicking a pending order again cancels it and refunds the gold.
 | **Where** | Open water next to your village |
 
 Trade is your gold engine. Set how much **wood** and **stone** to load in the
-HUD's **Trade** section — the panel shows the projected **payout** — then pick
-**Ship goods** mode and **left-click open water in your harbour** to launch a laden
+HUD's **Trade** section (the panel shows the projected **payout**), then pick
+**Ship goods** mode and **left-click open water in your harbor** to launch a laden
 cargo ship. Ships can only set sail from **near your own village**, not from any
 far-off stretch of coast.
 
@@ -97,15 +97,16 @@ there the goods are sold and the gold is banked. **Stone fetches more than wood*
 
 !!! warning "Pirates raid the shipping lanes"
     Rare **pirate ships** patrol the open ocean and fire cannonballs at any cargo
-    ship they catch. A ship that's hit is **sunk with its cargo** — no gold, no
-    refund. See **[Units & Combat](units.md#pirates)**.
+    ship they catch. A ship that's hit is **sunk with its cargo**, with no gold
+    and no refund. See **[Units & Combat](units.md#pirates)**.
 
 !!! note "You need a sea route to an ally"
     If there's no water path from the launch tile to any allied shore, the ship
     won't set off and your cargo stays in the hold. (Your village always sits on
-    the sea — via a coast or a river to it — so a route out is normally at hand.)
+    the sea, by a coast or a river that leads to it, so a route out is normally
+    at hand.)
 
-## ⚓ Warship (the navy)
+## :lucide-anchor: Warship (the navy)
 
 | | |
 | --- | --- |
@@ -113,7 +114,7 @@ there the goods are sold and the gold is banked. **Stone fetches more than wood*
 | **Where** | Open water next to your village |
 
 Pick **Warship** mode in the HUD's **Navy** section and **left-click open water
-in your harbour** to lay one down — same launch rules as a cargo ship, but no
+in your harbor** to lay one down. The launch rules match a cargo ship's, but no
 sea route is needed since a warship **patrols rather than voyages**.
 
 Once afloat, a warship acts entirely on its own:
@@ -122,7 +123,7 @@ Once afloat, a warship acts entirely on its own:
   and **shells it with cannonballs** until the raider sinks. A warship out-guns
   and out-lasts a lone pirate, so a small navy keeps your shipping lanes clear.
 - **Bombards enemies ashore.** It also fires on enemy units on land, standing
-  **off in the water** to shell the coast — it never beaches itself, so it can
+  **off in the water** to shell the coast. It never beaches itself, so it can
   only reach foes near the shoreline.
 - **Keeps its distance.** Like pirates, a warship holds a standoff off its
   target rather than ramming it.
@@ -132,7 +133,7 @@ valuable convoy with more than one.
 
 See **[Units & Combat](units.md#the-navy)**.
 
-## ⚑ Rally
+## :lucide-flag: Rally
 
 Not a building, but it lives in the same list. See
 **[Units & Combat](units.md#rallying-your-knights)** for how the rally flag

@@ -1,30 +1,31 @@
 # Kingdom
 
 A small single-player kingdom-builder written in Rust. You don't control a
-character — you watch your settlement from a top-down view, grow it, and defend
+character. Instead you watch your settlement from a top-down view, grow it, and defend
 it against rival camps. It renders tiles and entities with **wgpu** and runs
 both natively and in the browser (via WebGL) using **Trunk**.
 
 ![tiles rendered with wgpu, egui overlay](assets/textures/tiles/houses.png)
 
-> 📖 **Documentation:** <https://playforge-coding.github.io/kingdom/>
-> · 🎮 **Play in your browser:** <https://playforge-coding.github.io/kingdom/play/>
+> **Documentation:** <https://playforge-coding.github.io/kingdom/>
+>
+> **Play in your browser:** <https://playforge-coding.github.io/kingdom/play/>
 
 ## Gameplay
 
 - **Main menu & world creation.** Start from a menu: enter a **seed** (or roll a
   random one) and create a world, **load** your saved world, or resume. A set
   seed is fully reproducible.
-- **Infinite, chunked world.** The map is divided into 32×32 tile chunks
+- **Infinite, chunked world.** The map is divided into 32x32 tile chunks
   generated on demand from the seed as you explore, so the world is effectively
   endless. Terrain uses [FastNoise Lite](https://crates.io/crates/fastnoise-lite):
   a low-frequency continental field carves broad **continents** out of wide
   **oceans** (with a guaranteed home continent at the origin), a finer field
   roughens the coastlines, and another scatters forests (wood) and ore (stone).
-  Winding, branching **rivers** (domain-warped noise isolines, 2–3 tiles wide)
+  Winding, branching **rivers** (domain-warped noise isolines, 2-3 tiles wide)
   meander across the land and flow to the coast, opening the interior to the sea;
-  occasional inland **lakes** dot it too. Villages **favour the waterside**, so
-  most towns sit on a river or coast — prime hunting ground for the navy. Only
+  occasional inland **lakes** dot it too. Villages **favor the waterside**, so
+  most towns sit on a river or coast, prime hunting ground for the navy. Only
   single-tile notches are auto-bridged, so rivers stay real barriers you cross by
   **bridge** or **boat**.
 - **Saving.** Save any time to a custom binary `.dat` blob (magic `KGDM`) that
@@ -46,23 +47,23 @@ both natively and in the browser (via WebGL) using **Trunk**.
   few villages, and **more enemy and allied villages keep being founded over
   time**, spreading ever farther out across the endless map.
 - **Your village.** You begin controlling a single village on the **coast** near
-  the origin — right by the sea, giving your cargo ships a home port. Villages
+  the origin, right by the sea, giving your cargo ships a home port. Villages
   change hands per-camp: leave one undefended with an enemy inside and you lose it
   (your knights auto-rally to retake it); strip an enemy village of its defenders
   and stand a unit in it to capture it. (Allied villages can't be captured.)
 - **Priorities.** Toggle **Agriculture / Military** to bias which workers your
   houses raise, and **Balanced / Wood / Stone** to steer what farmers gather.
 - **Proclaim a draft.** Need soldiers now? Declare a draft and, for a short
-  spell, your **farmers spontaneously take up arms as knights** — each still paid
+  spell, your **farmers spontaneously take up arms as knights**. Each is still paid
   for in gold, so your treasury caps the call-up while a core of farmers is
   always spared.
 - **Economy.** Alongside wood and stone you keep a purse of **gold**. You start
   with some seed gold; every new **knight** costs gold to arm (a broke village
   raises a free farmer instead), and most structures cost gold too.
 - **Trade.** Load wood and stone onto a **cargo ship** and left-click open water
-  **in your harbour** (ships launch only from near your village) to send it off.
+  **in your harbor** (ships launch only from near your village) to send it off.
   It charts a water route to the **nearest allied coast** (never crossing land)
-  and sells the goods for gold on arrival — **stone fetches more than wood**.
+  and sells the goods for gold on arrival, and **stone fetches more than wood**.
 - **Pirates.** Rare **pirate ships** roam the open ocean, hunt your ships, and
   fire **cannonballs**; a hit **sinks a cargo ship and its cargo**. They keep to
   the deep sea, never enter rivers or lakes, and hold a **standoff** to shell
@@ -70,17 +71,17 @@ both natively and in the browser (via WebGL) using **Trunk**.
 - **Navy.** Build a **warship** (wood + stone + gold) on the water by your
   village and it fights on its own: it **hunts pirates** and **bombards enemies
   ashore with cannonballs**, holding **off in the water** so it never beaches.
-  Warships have a hull bar and can be sunk by pirate fire — escort convoys with a
-  few.
+  Warships have a hull bar and can be sunk by pirate fire, so escort convoys with
+  a few.
 - **Building.** Left-click to build:
-  - a **House** on open grass (wood + stone + gold) — only *next to your existing
+  - a **House** on open grass (wood + stone + gold), only *next to your existing
     village*, so your territory grows organically. Houses raise your population
     cap and spawn new workers (while you have 4+ farmers).
-  - a **Bridge** on open water (wood) — makes that tile walkable.
-  - a **Mine** on open ground (stone + gold) — a bottomless stone source, worked
+  - a **Bridge** on open water (wood), which makes that tile walkable.
+  - a **Mine** on open ground (stone + gold): a bottomless stone source, worked
     by up to four farmers at once.
-  - a **Wall** (wood + stone + gold) — a defensive blocker units path around.
-  - a **Hut** (click a tree, gold) — a knight builds it; it shelters farmers from
+  - a **Wall** (wood + stone + gold): a defensive blocker units path around.
+  - a **Hut** (click a tree, gold). A knight builds it, and it shelters farmers from
     raids, and knights rush to defend an attacked one.
 - Units navigate with grid **pathfinding** (BFS) and treat water, buildings and
   resource nodes as obstacles, routing around them or across bridges.
@@ -111,7 +112,10 @@ cargo run --release
 
 Debug builds (`cargo run` without `--release`) use the
 [Cranelift](https://github.com/rust-lang/rustc_codegen_cranelift) codegen
-backend, which compiles much faster than LLVM. Release builds use LLVM.
+backend, which compiles much faster than LLVM. Release builds use LLVM. A few
+dependencies (`vello_cpu` and its SIMD crates, which egui uses to draw text)
+stay on LLVM even in debug builds, because they use NEON intrinsics Cranelift
+doesn't support yet.
 
 ### Web
 
@@ -126,7 +130,8 @@ trunk build --release  # static bundle in dist/
 ```
 
 wgpu is built with the `webgl` feature so the game runs on browsers without
-native WebGPU support. Cranelift cannot target wasm, so `trunk serve` builds
+native WebGPU support, and it falls back to WebGL whenever WebGPU can't provide
+an adapter. Cranelift cannot target wasm, so `trunk serve` builds
 with the `web-dev` profile, which is the debug profile on LLVM.
 
 ## Project layout
@@ -145,14 +150,17 @@ with the `web-dev` profile, which is the debug profile on LLVM.
 | `src/ui.rs` | egui menu + in-game panel |
 | `src/shader.wgsl` | Instanced textured-quad shader |
 | `assets/textures/` | Tile, building and character-sheet PNGs |
-| `docs/` | Documentation site sources (Zensical / Material for MkDocs) |
+| `assets/icons/` | Lucide SVG icons for the HUD |
+| `docs/` | Documentation site sources (Zensical) |
+| `zensical.toml` | Documentation site configuration |
 | `scripts/fetch-fonts.py` | Downloads the docs' self-hosted webfonts |
 
 ## Documentation
 
 The docs live in `docs/` and are built with
-[Zensical](https://zensical.org) (Material for MkDocs). Fonts are self-hosted
-rather than loaded from the Google Fonts CDN, so fetch them once before building:
+[Zensical](https://zensical.org), configured in `zensical.toml`. Diagrams are
+written as Mermaid code blocks. Fonts are self-hosted rather than loaded from the
+Google Fonts CDN, so fetch them once before building:
 
 ```sh
 pip install zensical
@@ -164,8 +172,8 @@ zensical build --strict         # static site into site/
 Pushing to the default branch builds the docs **and** the WebAssembly game and
 publishes both to GitHub Pages (see [`.github/workflows/docs.yml`](.github/workflows/docs.yml)):
 
-- 📖 Docs — <https://playforge-coding.github.io/kingdom/>
-- 🎮 Play — <https://playforge-coding.github.io/kingdom/play/>
+- Docs: <https://playforge-coding.github.io/kingdom/>
+- Play: <https://playforge-coding.github.io/kingdom/play/>
 
 Pushing a `v*` tag builds native binaries for Windows, macOS and Linux and
 attaches them to a GitHub Release (see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
@@ -174,9 +182,12 @@ attaches them to a GitHub Release (see [`.github/workflows/release.yml`](.github
 
 The sprites are [MiniWorld Sprites](https://opengameart.org/content/miniworld-sprites)
 by [Shade](https://opengameart.org/users/shade-1) on OpenGameArt.org, released
-under **CC0** — thanks to Shade, who appreciates the credit.
+under **CC0**. Thanks to Shade, who appreciates the credit.
 
-Character art is stored as 5×12 grids of 16×16 frames; the renderer slices out
+Character art is stored as 5x12 grids of 16x16 frames; the renderer slices out
 walk and action (chop / mine / attack) frames per entity. Trees and rocks are
-padded onto a 16×16 tile footprint. Entities are drawn as foreground tiles on
+padded onto a 16x16 tile footprint. Entities are drawn as foreground tiles on
 top of the terrain.
+
+The HUD icons are from [Lucide](https://lucide.dev) (ISC license, see
+`assets/icons/LICENSE`).

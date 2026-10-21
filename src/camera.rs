@@ -1,9 +1,11 @@
 //! Top-down orthographic camera measured in tile units.
 
+// wgpu clip space has Z in [0, 1], which matches glam's DirectX convention.
+use glam::camera::rh::proj::directx;
 use glam::{Mat4, Vec2};
 
 pub struct Camera {
-    /// World-space point at the centre of the screen (in tiles).
+    /// World-space point at the center of the screen (in tiles).
     pub center: Vec2,
     /// How many tiles tall the viewport is; width derives from aspect.
     pub view_height: f32,
@@ -32,7 +34,7 @@ impl Camera {
         let right = self.center.x + he.x;
         let top = self.center.y - he.y;
         let bottom = self.center.y + he.y;
-        Mat4::orthographic_rh(left, right, bottom, top, -1.0, 1.0)
+        directx::orthographic(left, right, bottom, top, -1.0, 1.0)
     }
 
     /// Convert a screen pixel coordinate to world-space tile coordinates.

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use glam::Vec2;
 
 use crate::pathfind;
-use crate::world::{Node, Resource, Wall, World, CHUNK};
+use crate::world::{CHUNK, Node, Resource, Wall, World};
 
 pub type Tile = (i32, i32);
 
@@ -81,11 +81,7 @@ pub enum Dir {
 
 fn dir_from_vec(v: Vec2) -> Dir {
     if v.x.abs() >= v.y.abs() {
-        if v.x < 0.0 {
-            Dir::Left
-        } else {
-            Dir::Right
-        }
+        if v.x < 0.0 { Dir::Left } else { Dir::Right }
     } else if v.y < 0.0 {
         Dir::Up
     } else {
@@ -112,12 +108,12 @@ pub struct Entity {
     target_node: Option<Tile>,
     harvest_timer: f32,
     repath: f32,
-    /// Cave (mine) tile a farmer has claimed to mine — capacity-limited so only
+    /// Cave (mine) tile a farmer has claimed to mine. Capacity-limited so only
     /// a handful work one at a time.
     mine_target: Option<Tile>,
     /// Tree a knight is currently turning into a hut.
     build_site: Option<Tile>,
-    /// Set when a farmer has ducked into a hut this tick (removed afterwards).
+    /// Set when a farmer has ducked into a hut this tick (removed afterward).
     sheltered: bool,
 }
 
@@ -189,7 +185,7 @@ pub const START_MONEY: u32 = 150;
 /// instead when the treasury can't afford one.
 pub const KNIGHT_GOLD_COST: u32 = 25;
 /// Gold cost of built structures (on top of their wood/stone). Bridges are the
-/// deliberate exception — they stay gold-free so you can always reach the coast
+/// deliberate exception: they stay gold-free so you can always reach the coast
 /// to trade even when broke.
 pub const HOUSE_GOLD_COST: u32 = 30;
 pub const MINE_GOLD_COST: u32 = 40;
@@ -203,15 +199,15 @@ pub const STONE_PRICE: u32 = 5;
 const SHIP_SPEED: f32 = 3.2;
 
 // Pirates: a rare hazard that patrols the open ocean and shells cargo ships.
-/// Most pirate ships prowling at once — kept small so they stay a rare menace.
+/// Most pirate ships prowling at once, kept small so they stay a rare menace.
 const MAX_PIRATES: usize = 3;
-/// Seconds between chances to spawn another pirate (long — they are uncommon).
+/// Seconds between chances to spawn another pirate (long, since they are uncommon).
 const PIRATE_SPAWN_INTERVAL: f32 = 75.0;
 /// A water tile counts as open ocean (where pirates spawn and sail) only if at
-/// least this many of its 8 neighbours are also water — which excludes narrow
+/// least this many of its 8 neighbors are also water, which excludes narrow
 /// rivers and lake mouths, keeping pirates out on the true sea.
-const OPEN_SEA_NEIGHBOURS: i32 = 6;
-/// Pirate sailing speed (tiles/second) — a touch slower than a laden cargo ship,
+const OPEN_SEA_NEIGHBORS: i32 = 6;
+/// Pirate sailing speed (tiles/second), a touch slower than a laden cargo ship,
 /// so a ship that slips past has a chance to outrun the guns.
 const PIRATE_SPEED: f32 = 2.6;
 /// A pirate steers toward a target within this range, else it wanders.
@@ -220,7 +216,7 @@ const PIRATE_DETECT_RANGE: f32 = 26.0;
 const PIRATE_FIRE_RANGE: f32 = 9.0;
 /// Seconds between a pirate's cannon shots.
 const PIRATE_RELOAD: f32 = 2.2;
-/// A gunship holds *this* far off its quarry — close enough to shell it, far
+/// A gunship holds *this* far off its quarry: close enough to shell it, far
 /// enough not to pile on top of it. Applies to both pirates and the navy, and
 /// is what stops raiders stacking on the hull they're firing at.
 const GUNSHIP_STANDOFF: f32 = 5.0;
@@ -243,11 +239,11 @@ const CANNON_DAMAGE: f32 = 30.0;
 pub const WARSHIP_WOOD_COST: u32 = 20;
 pub const WARSHIP_STONE_COST: u32 = 10;
 pub const WARSHIP_GOLD_COST: u32 = 60;
-/// Warship hull strength — tougher than a pirate, so one wins a straight duel.
+/// Warship hull strength. Tougher than a pirate, so one wins a straight duel.
 const WARSHIP_MAX_HP: f32 = 130.0;
 /// Warship cruising speed (tiles/second).
 const WARSHIP_SPEED: f32 = 2.8;
-/// A warship engages any hostile — pirate or enemy ashore — within this range.
+/// A warship engages any hostile (pirate or enemy ashore) within this range.
 const WARSHIP_DETECT_RANGE: f32 = 30.0;
 /// A warship opens fire once a target is within this range.
 const WARSHIP_FIRE_RANGE: f32 = 10.0;
@@ -258,7 +254,7 @@ const WARSHIP_RELOAD: f32 = 1.8;
 /// keeping the occasional re-planning cheap.
 const NAVY_PATH_BUDGET: usize = 8_000;
 /// A warship only re-plots its course when the target drifts this far from where
-/// it was when the route was laid — so it commits to a steady heading and only
+/// it was when the route was laid, so it commits to a steady heading and only
 /// recomputes when a pirate has genuinely moved on.
 const WARSHIP_REPLAN_MOVE: f32 = 5.0;
 /// How far around an idle warship to generate the sea when planning a patrol, so
@@ -276,13 +272,13 @@ const SHIP_PATH_BUDGET: usize = 130_000;
 pub const BUILD_NEAR_RADIUS: i32 = 5;
 
 /// A cargo ship may only launch from water within this many tiles of one of the
-/// player's own houses — its home port — not from any distant coast.
+/// player's own houses (its home port), not from any distant coast.
 pub const SHIP_NEAR_RADIUS: i32 = 8;
 
 const FARMER_SPEED: f32 = 2.4;
 const KNIGHT_SPEED: f32 = 2.9;
 const HARVEST_TIME: f32 = 2.0;
-/// Farmers never roam further than this from their nearest house — a hard leash
+/// Farmers never roam further than this from their nearest house. A hard leash
 /// that keeps them tending the village instead of wandering off after resources.
 const FARMER_HOME_RADIUS: i32 = 16;
 /// Seconds a sown sapling takes to mature into a harvestable tree.
@@ -291,7 +287,7 @@ const SAPLING_GROW_TIME: f32 = 6.0;
 /// work one at once.
 const CAVE_CAPACITY: u32 = 4;
 /// Knights hack through trees/rocks much slower than a farmer harvests, and
-/// gain nothing — so they only bother when a node truly blocks their way.
+/// gain nothing, so they only bother when a node truly blocks their way.
 const KNIGHT_DEMOLISH_TIME: f32 = 5.0;
 const COMBAT_RANGE: f32 = 0.9;
 /// How close a knight must get to the rally flag to count as "arrived" (which
@@ -301,7 +297,7 @@ const ATTACK_DPS: f32 = 16.0;
 /// Walls are tough, so breaking one takes several seconds of hacking.
 const WALL_MAX_HP: f32 = 220.0;
 const WALL_DPS: f32 = 18.0;
-/// Huts are sturdier than walls — attackers need a good while to break in.
+/// Huts are sturdier than walls; attackers need a good while to break in.
 const HUT_MAX_HP: f32 = 400.0;
 /// Seconds a knight spends turning a tree into a hut.
 const HUT_BUILD_TIME: f32 = 4.0;
@@ -399,7 +395,7 @@ const FOUND_RADIUS_STEP: i32 = 36;
 const ALLY_FOUND_BONUS: i32 = 40;
 
 /// A connected water body of at least this many tiles counts as the open ocean
-/// rather than an inland lake or enclosed sea — the threshold for deciding
+/// rather than an inland lake or enclosed sea. It's the threshold for deciding
 /// whether the capital's water needs a river dug out to the real coast, and for
 /// vetting allied ports. Set well above any plausible landlocked body so only
 /// the true, effectively-boundless ocean qualifies.
@@ -433,7 +429,7 @@ pub enum BuildMode {
     Warship,
 }
 
-/// A sown sapling growing toward a harvestable tree (`grow` runs 0 → 1).
+/// A sown sapling growing toward a harvestable tree (`grow` runs from 0 to 1).
 struct Sapling {
     tile: Tile,
     grow: f32,
@@ -457,7 +453,7 @@ pub struct Ship {
 }
 
 /// A pirate ship: a rare raider that prowls the open ocean and lobs cannonballs
-/// at the player's passing cargo ships. Purely transient — not saved.
+/// at the player's passing cargo ships. Purely transient and not saved.
 pub struct Pirate {
     pub pos: Vec2,
     /// Heading, for both movement and which directional sprite frame to draw.
@@ -474,20 +470,20 @@ pub struct Pirate {
 }
 
 impl Pirate {
-    /// Remaining hull as a 0–1 fraction, for the HP bar.
+    /// Remaining hull as a 0-1 fraction, for the HP bar.
     pub fn hp_ratio(&self) -> f32 {
         (self.hp / PIRATE_MAX_HP).clamp(0.0, 1.0)
     }
 }
 
-/// A player-built warship — the navy. It cruises the water, hunts pirates, and
+/// A player-built warship for the navy. It cruises the water, hunts pirates, and
 /// bombards enemies ashore from a standoff, never leaving the sea. Persistent
 /// (saved) like the cargo fleet.
 pub struct Warship {
     pub pos: Vec2,
     /// Heading, driving both movement and the directional sprite frame.
     pub facing: Dir,
-    /// Smoothed water route the ship is following — straight line-of-sight legs
+    /// Smoothed water route the ship is following: straight line-of-sight legs
     /// to a firing position off a target, or to a patrol waypoint. Empty means
     /// holding station.
     path: Vec<Tile>,
@@ -507,7 +503,7 @@ pub struct Warship {
 }
 
 impl Warship {
-    /// Remaining hull as a 0–1 fraction, for the HP bar.
+    /// Remaining hull as a 0-1 fraction, for the HP bar.
     pub fn hp_ratio(&self) -> f32 {
         (self.hp / WARSHIP_MAX_HP).clamp(0.0, 1.0)
     }
@@ -525,7 +521,7 @@ pub struct Cannonball {
     from_pirate: bool,
 }
 
-/// Which kind of villager the player's houses favour raising.
+/// Which kind of villager the player's houses favor raising.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
     /// Mostly farmers (grow the economy).
@@ -574,11 +570,11 @@ pub struct Game {
     pub ship_stone: u32,
     /// Cargo ships currently at sea, sailing out to sell their goods.
     ships: Vec<Ship>,
-    /// The player's navy — warships patrolling the water.
+    /// The player's navy: warships patrolling the water.
     warships: Vec<Warship>,
-    /// Pirate raiders prowling the open ocean (transient — not saved).
+    /// Pirate raiders prowling the open ocean (transient, not saved).
     pirates: Vec<Pirate>,
-    /// Cannonballs in flight (transient — not saved).
+    /// Cannonballs in flight (transient, not saved).
     cannonballs: Vec<Cannonball>,
     pirate_spawn_timer: f32,
     pub build_mode: BuildMode,
@@ -591,7 +587,7 @@ pub struct Game {
     pub rally_point: Option<Vec2>,
     /// Seconds left on a proclaimed draft (0 when none is in force). While it
     /// counts down, farmers are conscripted into knights (see `run_draft`).
-    /// Transient — a proclamation doesn't survive a save/load.
+    /// Transient, since a proclamation doesn't survive a save/load.
     draft_timer: f32,
 
     player_house_tiles: Vec<Tile>,
@@ -601,7 +597,7 @@ pub struct Game {
     hut_tiles: Vec<Tile>,
     /// Trees the player has ordered turned into huts, awaiting a free knight.
     hut_orders: Vec<Tile>,
-    /// Saplings mid-growth (transient — not persisted across saves).
+    /// Saplings mid-growth (transient, not persisted across saves).
     saplings: Vec<Sapling>,
     /// Bridges the player has placed (anchors for extending spans).
     player_bridges: Vec<Tile>,
@@ -632,8 +628,8 @@ impl Game {
         let mut entities = Vec::new();
 
         // The player starts controlling a single village on the coast nearest
-        // the origin — right by the water, so their cargo port has a shore to
-        // launch from — and expands inland from there. Fall back to the nearest
+        // the origin, right by the water so their cargo port has a shore to
+        // launch from, and expands inland from there. Fall back to the nearest
         // open land if (improbably) no coast is close.
         let anchor = coastal_start(&mut world, 200).unwrap_or_else(|| {
             open_tiles_near(&world, 0, 0, 24)
@@ -727,12 +723,12 @@ impl Game {
         // knights, harass the enemy, but never join the player's fights.
         //
         // Map out the player's home landmass first so allied camps can be kept
-        // off it — a village you could just walk to would make the cargo ships
+        // off it. A village you could just walk to would make the cargo ships
         // pointless. Reaching an ally must mean crossing open water.
         let home = home_continent_tiles(&mut world, anchor, 300, 60_000);
         // Rather than guess a direction and hope a ship can get there, sail out
         // from the player's own port and settle allies only on coasts the ships
-        // actually reach — spaced apart, and nearest first for short, reliable
+        // actually reach, spaced apart, and nearest first for short, reliable
         // trade routes.
         let mut ally_anchors: Vec<Tile> = Vec::new();
         if let Some(port) = nearest_water(&mut world, anchor.0, anchor.1, 12) {
@@ -818,7 +814,7 @@ impl Game {
         }
     }
 
-    /// Where the camera should open on a fresh world: the centre of the
+    /// Where the camera should open on a fresh world: the center of the
     /// player's starting village (now planted on the coast, away from origin).
     pub fn start_center(&self) -> Vec2 {
         if self.player_house_tiles.is_empty() {
@@ -862,7 +858,7 @@ impl Game {
         (6 + self.player_house_tiles.len() * 3).min(PLAYER_POP_MAX)
     }
 
-    /// Can a house be placed at `(x, y)` — i.e. is it close enough to one the
+    /// Can a house be placed at `(x, y)`? That is, is it close enough to one the
     /// player already controls (their village or a house they built)?
     pub fn near_player_house(&self, x: i32, y: i32) -> bool {
         self.player_house_tiles.iter().any(|&(hx, hy)| {
@@ -870,7 +866,7 @@ impl Game {
         })
     }
 
-    /// Is `(x, y)` a launch spot within the player's home port — close enough to
+    /// Is `(x, y)` a launch spot within the player's home port, close enough to
     /// one of their houses that ships set sail from the village, not from some
     /// random far-off stretch of coast.
     pub fn near_player_dock(&self, x: i32, y: i32) -> bool {
@@ -890,7 +886,7 @@ impl Game {
     pub fn update(&mut self, dt: f32, sim: (i32, i32, i32, i32)) {
         let dt = dt.min(0.1);
 
-        // Only entities near the player's view are simulated — a distant, unwatched
+        // Only entities near the player's view are simulated. A distant, unwatched
         // corner of the map is frozen so huge populations don't tank the frame rate.
         let (sx0, sy0, sx1, sy1) = sim;
         let in_sim = |t: Tile| t.0 >= sx0 && t.0 <= sx1 && t.1 >= sy0 && t.1 <= sy1;
@@ -972,13 +968,14 @@ impl Game {
         for (tile, dmg) in hut_damage {
             // A hut under attack with farmers inside rallies the knights to save
             // them (overriding any manual rally flag).
-            if let Some(h) = self.world.hut(tile.0, tile.1) {
-                if h.owner == owner_of(Faction::Player) && h.occupants > 0 {
-                    self.rally_point = Some(tile_center(tile));
-                }
+            if let Some(h) = self.world.hut(tile.0, tile.1)
+                && h.owner == owner_of(Faction::Player)
+                && h.occupants > 0
+            {
+                self.rally_point = Some(tile_center(tile));
             }
             if let Some(hut) = self.world.damage_hut(tile.0, tile.1, dmg) {
-                // Razed with farmers still inside — they're lost with it.
+                // Razed with farmers still inside, so they're lost with it.
                 let trapped = hut.occupants as u32;
                 if hut.owner == owner_of(Faction::Player) {
                     self.units_lost += trapped;
@@ -1151,7 +1148,7 @@ impl Game {
             if arrived {
                 let s = &self.ships[i];
                 log::info!(
-                    "cargo ship reached the allied coast with {} wood + {} stone — +{} gold",
+                    "cargo ship reached the allied coast with {} wood + {} stone for {} gold",
                     s.wood,
                     s.stone,
                     s.reward
@@ -1203,8 +1200,8 @@ impl Game {
             // default-water of ungenerated chunks.
             self.world.ensure_region(px - 4, py - 4, px + 4, py + 4);
 
-            // Steer toward the nearest player vessel in sight — a cargo ship or
-            // a warship — else wander.
+            // Steer toward the nearest player vessel in sight (a cargo ship or
+            // a warship), else wander.
             let target =
                 nearest_player_vessel(&self.ships, &self.warships, pp, PIRATE_DETECT_RANGE);
             if let Some(t) = target {
@@ -1224,7 +1221,7 @@ impl Game {
                 }
             }
 
-            // Move, but only onto open sea — this is what keeps pirates out of
+            // Move, but only onto open sea. This is what keeps pirates out of
             // rivers and lakes; blocked, they turn onto a fresh heading.
             let cand = self.pirates[i].pos + self.pirates[i].vel * dt;
             if open_sea(&self.world, cand.x.floor() as i32, cand.y.floor() as i32) {
@@ -1295,7 +1292,7 @@ impl Game {
             .iter()
             .position(|s| (s.pos - bp).length_squared() < r2)
         {
-            log::info!("a cargo ship was sunk by pirates — its cargo lost at sea!");
+            log::info!("a cargo ship was sunk by pirates, its cargo lost at sea!");
             self.ships.swap_remove(si);
             return true;
         }
@@ -1370,8 +1367,8 @@ impl Game {
         }
     }
 
-    /// Sail the navy. Each warship hunts the nearest hostile — a pirate or an
-    /// enemy ashore — closes to a standoff, and shells it, all without ever
+    /// Sail the navy. Each warship hunts the nearest hostile (a pirate or an
+    /// enemy ashore), closes to a standoff, and shells it, all without ever
     /// leaving the water. With nothing to fight it makes for the open ocean and
     /// patrols the deep sea.
     fn update_navy(&mut self, dt: f32) {
@@ -1410,7 +1407,7 @@ impl Game {
             // Decide the route. Crucially this is real water pathfinding, not
             // greedy steering: the ship BFS-routes *around* the coastline to a
             // firing spot (then smooths the staircase into straight legs), so a
-            // target across an inlet no longer sends it circling the shore — and
+            // target across an inlet no longer sends it circling the shore, and
             // it commits to a heading instead of twitching every frame.
             let holding = self.warships[i].path_cursor >= self.warships[i].path.len();
             if let Some(t) = target {
@@ -1422,7 +1419,7 @@ impl Game {
                     WARSHIP_FIRE_RANGE
                 };
                 if (t - wp).length() <= hold_dist {
-                    // In range — hold station and shell (don't ram the target).
+                    // In range: hold station and shell (don't ram the target).
                     self.warships[i].path.clear();
                     self.warships[i].path_cursor = 0;
                 } else {
@@ -1449,10 +1446,8 @@ impl Game {
 
             // Follow the current route. When holding (no path), face the target.
             let moved = advance_warship(&mut self.warships[i], dt);
-            if !moved {
-                if let Some(t) = target {
-                    self.warships[i].facing = dir_from_vec(t - self.warships[i].pos);
-                }
+            if !moved && let Some(t) = target {
+                self.warships[i].facing = dir_from_vec(t - self.warships[i].pos);
             }
 
             // Fire on a target in range.
@@ -1530,7 +1525,7 @@ impl Game {
         let mut changed = false;
 
         // Enemy villages overrun by the player. Only the player can take enemy
-        // ground — an allied unit passing through never flips it.
+        // ground; an allied unit passing through never flips it.
         for village in cluster(&self.world.enemy_house_tiles) {
             if self.village_taken(&village, Faction::Enemy, Faction::Player) {
                 for &(x, y) in &village {
@@ -1551,7 +1546,7 @@ impl Game {
                 // Sound the alarm: rally every (simulated) knight to the fallen
                 // village to come to their allies' aid and retake it.
                 self.rally_point = Some(village_center(&village));
-                log::info!("village lost — knights rallying to retake it");
+                log::info!("village lost, knights rallying to retake it");
                 changed = true;
             }
         }
@@ -1636,7 +1631,7 @@ impl Game {
             let t = self.saplings[i].tile;
             let grown = self.saplings[i].grow >= 1.0;
             if !self.world.is_open_grass(t.0, t.1) {
-                // Something took the tile (a build, or it was cleared) — abandon it.
+                // Something took the tile (a build, or it was cleared), so abandon it.
                 self.saplings.swap_remove(i);
             } else if grown {
                 self.world.set_node(t.0, t.1, Resource::Wood, 5);
@@ -1681,7 +1676,7 @@ impl Game {
                 let pick = self.rng.range(0, self.player_house_tiles.len() as i32) as usize;
                 let (hx, hy) = self.player_house_tiles[pick];
                 if let Some(t) = adjacent_walkable(&self.world, hx, hy) {
-                    // Agriculture favours farmers (2:1); Military favours
+                    // Agriculture favors farmers (2:1); Military favors
                     // knights (1:2). Both still raise some of each.
                     let c = self.player_spawn_cycle % 3;
                     let mut job = match self.priority {
@@ -1715,7 +1710,7 @@ impl Game {
             }
         }
 
-        // Allied camps raise their own units — mostly knights to press the
+        // Allied camps raise their own units: mostly knights to press the
         // enemy, with the odd farmer to keep the village supported.
         self.ally_spawn_timer -= dt;
         if self.ally_spawn_timer <= 0.0 {
@@ -1767,7 +1762,7 @@ impl Game {
     }
 
     /// Ensure the cached home-continent tile set exists (flood-filled from the
-    /// capital), computing it lazily on first need — e.g. after a load.
+    /// capital), computing it lazily on first need (after a load, say).
     fn ensure_home_set(&mut self) {
         if self.home_continent.is_none() {
             let seed_tile = self
@@ -1946,7 +1941,7 @@ impl Game {
                     return false;
                 }
                 if let Some(i) = self.hut_orders.iter().position(|&t| t == (x, y)) {
-                    // Cancelling a pending order refunds its gold.
+                    // Canceling a pending order refunds its gold.
                     self.hut_orders.remove(i);
                     self.money += HUT_GOLD_COST;
                 } else {
@@ -1971,7 +1966,7 @@ impl Game {
             }
             BuildMode::Ship => {
                 // Launch a laden cargo ship from open water in the village's own
-                // harbour. It needs a water route to an allied coast; with no
+                // harbor. It needs a water route to an allied coast; with no
                 // reachable ally port the launch is refused (and the cargo kept).
                 if !self.world.is_open_water(x, y) || !self.near_player_dock(x, y) {
                     return false;
@@ -2005,8 +2000,8 @@ impl Game {
                 true
             }
             BuildMode::Warship => {
-                // Lay down a warship in open water within the home harbour. No
-                // sea route is needed — it patrols rather than voyaging.
+                // Lay down a warship in open water within the home harbor. No
+                // sea route is needed, since it patrols rather than voyaging.
                 if !self.world.is_open_water(x, y)
                     || !self.near_player_dock(x, y)
                     || self.wood < WARSHIP_WOOD_COST
@@ -2059,7 +2054,7 @@ impl Game {
     /// While a draft is in force, call up the player's farmers as knights at
     /// random. Every call-up still costs `KNIGHT_GOLD_COST`, so an empty
     /// treasury halts it; a working core of farmers is always spared so the
-    /// economy — and knight upkeep — doesn't collapse. The floor is kept just
+    /// economy (and knight upkeep) doesn't collapse. The floor is kept just
     /// *above* `MIN_FARMERS_TO_GROW` so the draft never trips the low-farmer
     /// retreat that would march the very knights it just raised back home.
     fn run_draft(&mut self, dt: f32) {
@@ -2095,7 +2090,7 @@ impl Game {
         }
     }
 
-    /// Saplings mid-growth as `(x, y, grow)` for rendering (grow runs 0 → 1).
+    /// Saplings mid-growth as `(x, y, grow)` for rendering (grow runs from 0 to 1).
     pub fn saplings_iter(&self) -> impl Iterator<Item = (i32, i32, f32)> + '_ {
         self.saplings.iter().map(|s| (s.tile.0, s.tile.1, s.grow))
     }
@@ -2139,7 +2134,7 @@ fn ai_step(
         }
         (_, Job::Farmer) => {
             // Enemy and allied farmers shelter in their own huts when a hostile
-            // faction closes in, then potter about their village.
+            // faction closes in, then putter around their village.
             if let Some(ev) = seek_shelter(world, e, owner, e.faction, snap, huts, dt) {
                 return ev;
             }
@@ -2170,7 +2165,7 @@ fn nearest_house(home: &[Tile], t: Tile) -> Option<Tile> {
         .min_by_key(|&(hx, hy)| (hx - t.0).abs() + (hy - t.1).abs())
 }
 
-/// A 4-neighbour of `t` a farmer can stand on to work it.
+/// A 4-neighbor of `t` a farmer can stand on to work it.
 fn stand_tile(world: &World, owner: u8, t: Tile) -> Option<Tile> {
     [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .into_iter()
@@ -2180,10 +2175,10 @@ fn stand_tile(world: &World, owner: u8, t: Tile) -> Option<Tile> {
 
 /// Release a farmer's claim on a mine, freeing its slot for someone else.
 fn release_cave(e: &mut Entity, cave_use: &mut std::collections::HashMap<Tile, u32>) {
-    if let Some(c) = e.mine_target.take() {
-        if let Some(n) = cave_use.get_mut(&c) {
-            *n = n.saturating_sub(1);
-        }
+    if let Some(c) = e.mine_target.take()
+        && let Some(n) = cave_use.get_mut(&c)
+    {
+        *n = n.saturating_sub(1);
     }
 }
 
@@ -2205,7 +2200,7 @@ fn claim_cave(
             continue;
         }
         let d = (c.0 - start.0).abs() + (c.1 - start.1).abs();
-        if best.map_or(true, |(_, bd)| d < bd) {
+        if best.is_none_or(|(_, bd)| d < bd) {
             best = Some((c, d));
         }
     }
@@ -2255,7 +2250,7 @@ fn plan_plant(
 }
 
 /// Is a hostile unit within `r` of `pos`? (Allies don't scare the player, and
-/// vice versa — only the enemy triggers a flight to shelter.)
+/// vice versa. Only the enemy triggers a flight to shelter.)
 fn enemy_within(snap: &[(Vec2, Faction)], pos: Vec2, faction: Faction, r: f32) -> bool {
     let r2 = r * r;
     snap.iter()
@@ -2294,13 +2289,13 @@ fn seek_shelter(
     if adjacent(e.tile(), hut) {
         return Some(Some(StepEvent::Hide(hut)));
     }
-    if let Some(stand) = stand_tile(world, owner, hut) {
-        if e.repath <= 0.0 || e.path_done() {
-            if let Some(p) = pathfind::path_to(world, owner, e.tile(), stand, PATH_BUDGET) {
-                e.set_path(p);
-            }
-            e.repath = 0.7;
+    if let Some(stand) = stand_tile(world, owner, hut)
+        && (e.repath <= 0.0 || e.path_done())
+    {
+        if let Some(p) = pathfind::path_to(world, owner, e.tile(), stand, PATH_BUDGET) {
+            e.set_path(p);
         }
+        e.repath = 0.7;
     }
     let moved = follow_path(e, FARMER_SPEED, dt);
     set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
@@ -2328,17 +2323,17 @@ fn gather_behavior(
     }
 
     // Hard leash: if we've somehow strayed past the home radius, abandon any
-    // task and march straight back — farmers never leave the village.
+    // task and march straight back. Farmers never leave the village.
     if !within_home(home, here.0, here.1, FARMER_HOME_RADIUS) {
         release_cave(e, farm.cave_use);
         e.target_node = None;
-        if let Some(h) = nearest_house(home, here) {
-            if e.repath <= 0.0 || e.path_done() {
-                if let Some(p) = pathfind::path_to(world, owner, here, h, PATH_BUDGET) {
-                    e.set_path(p);
-                }
-                e.repath = 0.7;
+        if let Some(h) = nearest_house(home, here)
+            && (e.repath <= 0.0 || e.path_done())
+        {
+            if let Some(p) = pathfind::path_to(world, owner, here, h, PATH_BUDGET) {
+                e.set_path(p);
             }
+            e.repath = 0.7;
         }
         let moved = follow_path(e, FARMER_SPEED, dt);
         set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
@@ -2390,18 +2385,18 @@ fn gather_behavior(
                 set_anim(e, Anim::Act, dt);
                 return None;
             }
-            if let Some(stand) = stand_tile(world, owner, c) {
-                if let Some(p) = pathfind::path_to(world, owner, here, stand, PATH_BUDGET) {
-                    e.set_path(p);
-                    set_anim(e, Anim::Walk, dt);
-                    return None;
-                }
+            if let Some(stand) = stand_tile(world, owner, c)
+                && let Some(p) = pathfind::path_to(world, owner, here, stand, PATH_BUDGET)
+            {
+                e.set_path(p);
+                set_anim(e, Anim::Walk, dt);
+                return None;
             }
         }
         release_cave(e, farm.cave_use);
     }
 
-    // Reached our work tile? Start swinging — either a resource node to harvest
+    // Reached our work tile? Start swinging at either a resource node to harvest
     // or a bare tile to sow. Otherwise the target is stale; drop it and re-plan.
     if let Some(t) = e.target_node {
         let workable = world.node(t.0, t.1).is_some() || world.is_open_grass(t.0, t.1);
@@ -2435,22 +2430,20 @@ fn gather_behavior(
         None => (here.0 + here.1).rem_euclid(2) == 0,
     };
 
-    if want_stone {
-        if let Some(c) = claim_cave(world, owner, here, home, farm) {
-            e.mine_target = Some(c);
-            if adjacent(here, c) {
-                e.harvest_timer = HARVEST_TIME;
-                set_anim(e, Anim::Act, dt);
-            } else if let Some(stand) = stand_tile(world, owner, c) {
-                if let Some(p) = pathfind::path_to(world, owner, here, stand, PATH_BUDGET) {
-                    e.set_path(p);
-                    set_anim(e, Anim::Walk, dt);
-                }
-            }
-            return None;
+    if want_stone && let Some(c) = claim_cave(world, owner, here, home, farm) {
+        e.mine_target = Some(c);
+        if adjacent(here, c) {
+            e.harvest_timer = HARVEST_TIME;
+            set_anim(e, Anim::Act, dt);
+        } else if let Some(stand) = stand_tile(world, owner, c)
+            && let Some(p) = pathfind::path_to(world, owner, here, stand, PATH_BUDGET)
+        {
+            e.set_path(p);
+            set_anim(e, Anim::Walk, dt);
         }
-        // No mine with a free slot: fall through and make ourselves useful sowing.
+        return None;
     }
+    // No mine with a free slot: fall through and make ourselves useful sowing.
 
     // Sow a sapling on fresh ground to regrow the forest.
     if let Some((path, spot)) = plan_plant(world, owner, here, home, farm.saplings) {
@@ -2465,7 +2458,7 @@ fn gather_behavior(
         return None;
     }
 
-    // Truly idle: potter about, but stay on the leash.
+    // Truly idle: putter around, but stay on the leash.
     wander_behavior(world, e, owner, Some((home, FARMER_HOME_RADIUS)), rng, dt);
     None
 }
@@ -2497,7 +2490,7 @@ fn soldier_behavior(
                 }
                 return None;
             }
-            // Tree's gone (chopped or already a hut) — abandon the build.
+            // Tree's gone (chopped or already a hut), so abandon the build.
             e.harvest_timer = 0.0;
             e.build_site = None;
         } else if let Some(node) = e.target_node {
@@ -2526,11 +2519,11 @@ fn soldier_behavior(
             e.repath = 0.7;
             let rt = (r.x.floor() as i32, r.y.floor() as i32);
             let goal = |x: i32, y: i32| (x, y) == rt;
-            if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
+            if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
                 world.walkable_for(owner, x, y)
             }) {
                 e.set_path(p);
-            } else if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
+            } else if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
                 world.walkable_for_siege(owner, x, y)
             }) {
                 e.set_path(p);
@@ -2547,7 +2540,7 @@ fn soldier_behavior(
         return None;
     }
 
-    // Target the nearest opponent we can actually *reach* — a multi-target BFS
+    // Target the nearest opponent we can actually *reach*, using a multi-target BFS
     // that will happily route across bridges to another landmass, rather than
     // fixating on a straight-line-nearest foe that's stranded across water.
     // With no foe in the field, knights stay on the offensive: they march on
@@ -2567,16 +2560,16 @@ fn soldier_behavior(
                 || adjacent_enemy_wall(world, owner, (x, y)).is_some()
                 || adjacent_enemy_hut(world, owner, (x, y)).is_some()
         };
-        // Engage the nearest reachable foe or enemy structure — prefer a clear
+        // Engage the nearest reachable foe or enemy structure. Prefer a clear
         // route; only smash through trees/rocks when there's genuinely no clear
         // way in.
         let engaged = (!foes.is_empty() || siege) && {
-            if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
+            if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
                 world.walkable_for(owner, x, y)
             }) {
                 e.set_path(p);
                 true
-            } else if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, &goal, |x, y| {
+            } else if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
                 world.walkable_for_siege(owner, x, y)
             }) {
                 e.set_path(p);
@@ -2592,7 +2585,7 @@ fn soldier_behavior(
         }
     }
 
-    // Nothing to fight: build a pending hut order if one's within reach…
+    // Nothing to fight: build a pending hut order if one's within reach,
     if e.path_done() {
         if let Some(order) = pick_hut_order(world, owner, e.tile(), hut_orders) {
             if adjacent(e.tile(), order) {
@@ -2602,15 +2595,15 @@ fn soldier_behavior(
                 set_anim(e, Anim::Act, dt);
                 return None;
             }
-            if let Some(stand) = stand_tile(world, owner, order) {
-                if let Some(p) = pathfind::path_to(world, owner, e.tile(), stand, PATH_BUDGET) {
-                    e.set_path(p);
-                    set_anim(e, Anim::Walk, dt);
-                    return None;
-                }
+            if let Some(stand) = stand_tile(world, owner, order)
+                && let Some(p) = pathfind::path_to(world, owner, e.tile(), stand, PATH_BUDGET)
+            {
+                e.set_path(p);
+                set_anim(e, Anim::Walk, dt);
+                return None;
             }
         }
-        // …otherwise just potter about.
+        // otherwise just putter around.
         wander_behavior(world, e, owner, None, rng, dt);
         return None;
     }
@@ -2711,19 +2704,18 @@ fn wander_behavior(
     for _ in 0..12 {
         let tx = cx + rng.range(-6, 7);
         let ty = cy + rng.range(-6, 7);
-        if let Some((h, r)) = home {
-            if !within_home(h, tx, ty, r) {
-                continue;
-            }
+        if let Some((h, r)) = home
+            && !within_home(h, tx, ty, r)
+        {
+            continue;
         }
-        if world.walkable_for(owner, tx, ty) {
-            if let Some(p) = pathfind::path_to(world, owner, (cx, cy), (tx, ty), 512) {
-                if !p.is_empty() {
-                    e.set_path(p);
-                    set_anim(e, Anim::Walk, dt);
-                    return;
-                }
-            }
+        if world.walkable_for(owner, tx, ty)
+            && let Some(p) = pathfind::path_to(world, owner, (cx, cy), (tx, ty), 512)
+            && !p.is_empty()
+        {
+            e.set_path(p);
+            set_anim(e, Anim::Walk, dt);
+            return;
         }
     }
     e.repath = 0.8;
@@ -2748,7 +2740,7 @@ fn follow_path(e: &mut Entity, speed: f32, dt: f32) -> bool {
     true
 }
 
-/// Plot a water-only route from `start` (a water tile) to the nearest port — a
+/// Plot a water-only route from `start` (a water tile) to the nearest port, a
 /// water tile touching an allied house. Returns `None` if no allied coast is
 /// reachable across water within the search budget. Because the route travels
 /// only over water tiles, a ship following it never crosses land.
@@ -2793,7 +2785,7 @@ fn advance_ship(s: &mut Ship, dt: f32) -> bool {
 /// Steer a warship toward the current waypoint of its (smoothed) route, aiming
 /// several tiles ahead so it holds a straight, readable heading instead of
 /// staircasing tile-to-tile. Skips waypoints it has effectively reached. Returns
-/// whether it moved (false when the route is spent — i.e. holding station).
+/// whether it moved (false when the route is spent, meaning it's holding station).
 fn advance_warship(w: &mut Warship, dt: f32) -> bool {
     let step = WARSHIP_SPEED * dt;
     while w.path_cursor < w.path.len() {
@@ -2801,7 +2793,7 @@ fn advance_warship(w: &mut Warship, dt: f32) -> bool {
         let to = goal - w.pos;
         let dist = to.length();
         if dist < 0.4 {
-            // Close enough to this waypoint — lock onto the next one.
+            // Close enough to this waypoint, so lock onto the next one.
             w.path_cursor += 1;
             continue;
         }
@@ -2833,7 +2825,7 @@ fn plan_firing_position(world: &World, start: Tile, target: Vec2) -> Vec<Tile> {
 
 /// Collapse a tile-by-tile BFS route into a short list of waypoints joined by
 /// straight, all-water legs (string-pulling). The ship then sails each leg in a
-/// clean line rather than zig-zagging along the grid, which reads far better —
+/// clean line rather than zig-zagging along the grid, which reads far better
 /// and keeps its facing steady.
 fn smooth_water_path(world: &World, start: Tile, path: &[Tile]) -> Vec<Tile> {
     if path.len() <= 1 {
@@ -2855,7 +2847,7 @@ fn smooth_water_path(world: &World, start: Tile, path: &[Tile]) -> Vec<Tile> {
     out
 }
 
-/// Is every tile on the straight line from `a` to `b` open water? (Bresenham —
+/// Is every tile on the straight line from `a` to `b` open water? (Bresenham,
 /// used to straighten warship routes without cutting a corner across land.)
 fn water_line_of_sight(world: &World, a: Tile, b: Tile) -> bool {
     let (mut x, mut y) = a;
@@ -2888,8 +2880,8 @@ fn water_line_of_sight(world: &World, a: Tile, b: Tile) -> bool {
 /// only once out on the deep sea does it wander from one open-water spot to the
 /// next. Empty vec if nowhere handy is reachable (the ship then holds station).
 fn plan_patrol(world: &mut World, rng: &mut Rng, start: Tile) -> Vec<Tile> {
-    // Generate enough sea around the ship that the search for the ocean — and
-    // for open-sea neighbours — has real tiles to look at.
+    // Generate enough sea around the ship that the search for the ocean (and
+    // for open-sea neighbors) has real tiles to look at.
     world.ensure_region(
         start.0 - PATROL_SCAN,
         start.1 - PATROL_SCAN,
@@ -2911,10 +2903,9 @@ fn plan_patrol(world: &mut World, rng: &mut Rng, start: Tile) -> Vec<Tile> {
                 NAVY_PATH_BUDGET,
                 |x, y| (x, y) == goal,
                 |x, y| world.is_open_water(x, y),
-            ) {
-                if !p.is_empty() {
-                    return p;
-                }
+            ) && !p.is_empty()
+            {
+                return p;
             }
         }
         Vec::new()
@@ -2938,13 +2929,13 @@ fn adjacent(a: Tile, b: Tile) -> bool {
     (a.0 - b.0).abs() + (a.1 - b.1).abs() == 1
 }
 
-/// A neighbouring resource node, optionally restricted to a preferred kind.
+/// A neighboring resource node, optionally restricted to a preferred kind.
 fn neighbor_node(world: &World, x: i32, y: i32, kind: Option<Resource>) -> Option<Tile> {
     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        if let Some(n) = world.node(x + dx, y + dy) {
-            if kind.map_or(true, |k| k == n.kind) {
-                return Some((x + dx, y + dy));
-            }
+        if let Some(n) = world.node(x + dx, y + dy)
+            && kind.is_none_or(|k| k == n.kind)
+        {
+            return Some((x + dx, y + dy));
         }
     }
     None
@@ -2959,10 +2950,10 @@ fn plan_gather(
     pref: Option<Resource>,
     home: &[Tile],
 ) -> Option<(Vec<Tile>, Tile)> {
-    if pref.is_some() {
-        if let Some(found) = plan_gather_kind(world, owner, start, pref, home) {
-            return Some(found);
-        }
+    if pref.is_some()
+        && let Some(found) = plan_gather_kind(world, owner, start, pref, home)
+    {
+        return Some(found);
     }
     plan_gather_kind(world, owner, start, None, home)
 }
@@ -2991,10 +2982,10 @@ fn plan_gather_kind(
 fn adjacent_enemy_wall(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
         let (nx, ny) = (tile.0 + dx, tile.1 + dy);
-        if let Some(w) = world.wall(nx, ny) {
-            if owner_hostile(w.owner, owner) {
-                return Some((nx, ny));
-            }
+        if let Some(w) = world.wall(nx, ny)
+            && owner_hostile(w.owner, owner)
+        {
+            return Some((nx, ny));
         }
     }
     None
@@ -3014,10 +3005,10 @@ fn any_hostile_hut(world: &World, owner: u8, huts: &[Tile]) -> bool {
 fn adjacent_enemy_hut(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
         let (nx, ny) = (tile.0 + dx, tile.1 + dy);
-        if let Some(h) = world.hut(nx, ny) {
-            if owner_hostile(h.owner, owner) {
-                return Some((nx, ny));
-            }
+        if let Some(h) = world.hut(nx, ny)
+            && owner_hostile(h.owner, owner)
+        {
+            return Some((nx, ny));
         }
     }
     None
@@ -3042,7 +3033,7 @@ fn choose_wall_tile(world: &World, center: Tile) -> Option<Tile> {
     None
 }
 
-/// World-space centre of a village (the mean of its house tiles).
+/// World-space center of a village (the mean of its house tiles).
 fn village_center(village: &[Tile]) -> Vec2 {
     let n = village.len().max(1) as f32;
     let sx: i32 = village.iter().map(|t| t.0).sum();
@@ -3075,7 +3066,7 @@ fn cluster(tiles: &[Tile]) -> Vec<Vec<Tile>> {
 /// `near`. Villages **prefer to sit by the water**: a riverside or coastal spot
 /// (open water within `VILLAGE_WATER_RADIUS`) is chosen when one is available,
 /// falling back to the plain nearest land only where the area is landlocked. In
-/// a world now laced with rivers, this puts most settlements on a waterway — and
+/// a world now laced with rivers, this puts most settlements on a waterway and
 /// squarely within reach of the navy.
 fn find_land_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile> {
     // Generate a margin past `r` too, so the near-water test doesn't misread the
@@ -3094,11 +3085,11 @@ fn find_land_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile> {
                 continue;
             }
             let d = (x - near.0).abs() + (y - near.1).abs();
-            if best_any.map_or(true, |(_, bd)| d < bd) {
+            if best_any.is_none_or(|(_, bd)| d < bd) {
                 best_any = Some(((x, y), d));
             }
             if has_water_within(world, x, y, VILLAGE_WATER_RADIUS)
-                && best_waterside.map_or(true, |(_, bd)| d < bd)
+                && best_waterside.is_none_or(|(_, bd)| d < bd)
             {
                 best_waterside = Some(((x, y), d));
             }
@@ -3108,7 +3099,7 @@ fn find_land_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile> {
 }
 
 /// Distance (in tiles) from a village anchor within which a river or coast makes
-/// the spot "waterside" — close enough that the navy can reach it.
+/// the spot "waterside", close enough that the navy can reach it.
 const VILLAGE_WATER_RADIUS: i32 = 4;
 
 /// Is there open water within `rad` tiles (Chebyshev) of `(x, y)`?
@@ -3128,7 +3119,7 @@ fn has_water_within(world: &World, x: i32, y: i32, rad: i32) -> bool {
 /// count as the same landmass). Bounded by `max_radius` from the seed and a
 /// hard tile cap so a freak mega-continent can't stall world creation. Used to
 /// keep allied villages *off* the home continent, so reaching them means a sea
-/// voyage — the whole point of the cargo ships.
+/// voyage. That's the whole point of the cargo ships.
 fn home_continent_tiles(
     world: &mut World,
     seed: Tile,
@@ -3164,7 +3155,7 @@ fn home_continent_tiles(
     seen
 }
 
-/// Find the open-grass tile nearest the origin that sits right by the shore —
+/// Find the open-grass tile nearest the origin that sits right by the shore:
 /// land with open water within a few tiles, but not so surrounded by sea that a
 /// village's houses would spill into it. Used to plant the player's capital on
 /// the coast. Returns `None` only if no land near origin is close to water.
@@ -3185,7 +3176,7 @@ fn coastal_start(world: &mut World, r: i32) -> Option<Tile> {
                 continue;
             }
             let d = x.abs() + y.abs();
-            if best.map_or(true, |(_, bd)| d < bd) {
+            if best.is_none_or(|(_, bd)| d < bd) {
                 best = Some(((x, y), d));
             }
         }
@@ -3195,7 +3186,7 @@ fn coastal_start(world: &mut World, r: i32) -> Option<Tile> {
 
 /// The open-water tile nearest `(cx, cy)` within radius `r` (Chebyshev).
 /// Find a shoreline anchor whose coast fronts the *open ocean*, not an inland
-/// lake or enclosed sea — so a cargo ship can actually sail there. Returns the
+/// lake or enclosed sea, so a cargo ship can actually sail there. Returns the
 /// ocean-coast grass tile nearest `near`, or `None` if none is within `r`.
 fn find_ocean_coast_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile> {
     use crate::world::Tile as WTile;
@@ -3235,7 +3226,7 @@ fn find_ocean_coast_anchor(world: &mut World, near: Tile, r: i32) -> Option<Tile
 /// Sail out from `start_sea` (BFS over open water, 4-connected, bounded by
 /// `explore_cap` tiles) and collect every off-home coast tile the ship can
 /// reach. Any ally settled on one of these is guaranteed a working sea route
-/// back to the player — reachability is established by construction rather than
+/// back to the player. Reachability is established by construction rather than
 /// hoped for.
 fn reachable_overseas_coasts(
     world: &mut World,
@@ -3278,7 +3269,7 @@ fn reachable_overseas_coasts(
     coasts
 }
 
-/// Is `(x, y)` open ocean — water (and not a bridge) with enough water around it
+/// Is `(x, y)` open ocean, meaning water (and not a bridge) with enough water around it
 /// to be the true sea rather than a river or lake mouth? Pirates only spawn on
 /// and sail across such tiles, so they never wander up rivers into the interior.
 fn open_sea(world: &World, x: i32, y: i32) -> bool {
@@ -3294,10 +3285,10 @@ fn open_sea(world: &World, x: i32, y: i32) -> bool {
             }
         }
     }
-    water >= OPEN_SEA_NEIGHBOURS
+    water >= OPEN_SEA_NEIGHBORS
 }
 
-/// Position of the nearest player vessel — cargo ship or warship — within `max`
+/// Position of the nearest player vessel (cargo ship or warship) within `max`
 /// of `from`, if any. What a pirate hunts and shells.
 fn nearest_player_vessel(
     ships: &[Ship],
@@ -3338,7 +3329,7 @@ fn nearest_water(world: &mut World, cx: i32, cy: i32, r: i32) -> Option<Tile> {
         for x in (cx - r)..=(cx + r) {
             if world.tile(x, y) == crate::world::Tile::Water {
                 let d = (x - cx).abs() + (y - cy).abs();
-                if best.map_or(true, |(_, bd)| d < bd) {
+                if best.is_none_or(|(_, bd)| d < bd) {
                     best = Some(((x, y), d));
                 }
             }
@@ -3390,7 +3381,7 @@ fn carve_river_to_sea(world: &mut World, seed: Tile, avoid: &[Tile]) {
     // BFS out from the lake (4-connected). Passable = land or water; the lake's
     // own water seeds the search, land tiles become river candidates, and any
     // *other* water body large enough to be the sea is the goal. Only the land
-    // tiles on the chosen path are carved — existing water already connects.
+    // tiles on the chosen path are carved, since existing water already connects.
     let mut came: HashMap<Tile, Tile> = HashMap::new();
     let mut visited: HashSet<Tile> = body.clone();
     let mut q: VecDeque<Tile> = body.iter().copied().collect();
@@ -3407,7 +3398,7 @@ fn carve_river_to_sea(world: &mut World, seed: Tile, avoid: &[Tile]) {
             }
             let tile = world.tile(n.0, n.1);
             if tile == WTile::Water {
-                // A different water body — is it the open sea?
+                // A different water body. Is it the open sea?
                 if flood_water(world, n.0, n.1, OCEAN_MIN_SIZE).0 {
                     came.insert(n, t);
                     mouth = Some(n);
@@ -3794,7 +3785,7 @@ impl Game {
             for _ in 0..plen {
                 path.push((r.i32()?, r.i32()?));
             }
-            // Facing isn't persisted — recover it from the leg the ship is on.
+            // Facing isn't persisted, so recover it from the leg the ship is on.
             let facing = path
                 .get(path_cursor)
                 .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - pos));
@@ -3997,7 +3988,7 @@ mod tests {
         view_height: 28.0,
     };
 
-    /// Find a water tile touching an allied house — the destination coast a ship
+    /// Find a water tile touching an allied house, the destination coast a ship
     /// sails to. Returns `None` if no allied coast exists.
     fn find_ally_port(game: &Game) -> Option<Tile> {
         for &(hx, hy) in &game.world.ally_house_tiles {
@@ -4011,7 +4002,7 @@ mod tests {
         None
     }
 
-    /// A launchable home port: open water within the player's harbour that has a
+    /// A launchable home port: open water within the player's harbor that has a
     /// sea route to an allied coast. `None` if the village can't ship anywhere.
     fn find_player_port(game: &Game) -> Option<Tile> {
         for &(hx, hy) in &game.player_house_tiles {
@@ -4091,7 +4082,7 @@ mod tests {
         // leave the cargo untouched. (Land-locked water also can't reach one.)
         let mut game = Game::new(3);
         game.world.ally_house_tiles.clear();
-        // Open water in the village's own harbour, so the launch is refused for
+        // Open water in the village's own harbor, so the launch is refused for
         // want of a route rather than for being too far from home.
         let mut water = None;
         'find: for &(hx, hy) in &game.player_house_tiles {
@@ -4217,7 +4208,7 @@ mod tests {
         use crate::world::Tile as WTile;
         // In the forced-land ring around the origin (where the home bias would
         // otherwise leave dry ground), the river network should put a meaningful
-        // — but not drowning — amount of water on the map.
+        // (but not drowning) amount of water on the map.
         for seed in [1, 5, 9, 13] {
             let mut world = World::new(seed);
             let r = 100;
@@ -4250,7 +4241,7 @@ mod tests {
     }
 
     #[test]
-    fn villages_favour_the_waterside() {
+    fn villages_favor_the_waterside() {
         // With rivers everywhere and anchors biased to the shore, the great
         // majority of settlements should sit within reach of the water.
         let (mut waterside, mut total) = (0u32, 0u32);
@@ -4401,7 +4392,7 @@ mod tests {
     #[test]
     fn warship_routes_are_smoothed_into_straight_legs() {
         let mut world = World::new(1);
-        // A dead-straight east–west corridor collapses to a single far leg, so
+        // A dead-straight east-west corridor collapses to a single far leg, so
         // the ship sails it in one clean line instead of staircasing.
         world.ensure_region(-2, -2, 24, 14);
         for x in 0..=20 {
@@ -4433,7 +4424,7 @@ mod tests {
         let target = tile_center((0, -15)); // land, straight north of the ship
 
         // The tile immediately toward the target is land, so a greedy step is
-        // blocked — the fix must route through open water instead.
+        // blocked, so the fix must route through open water instead.
         assert!(
             !world.is_open_water(0, -1),
             "the straight-ahead tile is land"
@@ -4479,7 +4470,7 @@ mod tests {
             hp: WARSHIP_MAX_HP,
         });
 
-        // Sim window far away, so the enemy's own AI never runs — only the navy
+        // Sim window far away, so the enemy's own AI never runs. Only the navy
         // (which updates every frame) and the shells it fires move.
         let sim = (200, 200, 210, 210);
         let mut shelled = false;
@@ -4495,7 +4486,7 @@ mod tests {
         let d = (target_of(&game) - game.warships[0].pos).length();
         assert!(
             d <= WARSHIP_FIRE_RANGE + 1.5,
-            "warship never reached firing range (d={d:.1}) — it got stuck",
+            "warship never reached firing range (d={d:.1}), so it got stuck",
         );
         assert!(shelled, "warship navigated but never shelled the enemy");
     }
@@ -4526,10 +4517,10 @@ mod tests {
         for x in 0..=10 {
             game.world.carve_water(x, 0);
         }
-        // The ship starts in the narrow channel — not yet open sea — while the
+        // The ship starts in the narrow channel (not yet open sea) while the
         // basin's middle is.
         assert!(!open_sea(&game.world, 0, 0), "channel isn't open sea");
-        assert!(open_sea(&game.world, 17, 0), "basin centre is open sea");
+        assert!(open_sea(&game.world, 17, 0), "basin center is open sea");
 
         game.warships.push(Warship {
             pos: tile_center((0, 0)),

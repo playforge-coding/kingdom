@@ -220,23 +220,23 @@ impl World {
     }
     pub fn is_house(&self, x: i32, y: i32) -> bool {
         self.chunk_at(x, y)
-            .map_or(false, |c| c.houses[li(local_of(x), local_of(y))])
+            .is_some_and(|c| c.houses[li(local_of(x), local_of(y))])
     }
     pub fn is_enemy_house(&self, x: i32, y: i32) -> bool {
         self.chunk_at(x, y)
-            .map_or(false, |c| c.enemy_houses[li(local_of(x), local_of(y))])
+            .is_some_and(|c| c.enemy_houses[li(local_of(x), local_of(y))])
     }
     pub fn is_ally_house(&self, x: i32, y: i32) -> bool {
         self.chunk_at(x, y)
-            .map_or(false, |c| c.ally_houses[li(local_of(x), local_of(y))])
+            .is_some_and(|c| c.ally_houses[li(local_of(x), local_of(y))])
     }
     pub fn is_bridge(&self, x: i32, y: i32) -> bool {
         self.chunk_at(x, y)
-            .map_or(false, |c| c.bridges[li(local_of(x), local_of(y))])
+            .is_some_and(|c| c.bridges[li(local_of(x), local_of(y))])
     }
     pub fn is_cave(&self, x: i32, y: i32) -> bool {
         self.chunk_at(x, y)
-            .map_or(false, |c| c.caves[li(local_of(x), local_of(y))])
+            .is_some_and(|c| c.caves[li(local_of(x), local_of(y))])
     }
     pub fn wall(&self, x: i32, y: i32) -> Option<Wall> {
         self.chunk_at(x, y)
@@ -259,10 +259,10 @@ impl World {
             return false;
         };
         let i = li(local_of(x), local_of(y));
-        if let Some(w) = c.walls[i] {
-            if w.owner != owner {
-                return false;
-            }
+        if let Some(w) = c.walls[i]
+            && w.owner != owner
+        {
+            return false;
         }
         if c.bridges[i] {
             return true;
@@ -283,10 +283,10 @@ impl World {
             return false;
         };
         let i = li(local_of(x), local_of(y));
-        if let Some(w) = c.walls[i] {
-            if w.owner != owner {
-                return false;
-            }
+        if let Some(w) = c.walls[i]
+            && w.owner != owner
+        {
+            return false;
         }
         if c.bridges[i] {
             return true;
@@ -351,10 +351,10 @@ impl World {
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 let (nx, ny) = (x + dx, y + dy);
-                if let Some(w) = self.wall(nx, ny) {
-                    if w.owner == from_owner {
-                        self.set_wall(nx, ny, to_owner, w.hp);
-                    }
+                if let Some(w) = self.wall(nx, ny)
+                    && w.owner == from_owner
+                {
+                    self.set_wall(nx, ny, to_owner, w.hp);
                 }
             }
         }
@@ -401,23 +401,23 @@ impl World {
 
     /// Add a sheltering farmer to a hut. Returns false if the hut is gone.
     pub fn add_hut_occupant(&mut self, x: i32, y: i32) -> bool {
-        if let Some(c) = self.chunk_at_mut(x, y) {
-            if let Some(h) = &mut c.huts[li(local_of(x), local_of(y))] {
-                h.occupants = h.occupants.saturating_add(1);
-                return true;
-            }
+        if let Some(c) = self.chunk_at_mut(x, y)
+            && let Some(h) = &mut c.huts[li(local_of(x), local_of(y))]
+        {
+            h.occupants = h.occupants.saturating_add(1);
+            return true;
         }
         false
     }
 
     /// Empty a hut of shelterers, returning how many were inside.
     pub fn release_hut(&mut self, x: i32, y: i32) -> u8 {
-        if let Some(c) = self.chunk_at_mut(x, y) {
-            if let Some(h) = &mut c.huts[li(local_of(x), local_of(y))] {
-                let n = h.occupants;
-                h.occupants = 0;
-                return n;
-            }
+        if let Some(c) = self.chunk_at_mut(x, y)
+            && let Some(h) = &mut c.huts[li(local_of(x), local_of(y))]
+        {
+            let n = h.occupants;
+            h.occupants = 0;
+            return n;
         }
         0
     }
@@ -465,7 +465,7 @@ impl World {
         }
     }
 
-    /// Remove a resource node outright (no yield) — a knight smashing through.
+    /// Remove a resource node outright (no yield), as when a knight smashes through.
     pub fn clear_node(&mut self, x: i32, y: i32) {
         if let Some(c) = self.chunk_at_mut(x, y) {
             c.nodes[li(local_of(x), local_of(y))] = None;
@@ -488,7 +488,7 @@ impl World {
 
     /// Plant a camp near a tile, spacing houses on grass. `owner` tags the camp
     /// (1 = enemy, 2 = ally). Used once at world creation so there is always a
-    /// rival — and a trade partner — established on the island.
+    /// rival (and a trade partner) established on the island.
     pub fn plant_camp(&mut self, center: (i32, i32), count: usize, owner: u8) {
         let (cx0, cy0) = center;
         self.ensure_region(cx0 - 6, cy0 - 6, cx0 + 6, cy0 + 6);
@@ -564,16 +564,16 @@ const HOME_SOLID: f32 = 28.0;
 const HOME_RADIUS: f32 = 155.0;
 
 /// How close (in tiles) to a river-noise zero-isoline a land tile must be to be
-/// carved into a river. Because the raw noise value is normalised by its local
+/// carved into a river. Because the raw noise value is normalized by its local
 /// gradient, this is a real tile distance, so a river stays a steady width
 /// rather than ballooning where the noise flattens. The main network runs a
-/// touch wider than the tributaries — together ~2–3 tiles across.
+/// touch wider than the tributaries, together about 2-3 tiles across.
 const RIVER_HALF_WIDTH_MAIN: f32 = 1.4;
 const RIVER_HALF_WIDTH_TRIB: f32 = 1.05;
 
 /// Approximate distance, in tiles, from `(x, y)` to the nearest zero-isoline of
 /// a (domain-warped) river-noise field. Dividing the noise value by its local
-/// gradient converts "value near zero" into "close to the channel centre" in
+/// gradient converts "value near zero" into "close to the channel center" in
 /// real tile units, so a fixed threshold yields a steady-width river regardless
 /// of how steep or flat the underlying noise is.
 fn river_channel_dist(noise: &FastNoiseLite, x: i32, y: i32) -> f32 {
@@ -591,7 +591,7 @@ fn river_channel_dist(noise: &FastNoiseLite, x: i32, y: i32) -> f32 {
 /// Generate one chunk deterministically from the seed and chunk coordinates.
 fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
     // Continental shape: a very low-frequency fractal (FBm) lays out the big
-    // picture — broad landmasses separated by wide oceans. Low frequency means
+    // picture: broad landmasses separated by wide oceans. Low frequency means
     // each feature spans hundreds of tiles, so continents and seas are large.
     let mut continent = FastNoiseLite::with_seed(seed);
     continent.set_noise_type(Some(NoiseType::OpenSimplex2));
@@ -616,7 +616,7 @@ fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
     // winding waterways across the map. Domain warp bends those isolines so the
     // channels meander like real rivers rather than running in smooth arcs. The
     // first field is a broad main network; the second, higher-frequency one adds
-    // finer tributaries — carving both gives a dense, branching river system.
+    // finer tributaries. Carving both gives a dense, branching river system.
     let mut river_main = FastNoiseLite::with_seed(seed.wrapping_add(7777));
     river_main.set_noise_type(Some(NoiseType::OpenSimplex2));
     river_main.set_fractal_type(Some(FractalType::FBm));
@@ -710,13 +710,13 @@ fn generate_chunk(seed: i32, cx: i32, cy: i32) -> Chunk {
 }
 
 /// Longest water gap we will bridge automatically (within a single chunk). Kept
-/// to a single tile so that rivers (2–3 tiles wide) stay genuine water barriers
-/// — crossed by a boat or a player-built bridge, not paved over automatically.
+/// to a single tile so that rivers (2-3 tiles wide) stay genuine water barriers,
+/// crossed by a boat or a player-built bridge, not paved over automatically.
 const MAX_BRIDGE_GAP: i32 = 1;
 
 /// Is the local tile within this chunk water? (Out-of-chunk reads as non-water.)
 fn tile_is_water(tiles: &[Tile], x: i32, y: i32) -> bool {
-    x >= 0 && x < CHUNK && y >= 0 && y < CHUNK && tiles[li(x, y)] == Tile::Water
+    (0..CHUNK).contains(&x) && (0..CHUNK).contains(&y) && tiles[li(x, y)] == Tile::Water
 }
 
 /// Bridge short water channels bounded by grass, within this chunk only.

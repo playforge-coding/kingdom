@@ -6,12 +6,12 @@ comments: true
 
 There are three ways to play Kingdom:
 
-- **[Play in your browser](https://playforge-coding.github.io/kingdom/play/)** —
-  nothing to install; the game runs on GitHub Pages.
-- **Download a prebuilt binary** — grab a self-contained executable for Windows,
+- **[Play in your browser](https://playforge-coding.github.io/kingdom/play/)**.
+  There's nothing to install; the game runs on GitHub Pages.
+- **Download a prebuilt binary.** Grab a self-contained executable for Windows,
   macOS, or Linux from the [Releases](https://github.com/playforge-coding/kingdom/releases)
   page, then run it. Each archive holds a single binary with the textures baked in.
-- **Build from source** — as a native binary or a WebAssembly bundle you serve
+- **Build from source**, as a native binary or a WebAssembly bundle you serve
   yourself, using the steps below.
 
 ## Prerequisites
@@ -49,8 +49,10 @@ subsequent runs are fast. A window opens on the [main menu](gameplay.md#worlds-a
 !!! tip "Faster debug builds"
     A plain `cargo run` (no `--release`) compiles with
     [Cranelift](https://github.com/rust-lang/rustc_codegen_cranelift) instead of
-    LLVM, which turns out unoptimised code much faster. Release builds always
-    use LLVM.
+    LLVM, which turns out unoptimized code much faster. Release builds always
+    use LLVM. The crates egui uses to draw text (`vello_cpu` and its SIMD
+    helpers) stay on LLVM even in debug builds, since Cranelift doesn't support
+    their NEON intrinsics yet.
 
 ## Web
 
@@ -73,10 +75,11 @@ Cranelift has no WebAssembly backend, so the non-release web build uses a
 `web-dev` Cargo profile that keeps LLVM.
 
 wgpu is compiled with the `webgl` feature so the game runs in browsers without
-native WebGPU support. The static `dist/` bundle is plain files — host it on any
-static web server.
+native WebGPU support. If a browser advertises WebGPU but can't actually provide
+a GPU adapter, the game falls back to WebGL. The static `dist/` bundle is just
+plain files, so you can host it on any static web server.
 
 ## Next steps
 
-- **[Controls & HUD](controls.md)** — how to pan, zoom, and build.
-- **[Gameplay](gameplay.md)** — the moment-to-moment loop and how you win ground.
+- **[Controls & HUD](controls.md):** how to pan, zoom, and build.
+- **[Gameplay](gameplay.md):** the moment-to-moment loop and how you win ground.

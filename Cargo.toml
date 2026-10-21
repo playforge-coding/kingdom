@@ -1,26 +1,29 @@
 [package]
 name = "kingdom"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "AGPL-3.0-only"
 
 [dependencies]
-winit = "0.30"
-wgpu = "24"
+winit = "0.30.13"
+wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
-glam = { version = "0.29", features = ["bytemuck"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+glam = { version = "0.34", features = ["bytemuck"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 fastnoise-lite = "1.1"
 log = "0.4"
 cfg-if = "1"
-egui = "0.31"
-egui-wgpu = "0.31"
-egui-winit = { version = "0.31", default-features = false }
+# egui no longer bundles fonts by default; without them no text renders.
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-wgpu = "0.37"
+egui-winit = { version = "0.37", default-features = false }
+# SVG loader for the HUD icons in assets/icons/.
+egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.11"
-pollster = "0.4"
-dirs = "6"
+pollster = "1"
+dirs = "7"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1"
@@ -34,14 +37,14 @@ web-sys = { version = "0.3", features = [
     "IdbTransactionMode", "IdbObjectStore", "IdbRequest", "Event",
 ] }
 # WebGL backend so the game runs in browsers without WebGPU.
-wgpu = { version = "24", features = ["webgl"] }
+wgpu = { version = "30", features = ["webgl"] }
 
 [profile.release]
 opt-level = 3
 
 # Keep wasm debug builds small-ish and fast to iterate.
 #
-# Debug builds go through cranelift, which produces unoptimised code a good deal
+# Debug builds go through cranelift, which produces unoptimized code a good deal
 # faster than LLVM does. The first block covers this crate, the second every
 # dependency, since `package."*"` does not reach the crate being built.
 [profile.dev]
@@ -50,6 +53,18 @@ codegen-backend = "cranelift"
 
 [profile.dev.package."*"]
 codegen-backend = "cranelift"
+
+# egui rasterizes glyphs with vello_cpu, whose SIMD code (through fearless_simd)
+# uses NEON intrinsics cranelift doesn't implement yet; debug builds abort on
+# the first frame without these on LLVM.
+[profile.dev.package.fearless_simd]
+codegen-backend = "llvm"
+
+[profile.dev.package.vello_common]
+codegen-backend = "llvm"
+
+[profile.dev.package.vello_cpu]
+codegen-backend = "llvm"
 
 # Cranelift has no wasm32 backend, so `trunk serve` and `trunk build` (without
 # `--release`) use this profile instead, which is `dev` back on LLVM. index.html
