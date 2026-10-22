@@ -216,6 +216,80 @@ pub struct Entity {
     /// For a bowman: seconds until the bow is drawn again. Transient, so a
     /// bowman loads with its bow ready.
     reload: f32,
+    /// For a melee soldier: the footwork of the fight it's in (see [`Duel`]).
+    /// Transient.
+    duel: Option<Duel>,
+    /// Seconds left running from a fight its nerve broke in (see
+    /// `check_morale`), and the foes it is running from. Transient.
+    flee: f32,
+    flee_from: Vec2,
+    /// Seconds until a soldier in a fight next checks its nerve. Transient.
+    morale: f32,
+    /// For a horseman: the charge it is riding, if any (see [`Charge`]), and
+    /// seconds until it can charge again. Transient.
+    charge: Option<Charge>,
+    charge_cooldown: f32,
+}
+
+/// Where a horseman's charge is at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChargePhase {
+    /// Riding off from a melee to get room for a run at the foe.
+    Wheel,
+    /// Galloping straight in at the nearest foe.
+    Run,
+}
+
+/// A horseman's lance charge: a run in at a foe at full gallop that lands as
+/// one heavy blow and shoves the foe back (see `cavalry_step`). Out of a
+/// melee it wheels off first to get room.
+#[derive(Clone, Copy)]
+struct Charge {
+    phase: ChargePhase,
+    /// Seconds left in the phase.
+    time: f32,
+}
+
+/// What a melee soldier is doing with its feet while it trades blows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stance {
+    /// Standing its ground a tile off the foe.
+    Hold,
+    /// Sidestepping around the foe at the same distance.
+    Circle,
+    /// Dodging back from the foe's blade, always followed by a `Lunge`. Only
+    /// some dodges come off (see `DODGE_CHANCE_PERCENT`).
+    StepBack,
+    /// Rushing back in, right up to the foe.
+    Lunge,
+}
+
+/// A melee soldier's footwork in a fight: rather than standing still on top
+/// of its foe, it holds, circles, or steps back and lunges in, changing up
+/// every second or so (see `melee_dance`).
+#[derive(Clone, Copy)]
+struct Duel {
+    stance: Stance,
+    /// Seconds left in the stance.
+    time: f32,
+    /// Which way it circles: 1 or -1.
+    spin: f32,
+    /// Seconds without a foe in blade reach (see `DUEL_LAPSE`).
+    lapse: f32,
+    /// For a step back: whether the dodge comes off.
+    dodge: bool,
+}
+
+impl Duel {
+    fn new() -> Self {
+        Duel {
+            stance: Stance::Hold,
+            time: 0.0,
+            spin: 1.0,
+            lapse: 0.0,
+            dodge: false,
+        }
+    }
 }
 
 fn max_hp_for(faction: Faction, job: Job) -> f32 {
@@ -257,6 +331,12 @@ impl Entity {
             pending: 0.0,
             jump: None,
             reload: 0.0,
+            duel: None,
+            flee: 0.0,
+            flee_from: Vec2::ZERO,
+            morale: 0.0,
+            charge: None,
+            charge_cooldown: 0.0,
         }
     }
 
@@ -627,6 +707,26 @@ const HORSEMAN_JUMP_TIME: f32 = 0.45;
 /// How high, in tiles, a leaping horseman rises at the top of its arc. Purely
 /// visual.
 const HORSEMAN_JUMP_HEIGHT: f32 = 0.6;
+/// A horseman charges a foe it has a clear run at within this distance...
+const CHARGE_RANGE: f32 = 6.0;
+/// ...but no nearer than this, which is too close to build up speed.
+const CHARGE_MIN_RANGE: f32 = 2.5;
+/// How fast a charging horseman rides.
+const CHARGE_SPEED: f32 = 1.5 * HORSEMAN_SPEED;
+/// The blow a charge lands on impact, all at once: half a knight.
+const CHARGE_DAMAGE: f32 = 30.0;
+/// How far the impact shoves the foe back.
+const CHARGE_KNOCKBACK: f32 = 0.8;
+/// The longest a charge runs before it is called off.
+const CHARGE_TIME: f32 = 1.5;
+/// How far from the foe a horseman wheels off to before charging back in,
+/// and the longest it spends riding out there.
+const CHARGE_WHEEL_DISTANCE: f32 = 3.5;
+const CHARGE_WHEEL_TIME: f32 = 1.0;
+/// Seconds before a horseman can charge again after one lands...
+const CHARGE_COOLDOWN: f32 = 6.0;
+/// ...and after one is called off.
+const CHARGE_RETRY: f32 = 1.5;
 const HARVEST_TIME: f32 = 2.0;
 
 /// How fast a unit of this job walks.
@@ -673,7 +773,62 @@ const KNIGHT_BRIDGE_STEP_COST: u32 = 1 + (KNIGHT_BRIDGE_TIME * KNIGHT_SPEED) as 
 /// ground, then through trees, then across water), so it gets their combined
 /// budget.
 const KNIGHT_PATH_BUDGET: usize = 3 * PATH_BUDGET;
-const COMBAT_RANGE: f32 = 0.9;
+/// How close a soldier must be to a foe to land blows on it: a little over a
+/// tile, so two fighters trade blows from neighboring tiles.
+const COMBAT_RANGE: f32 = 1.25;
+/// The closest two units in a fight ever stand, center to center. Anyone
+/// nearer a soldier in the thick of it is pushed apart (see
+/// `separate_combatants`), so a melee reads as figures trading blows rather
+/// than one sprite piled on another.
+const COMBAT_SPACING: f32 = 0.85;
+/// A soldier this close to a foe is in the battle and keeps its spacing,
+/// whether it is trading blows, closing in, chasing, or running.
+const BATTLE_RADIUS: f32 = 4.0;
+/// The most relaxation passes `separate_combatants` makes in a frame.
+const SEPARATION_PASSES: usize = 4;
+/// A dueling soldier stays on its foe while it is within this, even out of
+/// blade reach during a step back (see [`Duel`]).
+const DUEL_RADIUS: f32 = 2.2;
+/// How long a duel survives without any foe in blade reach before the soldier
+/// gives it up and goes back to the hunt. Longer than a step back and the
+/// lunge after it, so the dance itself never ends the fight.
+const DUEL_LAPSE: f32 = 1.0;
+/// The distance a dueling soldier keeps from its foe as it holds or circles:
+/// about a tile, standing on the neighboring one.
+const DUEL_DISTANCE: f32 = 1.0;
+/// How far back a dodge that comes off carries a soldier: out of reach.
+const DUEL_BACK_DISTANCE: f32 = 1.7;
+/// How far a dodge that fails gets: not far enough, still in the foe's reach.
+const DUEL_CAUGHT_DISTANCE: f32 = 1.1;
+/// The chance a step back comes off as a dodge. One that does takes no blade
+/// for as long as it lasts; one that doesn't is caught short and hit. Either
+/// way the dodger strikes nobody until it lunges back in.
+const DODGE_CHANCE_PERCENT: i32 = 60;
+/// Where a lunge aims, right up against the foe (`COMBAT_SPACING` stops it).
+const DUEL_LUNGE_DISTANCE: f32 = 0.7;
+const DUEL_STEP_BACK_TIME: f32 = 0.35;
+const DUEL_LUNGE_TIME: f32 = 0.3;
+/// How often a soldier in a fight checks its nerve.
+const MORALE_CHECK: f32 = 1.0;
+/// The soldiers counted, on both sides, when a soldier sizes up its odds.
+const MORALE_RADIUS: f32 = 5.0;
+/// The chance, at each check, that a soldier outnumbered three to two or worse
+/// breaks and runs. Low: most stand and fight, but a lopsided brawl sheds a
+/// few runners.
+const FLEE_CHANCE_PERCENT: i32 = 8;
+/// A bowman backs away from a knight or horseman closer than this, shooting
+/// all the while.
+const BOW_KITE_RANGE: f32 = 3.0;
+/// How fast a bowman backs away: slower than a knight walks, so a foe set on
+/// closing the distance still does.
+const BOW_KITE_SPEED: f32 = 0.7 * BOWMAN_SPEED;
+/// How long a rout lasts before the soldier has its nerve back.
+const FLEE_TIME: f32 = 4.0;
+/// How far from the foes it broke from a routed soldier runs.
+const FLEE_DISTANCE: f32 = 9.0;
+/// After a rout, how long before the soldier checks its nerve again, so it
+/// doesn't turn straight back around and run again.
+const MORALE_RECOVER: f32 = 6.0;
 /// How close a knight must get to the rally flag to count as "arrived" (which
 /// then lifts the flag for the whole group).
 const RALLY_ARRIVE_RADIUS: f32 = 2.5;
@@ -2008,17 +2163,24 @@ impl Game {
 
         // Combat: knights damage the nearest opponent in range, or hack at an
         // adjacent enemy wall or hut if no opponent is close. Bowmen shoot
-        // instead (see below).
+        // instead (see below). `close_foe` is where a melee soldier's foe
+        // stands, for its footwork (see `melee_dance`), or the nearest blade
+        // a bowman is backing away from (see `back_away`).
         let mut damage = vec![0f32; n];
         let mut acting = vec![false; n];
+        let mut close_foe: Vec<Option<Vec2>> = vec![None; n];
         let mut wall_damage: HashMap<Tile, f32> = HashMap::default();
         let mut hut_damage: HashMap<Tile, f32> = HashMap::default();
         for i in 0..n {
             let Some(adt) = step_dt[i] else { continue };
-            // A horseman in mid-air over a stream fights nobody until it lands.
-            if !self.entities[i].is_soldier() || self.entities[i].jump.is_some() {
+            // A horseman in mid-air over a stream fights nobody until it
+            // lands, and a soldier running from a fight strikes nobody until
+            // it has its nerve back.
+            let e = &mut self.entities[i];
+            if !e.is_soldier() || e.jump.is_some() || e.flee > 0.0 {
                 continue;
             }
+            e.morale -= adt;
             let (pi, fi) = snap[i];
             // A bowman stands and shoots: the nearest foe within bowshot takes
             // an arrow each time the bow is drawn again. It never hacks at a
@@ -2038,6 +2200,25 @@ impl Game {
                     }
                 });
                 if let Some(target) = best {
+                    if self.check_morale(i, &snap, &grid) {
+                        continue;
+                    }
+                    // Keep clear of the nearest blade closing in: a knight or
+                    // horseman, not a fellow archer or a villager. Once one
+                    // is in reach the bowman is caught and can only stand
+                    // and shoot point-blank.
+                    let mut threat: Option<Vec2> = None;
+                    let mut td = BOW_KITE_RANGE * BOW_KITE_RANGE;
+                    grid.for_each_within(pi, BOW_KITE_RANGE, |j, pj| {
+                        let other = &self.entities[j];
+                        let blade = matches!(other.job, Job::Knight | Job::Horseman);
+                        let d = pi.distance_squared(pj);
+                        if blade && hostile(fi, snap[j].1) && d <= td {
+                            td = d;
+                            threat = Some(pj);
+                        }
+                    });
+                    close_foe[i] = threat.filter(|_| td > COMBAT_RANGE * COMBAT_RANGE);
                     acting[i] = true;
                     self.entities[i].facing = dir_from_vec(target - pi);
                     if self.entities[i].reload <= 0.0 {
@@ -2052,9 +2233,35 @@ impl Game {
                 }
                 continue;
             }
+            // A horseman out on a charge trades no ordinary blows. The run
+            // lands when it reaches a foe: one heavy blow and a shove back,
+            // unless the foe dodges clear (see `cavalry_step`).
+            if let Some(c) = self.entities[i].charge {
+                if c.phase == ChargePhase::Run
+                    && let Some(j) = nearest_foe(&snap, &grid, pi, fi, COMBAT_RANGE)
+                {
+                    let e = &mut self.entities[i];
+                    e.charge = None;
+                    e.charge_cooldown = CHARGE_COOLDOWN;
+                    e.facing = dir_from_vec(snap[j].0 - pi);
+                    acting[i] = true;
+                    let target = &mut self.entities[j];
+                    let dodged = target
+                        .duel
+                        .is_some_and(|d| d.stance == Stance::StepBack && d.dodge);
+                    if !dodged {
+                        damage[j] += CHARGE_DAMAGE;
+                        if target.jump.is_none() {
+                            let shove = (snap[j].0 - pi).normalize_or_zero() * CHARGE_KNOCKBACK;
+                            nudge(&self.world, owner_of(snap[j].1), target, shove);
+                        }
+                    }
+                }
+                continue;
+            }
             let mut best: Option<usize> = None;
-            let mut bd = COMBAT_RANGE * COMBAT_RANGE;
-            grid.for_each_within(pi, COMBAT_RANGE, |j, pj| {
+            let mut bd = DUEL_RADIUS * DUEL_RADIUS;
+            grid.for_each_within(pi, DUEL_RADIUS, |j, pj| {
                 if j == i || !hostile(fi, snap[j].1) {
                     return;
                 }
@@ -2064,10 +2271,48 @@ impl Game {
                     best = Some(j);
                 }
             });
-            if let Some(j) = best {
-                damage[j] += ATTACK_DPS * adt;
-                acting[i] = true;
-                self.entities[i].facing = dir_from_vec(snap[j].0 - pi);
+            // A foe in blade reach starts (or keeps up) a duel. One just out
+            // of reach keeps a duel going for a moment, long enough to step
+            // back and lunge in again, but never starts one.
+            let in_reach = best.filter(|_| bd <= COMBAT_RANGE * COMBAT_RANGE);
+            let e = &mut self.entities[i];
+            let dueling = match (in_reach, best, e.duel.as_mut()) {
+                (Some(_), _, Some(d)) => {
+                    d.lapse = 0.0;
+                    true
+                }
+                (Some(_), _, None) => {
+                    e.duel = Some(Duel::new());
+                    true
+                }
+                (None, Some(_), Some(d)) if d.lapse < DUEL_LAPSE => {
+                    d.lapse += adt;
+                    true
+                }
+                _ => {
+                    e.duel = None;
+                    false
+                }
+            };
+            if dueling {
+                if self.check_morale(i, &snap, &grid) {
+                    continue;
+                }
+                let j = best.expect("a duel has a foe");
+                close_foe[i] = Some(snap[j].0);
+                // A soldier dodging strikes nobody, and one whose dodge came
+                // off takes no blade either; a dodge that failed is still in
+                // reach and takes the blows like anyone.
+                let dodging = |e: &Entity| e.duel.filter(|d| d.stance == Stance::StepBack);
+                if let Some(j) = in_reach
+                    && dodging(&self.entities[i]).is_none()
+                {
+                    if !dodging(&self.entities[j]).is_some_and(|d| d.dodge) {
+                        damage[j] += ATTACK_DPS * adt;
+                    }
+                    acting[i] = true;
+                    self.entities[i].facing = dir_from_vec(snap[j].0 - pi);
+                }
             } else if let Some(wall) =
                 adjacent_enemy_wall(&self.world, owner_of(fi), self.entities[i].tile())
             {
@@ -2149,6 +2394,7 @@ impl Game {
                         &snap,
                         &grid,
                         acting[i],
+                        close_foe[i],
                         under,
                         &self.player_house_tiles,
                         pref,
@@ -2166,6 +2412,7 @@ impl Game {
                     &snap,
                     &grid,
                     acting[i],
+                    close_foe[i],
                     under,
                     &self.player_house_tiles,
                     pref,
@@ -2182,6 +2429,7 @@ impl Game {
                     &snap,
                     &grid,
                     acting[i],
+                    close_foe[i],
                     under,
                     &self.world.enemy_house_tiles,
                     None,
@@ -2203,6 +2451,7 @@ impl Game {
                         &snap,
                         &grid,
                         acting[i],
+                        close_foe[i],
                         under && !merc,
                         &self.world.ally_house_tiles,
                         None,
@@ -2273,6 +2522,27 @@ impl Game {
             }
         }
 
+        // Spread out anyone crowding a fight, before the dead are removed so
+        // this frame's indices still line up. Any soldier close to a foe is
+        // in the battle, chasing or running included, not just those
+        // trading blows this very frame.
+        let engaged: Vec<bool> = (0..n)
+            .map(|i| {
+                if acting[i] || close_foe[i].is_some() {
+                    return true;
+                }
+                if !self.entities[i].is_soldier() {
+                    return false;
+                }
+                let mut near = false;
+                grid.for_each_within(snap[i].0, BATTLE_RADIUS, |j, _| {
+                    near |= hostile(snap[i].1, snap[j].1);
+                });
+                near
+            })
+            .collect();
+        self.separate_combatants(&engaged);
+
         // Remove the dead (tallying score) and any civilians who ducked into huts.
         let mut i = 0;
         while i < self.entities.len() {
@@ -2304,6 +2574,111 @@ impl Game {
         self.update_navy(dt);
         self.update_cannonballs(dt);
         self.update_arrows(dt);
+    }
+
+    /// A soldier in a fight checks its nerve every `MORALE_CHECK` seconds. When
+    /// the foe's soldiers close by outnumber its own side three to two or
+    /// worse, it may break and run (`FLEE_CHANCE_PERCENT`), dropping whatever
+    /// it was doing. Soldiers already running count for neither side. Returns
+    /// whether it broke.
+    fn check_morale(&mut self, i: usize, snap: &[(Vec2, Faction)], grid: &Grid) -> bool {
+        if self.entities[i].morale > 0.0 {
+            return false;
+        }
+        self.entities[i].morale = MORALE_CHECK;
+        let (pi, fi) = snap[i];
+        let (mut friends, mut foes, mut center) = (0usize, 0usize, Vec2::ZERO);
+        grid.for_each_within(pi, MORALE_RADIUS, |j, pj| {
+            let other = &self.entities[j];
+            if !other.is_soldier() || other.flee > 0.0 {
+                return;
+            }
+            if hostile(fi, snap[j].1) {
+                foes += 1;
+                center += pj;
+            } else if snap[j].1 == fi {
+                friends += 1;
+            }
+        });
+        let outnumbered = foes >= 2 && foes * 2 >= friends * 3;
+        if !outnumbered || self.rng.range(0, 100) >= FLEE_CHANCE_PERCENT {
+            return false;
+        }
+        let e = &mut self.entities[i];
+        e.flee = FLEE_TIME;
+        e.flee_from = center / foes as f32;
+        e.morale = FLEE_TIME + MORALE_RECOVER;
+        e.duel = None;
+        e.charge = None;
+        e.harvest_timer = 0.0;
+        e.target_node = None;
+        e.build_site = None;
+        e.set_path(Vec::new());
+        e.repath = 0.0;
+        true
+    }
+
+    /// Keep a fight legible: no two units stand within `COMBAT_SPACING` of
+    /// each other where at least one is a soldier in the thick of it
+    /// (`engaged`). Each such pair is pushed apart evenly, as far as the
+    /// ground lets each of them go. A horseman in mid-leap is left alone.
+    fn separate_combatants(&mut self, engaged: &[bool]) {
+        if !engaged.iter().any(|&b| b) {
+            return;
+        }
+        // In a crowd one unit's push shoves it into the next, so settle the
+        // whole scrum over a few passes.
+        for _ in 0..SEPARATION_PASSES {
+            if !self.separation_pass(engaged) {
+                break;
+            }
+        }
+    }
+
+    /// One pass of `separate_combatants`. Returns whether anyone was pushed.
+    fn separation_pass(&mut self, engaged: &[bool]) -> bool {
+        let n = self.entities.len();
+        let pos: Vec<Vec2> = self.entities.iter().map(|e| e.pos).collect();
+        let grid = Grid::build(pos.iter().copied());
+        let mut push = vec![Vec2::ZERO; n];
+        for i in 0..n {
+            let e = &self.entities[i];
+            if !engaged[i] || e.jump.is_some() || e.hp <= 0.0 {
+                continue;
+            }
+            grid.for_each_within(pos[i], COMBAT_SPACING, |j, pj| {
+                let other = &self.entities[j];
+                // A pair of engaged units is met from both ends; take it once.
+                if j == i || (engaged[j] && j < i) || other.jump.is_some() || other.hp <= 0.0 {
+                    return;
+                }
+                let d = pos[i] - pj;
+                let len = d.length();
+                // Two units on the very same spot have no "apart" to go by,
+                // so split them along a direction fixed by who they are.
+                let away = if len > 1e-3 {
+                    d / len
+                } else {
+                    Vec2::from_angle((i * 31 + j) as f32 * 2.4)
+                };
+                let half = away * (COMBAT_SPACING - len) * 0.5;
+                push[i] += half;
+                push[j] -= half;
+            });
+        }
+        let mut pushed = false;
+        for (e, p) in self.entities.iter_mut().zip(push) {
+            if p == Vec2::ZERO {
+                continue;
+            }
+            pushed = true;
+            // Against a wall or a bank, slide along it rather than stop dead.
+            let owner = owner_of(e.faction);
+            let _ = nudge(&self.world, owner, e, p)
+                || nudge(&self.world, owner, e, Vec2::new(p.x, 0.0))
+                || nudge(&self.world, owner, e, Vec2::new(0.0, p.y));
+        }
+        pushed
     }
 
     /// Sail cargo ships along their water route. A ship is always simulated (even
@@ -5524,6 +5899,7 @@ fn ai_step(
     snap: &[(Vec2, Faction)],
     grid: &Grid,
     acting: bool,
+    foe: Option<Vec2>,
     under_limit: bool,
     home: &[Tile],
     pref: Option<Resource>,
@@ -5549,11 +5925,12 @@ fn ai_step(
         }
         (_, Job::Knight | Job::Horseman | Job::Bowman) => {
             if under_limit {
+                e.charge = None;
                 retreat_behavior(world, e, owner, home, dt)
             } else {
                 let mobility = mobility_of(e.job, bridge_ok);
                 soldier_behavior(
-                    world, e, owner, rng, snap, grid, rally, huts, mobility, acting, dt,
+                    world, e, owner, rng, snap, grid, rally, huts, mobility, acting, foe, dt,
                 )
             }
         }
@@ -6063,6 +6440,7 @@ fn soldier_behavior(
     huts: &[Tile],
     mobility: Mobility,
     acting: bool,
+    foe: Option<Vec2>,
     dt: f32,
 ) -> Option<StepEvent> {
     // A horseman in the air over a stream finishes the leap before anything
@@ -6109,11 +6487,32 @@ fn soldier_behavior(
         }
     }
 
+    // A soldier whose nerve broke (see `check_morale`) runs from the fight
+    // until it has it back, to the nearest ground a good way off from the foes
+    // it broke from. Nobody stops to cut down a tree in a rout, so it goes
+    // around everything, even past a rally flag.
+    if e.flee > 0.0 {
+        e.flee -= dt;
+        if e.flee > 0.0 {
+            if e.path_done() && e.may_replan() {
+                e.repath = REPLAN_TICK;
+                let (from, r2) = (e.flee_from, FLEE_DISTANCE * FLEE_DISTANCE);
+                let goal = |x: i32, y: i32| tile_center((x, y)).distance_squared(from) >= r2;
+                plan_march(world, e, owner, Mobility::Light, goal, |_, _| 0);
+            }
+            return advance_or_hack(world, e, Mobility::Light, dt);
+        }
+        // Rallied: plan afresh from wherever the run ended.
+        e.set_path(Vec::new());
+    }
+    e.charge_cooldown -= dt;
+
     // A rally flag overrides combat: knights break off whatever they're doing and
     // rush the flag, cutting through trees/rocks (or bridging water) only where
     // that's quicker than any way around. The flag is lifted the instant the
     // group arrives (see `clear_reached_rally`).
     if let Some(r) = rally {
+        e.charge = None;
         if e.may_replan() {
             e.repath = REPLAN_TICK;
             // Any tile close enough to count as arriving will do. The flag
@@ -6139,9 +6538,45 @@ fn soldier_behavior(
         return advance_or_hack(world, e, mobility, dt);
     }
 
-    // No rally: stop and fight when a foe is already in range.
+    // A horseman out on a charge rides it through.
+    if e.charge.is_some() {
+        cavalry_step(world, e, owner, snap, grid, dt);
+        return None;
+    }
+
+    // No rally: fight when a foe is already in range. A melee soldier keeps
+    // its feet moving as it trades blows; a bowman, or anyone hacking at a
+    // wall or hut, stands still at the work.
+    if let Some(foe) = foe
+        && e.duel.is_some()
+    {
+        melee_dance(world, e, owner, foe, rng, dt);
+        return None;
+    }
+    if e.job == Job::Bowman
+        && let Some(threat) = foe
+    {
+        back_away(world, e, owner, threat, dt);
+        return None;
+    }
     if acting {
         set_anim(e, Anim::Act, dt);
+        return None;
+    }
+
+    // Cavalry with a clear run at a foe and room to build up speed charges it
+    // rather than trotting up.
+    if mobility == Mobility::Mounted
+        && e.charge_cooldown <= 0.0
+        && let Some(j) = nearest_foe(snap, grid, e.pos, e.faction, CHARGE_RANGE)
+        && e.pos.distance(snap[j].0) >= CHARGE_MIN_RANGE
+        && clear_run(world, owner, e.pos, snap[j].0)
+    {
+        e.charge = Some(Charge {
+            phase: ChargePhase::Run,
+            time: CHARGE_TIME,
+        });
+        cavalry_step(world, e, owner, snap, grid, dt);
         return None;
     }
 
@@ -6203,6 +6638,212 @@ fn soldier_behavior(
     }
 
     advance_or_hack(world, e, mobility, dt)
+}
+
+/// A melee soldier's footwork while it trades blows with the foe at `foe`:
+/// it holds its ground a tile off, circles, or steps back out of reach and
+/// then lunges in, picking a new stance as each runs out. A step back is a
+/// dodge that only sometimes comes off: a good one gets clear of reach, a
+/// failed one is caught short within it. Blows land whenever the foe is within
+/// `COMBAT_RANGE` and not dodging clear, which the combat step works out; this
+/// only moves the soldier, and never onto ground it can't stand on.
+fn melee_dance(world: &World, e: &mut Entity, owner: u8, foe: Vec2, rng: &mut Rng, dt: f32) {
+    let Some(mut d) = e.duel else { return };
+    // Whatever route brought it here is stale once the feet start moving.
+    if !e.path_done() {
+        e.set_path(Vec::new());
+    }
+    d.time -= dt;
+    if d.time <= 0.0 {
+        (d.stance, d.time) = if d.stance == Stance::StepBack {
+            (Stance::Lunge, DUEL_LUNGE_TIME)
+        } else {
+            match rng.range(0, 100) {
+                0..50 => {
+                    if rng.range(0, 2) == 0 {
+                        d.spin = -d.spin;
+                    }
+                    (Stance::Circle, rng.range(80, 180) as f32 / 100.0)
+                }
+                50..75 => (Stance::Hold, rng.range(40, 90) as f32 / 100.0),
+                // A horseman with its charge ready wheels off for another run
+                // at the foe rather than dodging.
+                _ if e.job == Job::Horseman && e.charge_cooldown <= 0.0 => {
+                    e.duel = None;
+                    e.charge = Some(Charge {
+                        phase: ChargePhase::Wheel,
+                        time: CHARGE_WHEEL_TIME,
+                    });
+                    return;
+                }
+                _ => {
+                    d.dodge = rng.range(0, 100) < DODGE_CHANCE_PERCENT;
+                    (Stance::StepBack, DUEL_STEP_BACK_TIME)
+                }
+            }
+        };
+    }
+    let speed = speed_of(e.job);
+    let (keep, closing, around) = match d.stance {
+        Stance::Hold => (DUEL_DISTANCE, 0.5 * speed, 0.0),
+        Stance::Circle => (DUEL_DISTANCE, 0.5 * speed, 0.45 * speed * d.spin),
+        Stance::StepBack if d.dodge => (DUEL_BACK_DISTANCE, 0.9 * speed, 0.0),
+        Stance::StepBack => (DUEL_CAUGHT_DISTANCE, 0.9 * speed, 0.0),
+        Stance::Lunge => (DUEL_LUNGE_DISTANCE, 1.8 * speed, 0.0),
+    };
+    let to = foe - e.pos;
+    let dist = to.length();
+    let toward = if dist > 1e-3 { to / dist } else { Vec2::X };
+    // A foe backing out of reach (a bowman giving ground, say) is followed at
+    // full pace, unless the gap is our own dodge.
+    let closing = if dist > COMBAT_RANGE && d.stance != Stance::StepBack {
+        closing.max(speed)
+    } else {
+        closing
+    };
+    let off = dist - keep;
+    let radial = toward * off.signum() * off.abs().min(closing * dt);
+    let sideways = toward.perp() * around * dt;
+    let moved = nudge(world, owner, e, radial + sideways) || nudge(world, owner, e, radial);
+    // Circling into a wall or a bank: go round the other way.
+    if !moved && d.stance == Stance::Circle {
+        d.spin = -d.spin;
+    }
+    e.facing = dir_from_vec(to);
+    e.duel = Some(d);
+    let anim = match d.stance {
+        Stance::Circle | Stance::StepBack => Anim::Walk,
+        Stance::Hold | Stance::Lunge => Anim::Act,
+    };
+    set_anim(e, anim, dt);
+}
+
+/// A bowman with a blade closing in on it from `threat` backs away while it
+/// keeps shooting (the combat step looses the arrows). Backed against a wall
+/// or a bank, it sidesteps along it, whichever way gets it farther from the
+/// threat; cornered, it stands and shoots.
+fn back_away(world: &World, e: &mut Entity, owner: u8, threat: Vec2, dt: f32) {
+    if !e.path_done() {
+        e.set_path(Vec::new());
+    }
+    let away = (e.pos - threat).normalize_or(Vec2::X);
+    let step = BOW_KITE_SPEED * dt;
+    let (left, right) = (away.perp(), -away.perp());
+    let mut tries = [
+        away,
+        (away + left).normalize(),
+        (away + right).normalize(),
+        left,
+        right,
+    ];
+    // Of the two sidesteps, try the one that opens up more room first.
+    if (e.pos + right).distance_squared(threat) > (e.pos + left).distance_squared(threat) {
+        tries.swap(1, 2);
+        tries.swap(3, 4);
+    }
+    for dir in tries {
+        if nudge(world, owner, e, dir * step) {
+            break;
+        }
+    }
+    e.facing = dir_from_vec(threat - e.pos);
+    set_anim(e, Anim::Act, dt);
+}
+
+/// A horseman on a charge (see [`Charge`]): out of a melee it first wheels
+/// off from the foe to get room, then it rides straight in at the nearest foe
+/// at full gallop. The impact is dealt by the combat step once a foe is in
+/// reach. The charge is called off when no foe is left near, the way is
+/// blocked, the wheel left too little room, or the run goes on too long.
+fn cavalry_step(
+    world: &World,
+    e: &mut Entity,
+    owner: u8,
+    snap: &[(Vec2, Faction)],
+    grid: &Grid,
+    dt: f32,
+) {
+    let Some(mut c) = e.charge else { return };
+    if !e.path_done() {
+        e.set_path(Vec::new());
+    }
+    let call_off = |e: &mut Entity| {
+        e.charge = None;
+        e.charge_cooldown = CHARGE_RETRY;
+        set_anim(e, Anim::Idle, dt);
+    };
+    let Some(j) = nearest_foe(snap, grid, e.pos, e.faction, CHARGE_RANGE + 1.0) else {
+        return call_off(e);
+    };
+    let foe = snap[j].0;
+    c.time -= dt;
+    match c.phase {
+        ChargePhase::Wheel => {
+            let away = (e.pos - foe).normalize_or(Vec2::X);
+            let moved = nudge(world, owner, e, away * HORSEMAN_SPEED * dt);
+            e.facing = dir_from_vec(away);
+            let room = e.pos.distance(foe);
+            if room >= CHARGE_WHEEL_DISTANCE || c.time <= 0.0 || !moved {
+                if room < CHARGE_MIN_RANGE {
+                    return call_off(e);
+                }
+                c = Charge {
+                    phase: ChargePhase::Run,
+                    time: CHARGE_TIME,
+                };
+            }
+        }
+        ChargePhase::Run => {
+            let to = foe - e.pos;
+            let step = to.normalize_or_zero() * CHARGE_SPEED * dt;
+            if c.time <= 0.0 || !nudge(world, owner, e, step) {
+                return call_off(e);
+            }
+            e.facing = dir_from_vec(to);
+        }
+    }
+    e.charge = Some(c);
+    set_anim(e, Anim::Walk, dt);
+}
+
+/// The index of the nearest unit hostile to `faction` within `r` of `pos`.
+fn nearest_foe(
+    snap: &[(Vec2, Faction)],
+    grid: &Grid,
+    pos: Vec2,
+    faction: Faction,
+    r: f32,
+) -> Option<usize> {
+    let mut best = None;
+    let mut bd = r * r;
+    grid.for_each_within(pos, r, |j, pj| {
+        let d = pos.distance_squared(pj);
+        if hostile(faction, snap[j].1) && d <= bd {
+            bd = d;
+            best = Some(j);
+        }
+    });
+    best
+}
+
+/// Is the straight line from `from` to `to` ground a unit of `owner` can
+/// ride over the whole way (no water, trees, rocks, or buildings)?
+fn clear_run(world: &World, owner: u8, from: Vec2, to: Vec2) -> bool {
+    let steps = (from.distance(to) / 0.25).ceil() as i32;
+    (0..=steps).all(|k| {
+        let p = from.lerp(to, k as f32 / steps.max(1) as f32);
+        world.walkable_for(owner, p.x.floor() as i32, p.y.floor() as i32)
+    })
+}
+
+/// Shift `e` by `step` if that leaves it on ground it can stand on.
+fn nudge(world: &World, owner: u8, e: &mut Entity, step: Vec2) -> bool {
+    let p = e.pos + step;
+    if !world.walkable_for(owner, p.x.floor() as i32, p.y.floor() as i32) {
+        return false;
+    }
+    e.pos = p;
+    true
 }
 
 /// What a knight's route planner charges for stepping onto `(x, y)`, in tiles
@@ -7864,6 +8505,12 @@ impl Game {
                 pending: 0.0,
                 jump: None,
                 reload: 0.0,
+                duel: None,
+                flee: 0.0,
+                flee_from: Vec2::ZERO,
+                morale: 0.0,
+                charge: None,
+                charge_cooldown: 0.0,
             });
         }
 
@@ -9921,14 +10568,15 @@ mod tests {
         let mut game = Game::new(1);
         let b = bowman_on_a_lane(&mut game);
         // An enemy knight down the lane, within bowshot but well outside melee
-        // reach, with enough enemy civilians about that it fights rather than
+        // reach (and far enough off that the bowman doesn't yet give ground),
+        // with enough enemy civilians about that it fights rather than
         // falling back home.
         for _ in 0..=MIN_CIVILIANS_TO_GROW {
             game.entities
                 .push(Entity::new(Faction::Enemy, Job::Civilian, (14, 4)));
         }
         game.entities
-            .push(Entity::new(Faction::Enemy, Job::Knight, (3, 0)));
+            .push(Entity::new(Faction::Enemy, Job::Knight, (4, 0)));
         let foe = game.entities.len() - 1;
         let foe_hp = game.entities[foe].max_hp;
         let start = game.entities[b].pos;
@@ -11400,6 +12048,266 @@ mod tests {
         assert!(game.pirates().is_empty());
         assert!(game.transports().is_empty());
         assert!(game.world.enemy_house_tiles.is_empty());
+    }
+
+    /// Knights placed on the testing ground at `player` and `enemy` tiles,
+    /// given far more hit points than usual so the fight lasts long enough to
+    /// watch its footwork.
+    fn hardy_brawl(player: &[Tile], enemy: &[Tile]) -> Game {
+        let mut game = Game::new_sandbox();
+        game.place_job = Job::Knight;
+        for (faction, tiles) in [(Faction::Player, player), (Faction::Enemy, enemy)] {
+            game.place_faction = faction;
+            for &t in tiles {
+                assert!(game.place_unit(t));
+            }
+        }
+        for e in &mut game.entities {
+            e.max_hp = 100_000.0;
+            e.hp = e.max_hp;
+        }
+        game
+    }
+
+    #[test]
+    fn fighters_never_stand_on_top_of_one_another() {
+        // Three on three, all piled onto the one tile to start with.
+        let mut game = hardy_brawl(&[(0, 0); 3], &[(0, 0); 3]);
+        for tick in 0..150 {
+            game.update(0.1, SANDBOX_SIM);
+            for (i, a) in game.entities.iter().enumerate() {
+                for b in &game.entities[i + 1..] {
+                    let d = a.pos.distance(b.pos);
+                    let state = |e: &Entity| {
+                        let s = e.duel.map(|d| match d.stance {
+                            Stance::Hold => "hold",
+                            Stance::Circle => "circle",
+                            Stance::StepBack => "back",
+                            Stance::Lunge => "lunge",
+                        });
+                        format!("{:?} flee={} duel={:?}", e.faction as u8, e.flee, s)
+                    };
+                    assert!(
+                        d >= COMBAT_SPACING - 0.05,
+                        "two fighters stood {d} apart at tick {tick}, on top of one another: {} / {}",
+                        state(a),
+                        state(b)
+                    );
+                }
+            }
+        }
+        assert!(
+            game.entities.iter().any(|e| e.hp < e.max_hp),
+            "spread apart, nobody was in reach to fight"
+        );
+    }
+
+    #[test]
+    fn dueling_knights_circle_step_back_and_lunge() {
+        let mut game = hardy_brawl(&[(0, 0)], &[(2, 0)]);
+        let (mut nearest, mut farthest) = (f32::MAX, 0f32);
+        let mut angles = Vec::new();
+        for tick in 0..300 {
+            game.update(0.1, SANDBOX_SIM);
+            let (a, b) = (game.entities[0].pos, game.entities[1].pos);
+            // Give them a few seconds to close and fall into the duel.
+            if tick >= 30 {
+                nearest = nearest.min(a.distance(b));
+                farthest = farthest.max(a.distance(b));
+                angles.push((a - b).to_angle());
+            }
+            assert!(
+                game.entities.iter().all(|e| e.flee <= 0.0),
+                "an even fight is no reason to run"
+            );
+        }
+        assert!(
+            farthest > COMBAT_RANGE,
+            "nobody ever stepped back out of reach"
+        );
+        assert!(
+            nearest < DUEL_DISTANCE - 0.05,
+            "nobody ever lunged in close"
+        );
+        let swept = angles
+            .windows(2)
+            .map(|w| {
+                let d = (w[1] - w[0]).rem_euclid(std::f32::consts::TAU);
+                d.min(std::f32::consts::TAU - d)
+            })
+            .sum::<f32>();
+        assert!(swept > 1.0, "the knights never circled each other");
+        assert!(
+            game.entities.iter().all(|e| e.hp < e.max_hp),
+            "the duel never came to blows"
+        );
+    }
+
+    #[test]
+    fn a_step_back_is_a_dodge_that_only_sometimes_comes_off() {
+        let mut game = hardy_brawl(&[(0, 0)], &[(2, 0)]);
+        let (mut clean, mut caught) = (0, 0);
+        for _ in 0..600 {
+            // This frame's blows are dealt by the stances the last one left.
+            let before = game.entities[0].duel;
+            let hp = game.entities[0].hp;
+            game.update(0.1, SANDBOX_SIM);
+            let Some(d) = before.filter(|d| d.stance == Stance::StepBack) else {
+                continue;
+            };
+            let hit = game.entities[0].hp < hp;
+            if d.dodge {
+                assert!(!hit, "a blade landed on a dodge that came off");
+                clean += 1;
+            } else if hit {
+                caught += 1;
+            }
+        }
+        assert!(clean > 0, "no dodge ever came off");
+        assert!(caught > 0, "no dodge ever failed and got hit");
+    }
+
+    #[test]
+    fn horsemen_charge_a_foe_and_shove_it_back() {
+        let mut game = Game::new_sandbox();
+        game.place_job = Job::Horseman;
+        assert!(game.place_unit((0, 0)));
+        game.place_faction = Faction::Enemy;
+        game.place_job = Job::Knight;
+        assert!(game.place_unit((5, 0)));
+        let knight_hp = game.entities[1].max_hp;
+
+        let mut charged = false;
+        for _ in 0..30 {
+            charged |= game.entities[0]
+                .charge
+                .is_some_and(|c| c.phase == ChargePhase::Run);
+            game.update(0.1, SANDBOX_SIM);
+            if game.entities[1].hp < knight_hp {
+                break;
+            }
+        }
+        assert!(charged, "the horseman trotted up rather than charging");
+        assert!(
+            game.entities[1].hp <= knight_hp - CHARGE_DAMAGE,
+            "the charge landed no heavy blow"
+        );
+        assert!(
+            game.entities[0].pos.distance(game.entities[1].pos) > COMBAT_RANGE,
+            "the impact didn't shove the knight back"
+        );
+        assert!(game.entities[0].charge.is_none());
+        assert!(game.entities[0].charge_cooldown > 0.0);
+    }
+
+    #[test]
+    fn horsemen_wheel_off_and_charge_again() {
+        let mut game = hardy_brawl(&[(0, 0)], &[(1, 0)]);
+        game.entities[0].job = Job::Horseman;
+        let (mut wheeled, mut impacts) = (false, 0);
+        for _ in 0..600 {
+            let hp = game.entities[1].hp;
+            game.update(0.1, SANDBOX_SIM);
+            wheeled |= game.entities[0]
+                .charge
+                .is_some_and(|c| c.phase == ChargePhase::Wheel);
+            if hp - game.entities[1].hp >= CHARGE_DAMAGE {
+                impacts += 1;
+            }
+        }
+        assert!(wheeled, "the horseman never wheeled off for another run");
+        assert!(impacts >= 2, "only {impacts} charges landed in a minute");
+    }
+
+    /// A bowman of yours at the origin of the testing ground and an enemy
+    /// soldier of `job` at `foe`. Returns the game with the bowman first.
+    fn bowman_faces(job: Job, foe: Tile) -> Game {
+        let mut game = Game::new_sandbox();
+        game.place_job = Job::Bowman;
+        assert!(game.place_unit((0, 0)));
+        game.place_faction = Faction::Enemy;
+        game.place_job = job;
+        assert!(game.place_unit(foe));
+        game
+    }
+
+    #[test]
+    fn bowmen_back_away_from_a_blade_and_keep_shooting() {
+        let mut game = bowman_faces(Job::Knight, (3, 0));
+        game.entities[1].max_hp = 100_000.0;
+        game.entities[1].hp = game.entities[1].max_hp;
+        let start = game.entities[0].pos;
+        let mut volleys = 0;
+        for _ in 0..20 {
+            let reload = game.entities[0].reload;
+            game.update(0.1, SANDBOX_SIM);
+            if game.entities[0].reload > reload {
+                volleys += 1;
+            }
+        }
+        let b = &game.entities[0];
+        assert!(
+            b.pos.x < start.x - 1.0,
+            "the bowman stood its ground as the knight closed"
+        );
+        assert!(volleys >= 2, "the bowman stopped shooting to back off");
+        assert!(
+            game.entities[1].hp < game.entities[1].max_hp,
+            "no arrow struck the knight"
+        );
+    }
+
+    #[test]
+    fn bowmen_shrug_off_villagers_and_archers() {
+        // An enemy archer close by is shot at, not backed away from.
+        let mut game = bowman_faces(Job::Bowman, (2, 0));
+        let start = game.entities[0].pos;
+        for _ in 0..5 {
+            game.update(0.1, SANDBOX_SIM);
+        }
+        assert_eq!(game.entities[0].pos, start);
+    }
+
+    #[test]
+    fn a_knight_still_runs_down_a_bowman_giving_ground() {
+        let mut game = bowman_faces(Job::Knight, (3, 0));
+        for _ in 0..600 {
+            game.update(0.1, SANDBOX_SIM);
+            if game.entities.len() < 2 {
+                break;
+            }
+        }
+        assert_eq!(
+            game.faction_counts(),
+            (0, 1, 0),
+            "the bowman outlasted the knight"
+        );
+    }
+
+    #[test]
+    fn a_badly_outnumbered_soldier_sometimes_runs() {
+        let mut game = hardy_brawl(&[(0, 0)], &[(2, 0), (2, 1), (2, -1), (3, 0)]);
+        let mut fled_to = None;
+        for _ in 0..600 {
+            game.update(0.1, SANDBOX_SIM);
+            let e = &game.entities[0];
+            if e.flee > 0.0 {
+                fled_to = Some(e.flee_from);
+            } else if let Some(from) = fled_to {
+                // The run is over: it ended well away from the foes it fled.
+                assert!(
+                    e.pos.distance(from) > FLEE_DISTANCE - 1.5,
+                    "the runner only got {} from the fight",
+                    e.pos.distance(from)
+                );
+                break;
+            }
+        }
+        assert!(fled_to.is_some(), "a lone knight facing four never ran");
+        assert!(
+            game.entities[1..].iter().all(|e| e.flee <= 0.0),
+            "the side with the numbers ran"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap as HashMap;
 use glam::Vec2;
 
 /// Cell edge in tiles: a little above the common query radii (combat range
-/// 0.9, danger radius 6), so most queries touch at most four cells.
+/// 1.25, danger radius 6), so most queries touch at most four cells.
 const CELL: f32 = 8.0;
 
 pub struct Grid {

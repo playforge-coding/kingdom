@@ -45,7 +45,9 @@ Knights are your foot soldiers, the bulk of your military. They:
 
 - Seek out and **attack the enemy faction** wherever they find them.
 - Fight in melee. Both sides take damage, and HP bars appear above wounded
-  units.
+  units. A knight trading blows keeps a tile off its foe, circles it, and
+  dodges back and lunges in, and one badly outnumbered may lose its nerve and
+  run (see [Combat resolution](#combat-resolution)).
 - **Press the assault on enemy settlements** once the field is clear: with no
   foe left to chase, knights march on the nearest enemy **huts and walls** and
   hack them down rather than idling at home.
@@ -91,6 +93,15 @@ the same rally flag, but:
 - **Rides fast and takes a beating.** A horseman moves well over half again as
   fast as a knight and has half again the hit points, so cavalry reaches a
   raided hut or a fallen village long before the foot does.
+- **Charges.** A horseman with a clear, straight run at a foe **2.5 to 6
+  tiles** away doesn't trot up to it: it lowers the lance and charges in at
+  half again its usual pace. The impact lands **30 damage** at once (half a
+  knight) and shoves the foe back nearly a tile; a foe that
+  [dodges](#combat-resolution) clear takes neither. Charging again takes 6
+  seconds, and once it's ready, a horseman caught in a drawn-out melee now
+  and then **wheels off** to about 3.5 tiles and charges back in instead of
+  dodging. Water, trees, rocks, and buildings in the way rule a charge out,
+  and a charge that is blocked or whose foe gets away is called off.
 - **Leaps narrow streams.** Where a stream is **no more than 2 tiles across**, a
   horseman jumps it in a straight line from one bank to the other rather than
   looking for a bridge. Rivers are carved 2-3 tiles wide (see
@@ -131,19 +142,25 @@ enemy with the rest of the army, but:
 
 - **Shoots from 5 tiles away.** The nearest foe within bowshot takes an
   **arrow every 1.5 seconds**, each one dealing **14 damage** when it lands.
-  A bowman advances only until a foe is within about three and a half tiles,
-  then stands and shoots, so a line of bowmen gets a couple of volleys off
-  before the blades meet. Arrows fly straight and strike the first hostile
+  A bowman advances only until a foe is in bowshot, then stands and shoots,
+  so a line of bowmen gets a couple of volleys off before the blades meet.
+  Arrows fly straight and strike the first hostile
   unit they pass, so a shaft loosed at one foe may well hit another, and a
   target that steps aside is missed.
 - **Shoots across water.** A foe on the far bank of a stream, or behind a
   wall, is in bowshot like any other. Only units are ever hit: an arrow does
   nothing to a hut, a wall, or a ship.
+- **Gives ground but keeps shooting.** When an enemy knight or horseman gets
+  within **3 tiles**, a bowman backs away from it without missing a shot,
+  sidestepping along a wall or a bank that's in the way. It backs off slower
+  than a knight walks, so a foe set on reaching it still does, only an arrow
+  or so worse off. Archers and villagers aren't backed away from.
 - **Is frail up close.** A bowman has **40 hit points** to a knight's 60 and
-  no blade. Whatever reaches it keeps taking arrows at point-blank range but
-  is never fought back in melee, so a knight or a horseman that closes the
-  distance wins every time. Bowmen earn their keep behind the foot, not in
-  front of it.
+  no blade. Once a blade is in reach the bowman is caught: it stands and
+  keeps taking shots at point-blank range but never fights back in melee, so
+  a knight or a horseman that closes the distance wins one on one, though a
+  lone knight does it with little to spare. Bowmen earn their keep behind
+  the foot, not in front of it.
 - **Never besieges.** With no foe in reach, a bowman doesn't hack at enemy
   huts and walls the way knights do; it waits for whoever comes out.
 - **Goes around everything.** A bowman never hacks down a tree or rock, never
@@ -286,11 +303,35 @@ enemy's coastal villages keeps the sea quiet.
 
 ## Combat resolution
 
-- Fights happen at close range; opposing units in melee **both take damage** each
-  tick.
-- [Bowmen](#bowmen) are the exception: they **shoot from range** and deal no
-  melee damage. An arrow hurts the first hostile unit it passes and nothing
-  else.
+- Fights happen at close range, about a tile apart; opposing units in melee
+  **both take damage** for as long as they're within reach of each other.
+- **Nobody stacks.** A soldier within 4 tiles of a foe, whether trading
+  blows, closing in, chasing, or running, keeps the better part of a tile
+  between itself and everyone else, friend or foe, so you can see every
+  figure in a battle. A crowd that piles in shoves itself apart rather than
+  standing on one tile.
+- **Footwork.** A knight or horseman trading blows doesn't stand still. It
+  holds its ground, **circles** its foe, or **dodges** back and then
+  **lunges** in again, changing up every second or so. A wall or a bank
+  turns a circling soldier back the other way. A horseman with its
+  [charge](#horsemen) ready wheels off for another run instead of dodging.
+- **Dodging.** Only some dodges come off (60%). A good one carries the
+  soldier clear of reach and no blade touches it while it backs off; a failed
+  one is caught short, still in reach, and takes the blows. Either way the
+  dodger strikes nobody until it lunges back in. Arrows aren't dodged.
+- **Breaking and running.** Once a second, a soldier in a fight sizes up the
+  soldiers within 5 tiles. Outnumbered **three to two or worse**, it has a
+  small chance (8%) of losing its nerve: it drops the fight and runs about 9
+  tiles from the foes it broke from, past even a rally flag, for 4 seconds
+  before turning back. It strikes nobody while it runs but can still be cut
+  down or shot, and once it has run it stands its ground for a while before
+  it can break again. A soldier on the run counts for neither side, so one
+  runner can leave the next one even more outnumbered. An even fight never
+  breaks anyone.
+- [Bowmen](#bowmen) are the exception to the blade work: they **shoot from
+  range**, giving ground to a blade that closes in, and deal no melee damage. An arrow hurts the
+  first hostile unit it passes and nothing else. They lose their nerve like
+  anyone else.
 - Wounded units show an **HP bar**; when HP hits zero the unit dies.
 - Kills are tallied on the HUD as **Enemies defeated**; your own deaths as
   **Units lost**.

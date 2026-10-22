@@ -59,8 +59,10 @@ can switch by picking what you want to place.
 
 Choose a **type**: *Civilian*, *Knight*, *Horseman*, or *Bowman* (see
 **[Units & Combat](units.md)** for what each one does), then **left-click** a
-tile to put one down. Click again to stack more on the same tile. A tile
-nobody could stand on (a wall or water, say) refuses the click.
+tile to put one down. Click again to stack more on the same tile; once a
+fight reaches them they spread out (see
+**[Combat resolution](units.md#combat-resolution)**). A tile nobody could
+stand on (a wall or water, say) refuses the click.
 
 ### Terrain and buildings
 
@@ -114,7 +116,8 @@ still erases in this tool, so use the button to lift the flag.
 - **No villages, so no retreat.** In a real game a faction that runs short of
   civilians pulls its knights back home to become workers. On the testing
   ground there is no home to fall back to, so soldiers always stay soldiers,
-  however few civilians stand beside them.
+  however few civilians stand beside them. A badly outnumbered soldier can
+  still break and run from a fight for a few seconds, just as in a real game.
 - **Your civilians only work near a painted house.** With no house of yours
   on the grid, a civilian of yours just wanders and hides from danger like any
   other villager. Paint a house and they gather, mine, and sow around it as

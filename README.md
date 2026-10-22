@@ -38,7 +38,10 @@ both natively and in the browser (via WebGL) using **Trunk**.
   your construction orders and put the structures up. Everything they gather
   goes into your shared stockpile.
 - **Knights** seek out and **attack** the enemy faction. Both sides take damage
-  in melee; HP bars appear above wounded units. With no foe left in the field
+  in melee; HP bars appear above wounded units. Fighters keep a tile apart
+  rather than piling up, circle, dodge back (not always cleanly) and lunge,
+  and a badly outnumbered soldier now and then breaks and runs. With no foe
+  left in the field
   they **press the assault on enemy huts and walls** instead of idling. When the
   only way to a target is across water, they **lay their own bridges** as they
   march (3 wood a tile, no gold: they're already paid for serving). Set a
@@ -47,12 +50,14 @@ both natively and in the browser (via WebGL) using **Trunk**.
 - **Horsemen** are your cavalry. Under the Military priority, a house raises
   one in place of a knight (50 gold) whenever you have fewer than one horseman
   per two knights. They ride far faster than the foot, take more punishment,
-  and **leap streams up to 2 tiles wide**, but never hack, bridge, or board a
+  **charge** a foe they have a clear run at for one heavy, shoving blow, and
+  **leap streams up to 2 tiles wide**, but never hack, bridge, or board a
   ship. Grown enemy and allied villages field them too.
 - **Bowmen** are your archers. Under Military, a house raises one in place of a
   knight (30 gold) whenever you have fewer than one bowman per two knights,
   once the cavalry is topped up. They **shoot foes 5 tiles away**, across water
-  or not, but are frail in melee and never hack, bridge, or board a ship.
+  or not, and **back away from a closing blade** while they keep shooting,
+  but are frail in melee and never hack, bridge, or board a ship.
   Enemy and allied villages field them too.
 - **Three factions** (you = blue, enemy = red, allies = green). The **enemy** is
   hostile to everyone; their soldiers stream out to hunt you. The **allies** hold
