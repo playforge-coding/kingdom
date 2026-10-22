@@ -203,6 +203,13 @@ pub fn build() -> Atlas {
     let ally_knight = load(include_bytes!(
         "../assets/textures/entities/ally_swordsman.png"
     ));
+    let horseman = load(include_bytes!("../assets/textures/entities/horseman.png"));
+    let enemy_horseman = load(include_bytes!(
+        "../assets/textures/entities/enemy_horseman.png"
+    ));
+    let ally_horseman = load(include_bytes!(
+        "../assets/textures/entities/ally_horseman.png"
+    ));
     let cargo_ship = load(include_bytes!("../assets/textures/entities/cargo_ship.png"));
     let warship = load(include_bytes!("../assets/textures/entities/warship.png"));
     let enemy_warship = load(include_bytes!(
@@ -240,6 +247,11 @@ pub fn build() -> Atlas {
         Source::sheet("enemy_knight", enemy_knight, 5, 12),
         Source::sheet("ally_farmer", ally_farmer, 5, 12),
         Source::sheet("ally_knight", ally_knight, 5, 12),
+        // Horseman sheets: 4 columns x 12 rows of 32x32 frames, three rows
+        // per facing (down, right, left, up): two of riding, one of the lance.
+        Source::sheet("horseman", horseman, 4, 12),
+        Source::sheet("enemy_horseman", enemy_horseman, 4, 12),
+        Source::sheet("ally_horseman", ally_horseman, 4, 12),
         // Cargo ship: 4 columns x 1 row of 32x32 frames, facing left, up, down,
         // right (in that column order).
         Source::sheet("cargo_ship", cargo_ship, 4, 1),
@@ -342,6 +354,24 @@ mod tests {
                     uv[2] > uv[0] && uv[3] > uv[1],
                     "{sheet} frame {col} is empty"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn every_rider_sheet_is_packed_with_all_twelve_rows() {
+        // The renderer reads a horseman's frame by facing block and row, so
+        // each faction's sheet must be packed with its full 4x12 grid.
+        let atlas = build();
+        for sheet in ["horseman", "enemy_horseman", "ally_horseman"] {
+            for row in 0..12 {
+                for col in 0..4 {
+                    let uv = atlas.frame_uv(sheet, col, row);
+                    assert!(
+                        uv[2] > uv[0] && uv[3] > uv[1],
+                        "{sheet} frame ({col}, {row}) is empty"
+                    );
+                }
             }
         }
     }

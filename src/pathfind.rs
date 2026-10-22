@@ -66,10 +66,12 @@ where
 
 /// Cheapest-first search (A*, or Dijkstra's with a zero heuristic) from
 /// `start` to the cheapest tile satisfying `is_goal`, capped at `max_visited`
-/// expanded tiles. `step_cost` prices stepping onto a tile, in whole steps of
-/// walking, or returns `None` for a tile that can't be entered at all; this is
-/// what lets a unit that can clear an obstacle weigh doing so against walking
-/// around it. `heuristic` must never overestimate the remaining cost to a goal
+/// expanded tiles. `step_cost` prices the step from one tile onto the next,
+/// in whole steps of walking, or returns `None` for a step that can't be taken
+/// at all; this is what lets a unit that can clear an obstacle weigh doing so
+/// against walking around it, and a unit whose moves depend on direction (a
+/// leap that must land straight ahead) rule a step in or out by where it came
+/// from. `heuristic` must never overestimate the remaining cost to a goal
 /// (zero is always safe, and then the search is plain Dijkstra's).
 ///
 /// Unlike `bfs`, a goal tile must itself be enterable: the path ends on it, so
@@ -85,7 +87,7 @@ pub fn cheapest<F, C, H>(
 ) -> Option<Vec<Tile>>
 where
     F: Fn(i32, i32) -> bool,
-    C: Fn(i32, i32) -> Option<u32>,
+    C: Fn(Tile, Tile) -> Option<u32>,
     H: Fn(i32, i32) -> u32,
 {
     if is_goal(start.0, start.1) {
@@ -118,7 +120,7 @@ where
         }
         for (dx, dy) in NEIGHBORS {
             let np = (cx + dx, cy + dy);
-            let Some(cost) = step_cost(np.0, np.1) else {
+            let Some(cost) = step_cost((cx, cy), np) else {
                 continue;
             };
             let ng = g + cost.max(1);

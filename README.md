@@ -44,6 +44,11 @@ both natively and in the browser (via WebGL) using **Trunk**.
   march (3 wood a tile, no gold: they're already paid for serving). Set a
   **rally flag** (left-click in rally mode; right-click to clear) to pull them to
   a point.
+- **Horsemen** are your cavalry. Under the Military priority, a house raises
+  one in place of a knight (50 gold) whenever you have fewer than one horseman
+  per two knights. They ride far faster than the foot, take more punishment,
+  and **leap streams up to 2 tiles wide**, but never hack, bridge, or board a
+  ship. Grown enemy and allied villages field them too.
 - **Three factions** (you = blue, enemy = red, allies = green). The **enemy** is
   hostile to everyone; their soldiers stream out to hunt you. The **allies** hold
   villages on coasts across the sea: they trade with you and attack the enemy on

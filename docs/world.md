@@ -40,7 +40,9 @@ finer tributaries. They meander like real rivers (the coordinates are
 domain-warped so the channels bend rather than run straight) and flow **down to
 the coast**, opening the interior to the sea. Most rivers are **2-3 tiles wide**:
 wide enough to block units on foot, so they're crossed by a **boat** or a
-player-built **[bridge](building.md#bridge)**.
+player-built **[bridge](building.md#bridge)**. The narrower tributaries, up to
+2 tiles across, are no barrier to **[horsemen](units.md#horsemen)**, who leap
+them; the 3-tile main rivers and the lakes stop cavalry too.
 
 Occasional small **lakes** also dot the interior. When your starting village
 sits beside a landlocked pool, a channel is carved from it out to the sea so a

@@ -7,10 +7,11 @@ comments: true
 You don't move units directly. Each one follows its own AI according to its
 role; you influence them through [priorities, buildings, and the rally flag](controls.md).
 All units navigate the tile grid with **BFS pathfinding**, routing around water,
-buildings, walls, and resource nodes, or across bridges. Knights, who can also
-cut through trees and rocks and lay bridges, plan with a **weighted search**
-instead, so that clearing an obstacle is weighed against walking around it (see
-[Knights](#knights)).
+buildings, walls, and resource nodes, or across bridges. Soldiers plan with a
+**weighted search** instead: knights, who can also cut through trees and rocks
+and lay bridges, weigh clearing an obstacle against walking around it (see
+[Knights](#knights)), and horsemen weigh leaping a stream against riding
+around it (see [Horsemen](#horsemen)).
 
 ## Civilians
 
@@ -39,7 +40,7 @@ when a site is waiting for hands.
 
 ## Knights
 
-Knights are your military. They:
+Knights are your foot soldiers, the bulk of your military. They:
 
 - Seek out and **attack the enemy faction** wherever they find them.
 - Fight in melee. Both sides take damage, and HP bars appear above wounded
@@ -74,6 +75,46 @@ Knights are your military. They:
 Lean on the **:lucide-swords: Military priority** to raise more of them when you're under
 pressure.
 
+## Horsemen
+
+Horsemen are your cavalry: a knight on a horse, with a lance. Under the
+**:lucide-swords: Military priority**, a house raises a horseman in place of a
+knight whenever you have **fewer than one horseman for every two knights** and
+the treasury holds the **50 gold** a horse costs (twice a knight), so an army
+raised under Military settles at about a third mounted and tops its cavalry
+back up after losses. Under Agriculture, houses raise knights only.
+
+On the field a horseman fights like a knight, with the same blade, and answers
+the same rally flag, but:
+
+- **Rides fast and takes a beating.** A horseman moves well over half again as
+  fast as a knight and has half again the hit points, so cavalry reaches a
+  raided hut or a fallen village long before the foot does.
+- **Leaps narrow streams.** Where a stream is **no more than 2 tiles across**, a
+  horseman jumps it in a straight line from one bank to the other rather than
+  looking for a bridge. Rivers are carved 2-3 tiles wide (see
+  [Rivers and lakes](world.md#rivers-and-lakes)), so the tributaries are open
+  to cavalry while the main rivers and the lakes still bar the way. A leap is
+  priced like any other step, so a bridge close at hand is still used when it's
+  the quicker way. A horse never jumps from or onto a bridge, never turns in
+  mid-air, and takes no part in a fight until it lands.
+- **Goes around everything else.** A horseman never hacks down a tree or rock
+  and never lays a bridge: whatever it can't walk or leap, it rides around, and
+  a wide river stops it as surely as it stops anyone on foot.
+- **Stays ashore.** [Troop ships](building.md#troop-ship) carry knights only,
+  and the allies' hired [mercenaries](gameplay.md#hiring-mercenaries) are foot
+  soldiers too. Cavalry fights on the home continent.
+- **Keeps the saddle.** When a captured village is settled (see
+  [After the battle](gameplay.md#after-the-battle)), only the knights on foot
+  lay down their arms; horsemen stand the garrison first.
+
+The enemy and the allies field cavalry too, but only from villages that have
+grown to **7 or more houses**, the same size at which an enemy village starts
+sending [sea raids](#the-enemy-navy). So a mature enemy camp sends riders that
+cross the streams your foot soldiers can't, and a tributary is no longer the
+moat it was. Cavalry counts as part of a village's garrison and defenders like
+any other soldier.
+
 ## The draft
 
 Need soldiers *now* rather than waiting on new spawns? **Proclaim a draft** from
@@ -107,7 +148,8 @@ routes running so the gold is there when it comes due.
 
 The enemy villages each field their own units, and **more are founded over time**
 as the map expands. Enemy soldiers **stream out to hunt your units**, so an
-undefended settlement won't stay yours for long. Enemy villages can be
+undefended settlement won't stay yours for long, and a grown enemy village
+sends [horsemen](#horsemen) among them. Enemy villages can be
 **captured** the same way yours can be lost (see
 [Capturing villages](gameplay.md#capturing-villages)). Once an enemy village
 has grown large, it also sends **raids by sea** against your coasts; see
@@ -211,7 +253,8 @@ enemy's coastal villages keeps the sea quiet.
 
 The **:lucide-flag: Rally** build mode turns a left-click into a **rally flag**:
 
-- Your knights **drop whatever they're doing** and rush to the flag.
+- Your knights and horsemen **drop whatever they're doing** and rush to the
+  flag.
 - The flag **clears automatically once they arrive**.
 - **Right-click** (or the **:lucide-x: Clear rally** button) removes the flag manually.
 

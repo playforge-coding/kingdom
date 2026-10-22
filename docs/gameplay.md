@@ -105,6 +105,11 @@ starts pressing you.
     slowest until the workforce recovers. The more civilians you have, the
     faster new villagers arrive.
 
+Under **Military**, some of those soldiers come mounted: whenever you have
+fewer than one horseman for every two knights and 50 gold to spare, the next
+soldier a house raises is a **[horseman](units.md#horsemen)**, fast cavalry
+that can leap the narrower streams.
+
 ## Capturing villages
 
 Territory changes hands per-village:

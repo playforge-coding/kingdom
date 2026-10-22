@@ -64,12 +64,55 @@ fn owner_hostile(a: u8, b: u8) -> bool {
     (a == owner_of(Faction::Enemy)) != (b == owner_of(Faction::Enemy))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Job {
     /// A worker. Civilians take up whichever job the realm needs right now:
     /// farming, mining, or building (see [`Role`]).
     Civilian,
+    /// A soldier on foot: fights, hacks through trees and rocks, lays bridges,
+    /// boards ships.
     Knight,
+    /// A mounted soldier: faster and tougher than a knight and able to leap
+    /// narrow streams, but never hacks, bridges, or boards a ship (see
+    /// `Mobility::Mounted`).
+    Horseman,
+}
+
+impl Job {
+    /// Knights and horsemen alike: anyone under arms.
+    pub fn is_soldier(self) -> bool {
+        matches!(self, Job::Knight | Job::Horseman)
+    }
+}
+
+/// How a soldier gets across the ground, which decides what its route planner
+/// may price in besides walking (see `march_step_cost`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mobility {
+    /// A knight: hacks through trees and rocks, and lays bridges over open
+    /// water when `bridge_ok` (the stockpile has the wood for a span).
+    Foot { bridge_ok: bool },
+    /// A horseman: goes around every obstacle, but leaps straight over a
+    /// stream up to `HORSEMAN_JUMP_REACH` tiles wide onto the far bank.
+    Mounted,
+}
+
+fn mobility_of(job: Job, bridge_ok: bool) -> Mobility {
+    match job {
+        Job::Horseman => Mobility::Mounted,
+        Job::Knight | Job::Civilian => Mobility::Foot { bridge_ok },
+    }
+}
+
+/// A horseman's leap over a stream, in flight: from the takeoff spot to the
+/// landing tile's center over `HORSEMAN_JUMP_TIME` seconds. Transient: a save
+/// taken mid-leap keeps the horse's position and it simply plans afresh from
+/// there on load.
+#[derive(Clone, Copy)]
+pub struct Jump {
+    from: Vec2,
+    to: Vec2,
+    t: f32,
 }
 
 /// The job a civilian has taken up at the moment. Civilians switch on their
@@ -159,11 +202,14 @@ pub struct Entity {
     /// waits its turn and is spent (capped) when its rotating batch comes up,
     /// so the far realm runs at a slower tick instead of freezing. Transient.
     pending: f32,
+    /// A horseman mid-leap over a stream (see [`Jump`]). Transient.
+    jump: Option<Jump>,
 }
 
 fn max_hp_for(faction: Faction, job: Job) -> f32 {
     match (faction, job) {
         (_, Job::Knight) => 60.0,
+        (_, Job::Horseman) => 90.0,
         (Faction::Player, Job::Civilian) => 28.0,
         (Faction::Enemy, Job::Civilian) => 22.0,
         (Faction::Ally, Job::Civilian) => 24.0,
@@ -196,10 +242,26 @@ impl Entity {
             mercenary: false,
             found_at: None,
             pending: 0.0,
+            jump: None,
         }
     }
 
-    /// The job a civilian is working at the moment (meaningless for knights).
+    /// Under arms, mounted or not.
+    #[inline]
+    pub fn is_soldier(&self) -> bool {
+        self.job.is_soldier()
+    }
+
+    /// How high a leaping horseman is drawn above the ground right now, in
+    /// tiles: an arc that peaks midway through the jump, zero on the ground.
+    pub fn jump_lift(&self) -> f32 {
+        self.jump
+            .map(|j| (std::f32::consts::PI * (j.t / HORSEMAN_JUMP_TIME).clamp(0.0, 1.0)).sin())
+            .unwrap_or(0.0)
+            * HORSEMAN_JUMP_HEIGHT
+    }
+
+    /// The job a civilian is working at the moment (meaningless for soldiers).
     pub fn role(&self) -> Role {
         if self.build_site.is_some() {
             Role::Builder
@@ -257,6 +319,15 @@ pub const START_MONEY: u32 = 150;
 /// Gold every new knight costs to arm and equip; a house raises a (free)
 /// civilian instead when the treasury can't afford one.
 pub const KNIGHT_GOLD_COST: u32 = 25;
+/// Gold a horseman costs to raise, horse and all: twice a knight. Under the
+/// Military priority a house raises one in place of a knight whenever the
+/// realm has fewer than one horseman for every two knights and the treasury
+/// can cover it; otherwise it raises a knight as usual.
+pub const HORSEMAN_GOLD_COST: u32 = 50;
+/// Enemy and allied villages only raise horsemen once they have grown to this
+/// many houses, the same size at which an enemy village starts sending sea
+/// raids, so the early game stays a contest of foot soldiers.
+const CAMP_HORSEMAN_MIN_HOUSES: usize = 7;
 /// Gold paid to the civilian who works a construction site, set aside with the
 /// rest of the cost when the order is placed and refunded if it is canceled.
 /// Bridges are exempt: they stay entirely gold-free (see `HOUSE_GOLD_COST`).
@@ -518,7 +589,33 @@ pub const SHIP_NEAR_RADIUS: i32 = 8;
 
 const CIVILIAN_SPEED: f32 = 2.4;
 const KNIGHT_SPEED: f32 = 2.9;
+/// A horse outpaces anyone on foot by a wide margin.
+const HORSEMAN_SPEED: f32 = 4.2;
+/// The widest stream, in water tiles, a horseman can leap in a straight line
+/// from one bank to the other. Rivers are carved 2-3 tiles across (see
+/// `world::RIVER_HALF_WIDTH_MAIN`), so this clears the tributaries and leaves
+/// the main rivers and the lakes as real barriers.
+const HORSEMAN_JUMP_REACH: i32 = 2;
+/// What a horseman's route planner charges, in tiles of walking, for each
+/// water tile of a leap: a one-tile stream costs three steps for two tiles of
+/// ground, a two-tile one five for three, so a bridge or ford close by is
+/// still preferred over a jump that isn't a shortcut.
+const HORSEMAN_JUMP_STEP_COST: u32 = 2;
+/// Seconds a leap takes, however wide the stream.
+const HORSEMAN_JUMP_TIME: f32 = 0.45;
+/// How high, in tiles, a leaping horseman rises at the top of its arc. Purely
+/// visual.
+const HORSEMAN_JUMP_HEIGHT: f32 = 0.6;
 const HARVEST_TIME: f32 = 2.0;
+
+/// How fast a unit of this job walks.
+fn speed_of(job: Job) -> f32 {
+    match job {
+        Job::Civilian => CIVILIAN_SPEED,
+        Job::Knight => KNIGHT_SPEED,
+        Job::Horseman => HORSEMAN_SPEED,
+    }
+}
 /// Seconds between route replans while a unit is on the move. A unit that just
 /// finished its path may replan at once; one whose searches all failed backs
 /// off for longer (see `Entity::may_replan`).
@@ -1765,7 +1862,8 @@ impl Game {
         let mut hut_damage: HashMap<Tile, f32> = HashMap::default();
         for i in 0..n {
             let Some(adt) = step_dt[i] else { continue };
-            if self.entities[i].job != Job::Knight {
+            // A horseman in mid-air over a stream fights nobody until it lands.
+            if !self.entities[i].is_soldier() || self.entities[i].jump.is_some() {
                 continue;
             }
             let (pi, fi) = snap[i];
@@ -2057,7 +2155,7 @@ impl Game {
             if self.population() >= self.pop_cap() {
                 break;
             }
-            let Some(t) = self.spawn_site(Faction::Player) else {
+            let Some((t, _)) = self.spawn_site(Faction::Player) else {
                 break;
             };
             let mut e = Entity::new(Faction::Player, Job::Civilian, t);
@@ -2725,9 +2823,9 @@ impl Game {
     fn clear_reached_rally(&mut self) {
         if let Some(r) = self.rally_point {
             let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
-            // The player's knights and any hired mercenaries count as answering.
+            // The player's soldiers and any hired mercenaries count as answering.
             let knights =
-                |e: &&Entity| (e.faction == Faction::Player || e.mercenary) && e.job == Job::Knight;
+                |e: &&Entity| (e.faction == Faction::Player || e.mercenary) && e.is_soldier();
             let arrived = self
                 .entities
                 .iter()
@@ -2809,8 +2907,9 @@ impl Game {
     /// the rest stay under arms; on quiet ground everyone but a single
     /// garrison does, so a village taken without a fight is worked, not
     /// occupied. The knights nearest the village's heart settle first, levies
-    /// never do (they're owed their pay at home), and a lone conqueror always
-    /// stays a knight.
+    /// never do (they're owed their pay at home), horsemen never do either
+    /// (they stay mounted and stand the garrison first), and a lone conqueror
+    /// always stays under arms.
     fn settle_captured_village(&mut self, village: &[Tile]) {
         let center = village_center(village);
         let danger2 = SETTLE_DOWN_DANGER_RADIUS * SETTLE_DOWN_DANGER_RADIUS;
@@ -2825,7 +2924,7 @@ impl Game {
             .enumerate()
             .filter(|(_, e)| {
                 e.faction == Faction::Player
-                    && e.job == Job::Knight
+                    && e.is_soldier()
                     && !e.levy
                     && village
                         .iter()
@@ -2838,13 +2937,27 @@ impl Game {
             return;
         }
         let keep = if contested { n - n / 2 } else { 1 };
+        // Only the knights on foot settle, and never more of them than the
+        // garrison leaves over: horsemen keep their saddles.
+        let on_foot = inside
+            .iter()
+            .filter(|&&i| self.entities[i].job == Job::Knight)
+            .count();
+        let settling = (n - keep).min(on_foot);
+        if settling == 0 {
+            return;
+        }
         inside.sort_by(|&a, &b| {
-            self.entities[a]
-                .pos
-                .distance_squared(center)
-                .total_cmp(&self.entities[b].pos.distance_squared(center))
+            let (ea, eb) = (&self.entities[a], &self.entities[b]);
+            (ea.job == Job::Horseman)
+                .cmp(&(eb.job == Job::Horseman))
+                .then(
+                    ea.pos
+                        .distance_squared(center)
+                        .total_cmp(&eb.pos.distance_squared(center)),
+                )
         });
-        for &i in inside.iter().take(n - keep) {
+        for &i in inside.iter().take(settling) {
             let e = &mut self.entities[i];
             let max_hp = max_hp_for(e.faction, Job::Civilian);
             e.hp = (e.hp / e.max_hp * max_hp).max(1.0);
@@ -2857,8 +2970,8 @@ impl Game {
             e.set_path(Vec::new());
         }
         log::info!(
-            "{} knights settled the captured village as civilians, {keep} stand garrison",
-            n - keep
+            "{settling} knights settled the captured village as civilians, {} stand garrison",
+            n - settling
         );
         self.push_alert(AlertKind::KnightsSettled, center);
     }
@@ -2975,7 +3088,7 @@ impl Game {
                         .fold(f32::MAX, f32::min);
                     if e.faction == faction && d2 <= capture2 {
                         match e.job {
-                            Job::Knight => v.knights += 1,
+                            Job::Knight | Job::Horseman => v.knights += 1,
                             Job::Civilian => v.civilians += 1,
                         }
                     } else if hostile(e.faction, faction) && d2 <= threat2 {
@@ -3248,7 +3361,10 @@ impl Game {
     /// with room under its own population cap, then a walkable tile beside one
     /// of its houses. `None` when every village is full (or none is surveyed
     /// yet, right after a world is created or loaded).
-    fn spawn_site(&mut self, faction: Faction) -> Option<Tile> {
+    /// Where this faction's next unit appears, beside a house of the village
+    /// with the most room, and whether that village has grown big enough to
+    /// raise horsemen (see `CAMP_HORSEMAN_MIN_HOUSES`).
+    fn spawn_site(&mut self, faction: Faction) -> Option<(Tile, bool)> {
         // New blood goes where the homes stand emptiest: of the villages with
         // room, those least full (by share of their cap) get the next unit, so
         // a fresh colony of a few settlers fills up instead of waiting its
@@ -3273,6 +3389,7 @@ impl Game {
         }
         let pick = candidates[self.rng.range(0, candidates.len() as i32) as usize];
         let (min, max) = (self.villages[pick].min, self.villages[pick].max);
+        let big = self.villages[pick].houses >= CAMP_HORSEMAN_MIN_HOUSES;
         let houses: Vec<Tile> = match faction {
             Faction::Player => &self.player_house_tiles,
             Faction::Enemy => &self.world.enemy_house_tiles,
@@ -3286,7 +3403,27 @@ impl Game {
             return None;
         }
         let (hx, hy) = houses[self.rng.range(0, houses.len() as i32) as usize];
-        adjacent_walkable(&self.world, hx, hy)
+        adjacent_walkable(&self.world, hx, hy).map(|t| (t, big))
+    }
+
+    /// Should the next soldier this faction raises ride rather than walk? Yes
+    /// while it fields fewer than one horseman for every two knights, so the
+    /// army settles at about a third mounted and tops itself back up after
+    /// losses. Horsemen are never raised while the realm is short of knights
+    /// to begin with.
+    fn wants_horseman(&self, faction: Faction) -> bool {
+        let (mut knights, mut horsemen) = (0usize, 0usize);
+        for e in &self.entities {
+            if e.faction != faction || e.mercenary {
+                continue;
+            }
+            match e.job {
+                Job::Knight => knights += 1,
+                Job::Horseman => horsemen += 1,
+                Job::Civilian => {}
+            }
+        }
+        horsemen * 2 < knights
     }
 
     fn handle_spawns(&mut self, dt: f32) {
@@ -3295,10 +3432,13 @@ impl Game {
             let civilians = self.civilian_count(Faction::Enemy);
             self.enemy_spawn_timer = spawn_interval(ENEMY_SPAWN_INTERVAL, civilians);
             if self.enemy_count() < self.enemy_pop_max()
-                && let Some(t) = self.spawn_site(Faction::Enemy)
+                && let Some((t, big)) = self.spawn_site(Faction::Enemy)
             {
                 let job = if self.enemy_spawn_cycle % 3 == 2 || civilians <= MIN_CIVILIANS_TO_GROW {
                     Job::Civilian
+                } else if big && self.wants_horseman(Faction::Enemy) {
+                    // A grown camp fields cavalry alongside its foot soldiers.
+                    Job::Horseman
                 } else {
                     Job::Knight
                 };
@@ -3312,7 +3452,7 @@ impl Game {
             let civilians = self.civilian_count(Faction::Player);
             self.player_spawn_timer = spawn_interval(PLAYER_SPAWN_INTERVAL, civilians);
             if self.population() < self.pop_cap()
-                && let Some(t) = self.spawn_site(Faction::Player)
+                && let Some((t, _)) = self.spawn_site(Faction::Player)
             {
                 // Agriculture favors civilians (2:1); Military favors
                 // knights (1:2). Both still raise some of each.
@@ -3339,14 +3479,27 @@ impl Game {
                 if civilians <= MIN_CIVILIANS_TO_GROW {
                     job = Job::Civilian;
                 }
-                // Knights must be paid for; an empty treasury raises a
+                // Under the Military priority, a realm light on cavalry
+                // raises a horseman in place of the knight when it can
+                // afford the horse.
+                if job == Job::Knight
+                    && self.priority == Priority::Military
+                    && self.money >= HORSEMAN_GOLD_COST
+                    && self.wants_horseman(Faction::Player)
+                {
+                    job = Job::Horseman;
+                }
+                // Soldiers must be paid for; an empty treasury raises a
                 // (free) civilian instead, so the village still grows.
-                if job == Job::Knight {
-                    if self.money >= KNIGHT_GOLD_COST {
-                        self.money -= KNIGHT_GOLD_COST;
-                    } else {
-                        job = Job::Civilian;
-                    }
+                let cost = match job {
+                    Job::Horseman => HORSEMAN_GOLD_COST,
+                    Job::Knight => KNIGHT_GOLD_COST,
+                    Job::Civilian => 0,
+                };
+                if self.money >= cost {
+                    self.money -= cost;
+                } else {
+                    job = Job::Civilian;
                 }
                 self.player_spawn_cycle += 1;
                 self.entities.push(Entity::new(Faction::Player, job, t));
@@ -3360,10 +3513,12 @@ impl Game {
             let civilians = self.civilian_count(Faction::Ally);
             self.ally_spawn_timer = spawn_interval(ALLY_SPAWN_INTERVAL, civilians);
             if self.ally_count() < ALLY_POP_MAX
-                && let Some(t) = self.spawn_site(Faction::Ally)
+                && let Some((t, big)) = self.spawn_site(Faction::Ally)
             {
                 let job = if self.ally_spawn_cycle % 3 == 2 || civilians <= MIN_CIVILIANS_TO_GROW {
                     Job::Civilian
+                } else if big && self.wants_horseman(Faction::Ally) {
+                    Job::Horseman
                 } else {
                     Job::Knight
                 };
@@ -4987,12 +5142,13 @@ fn ai_step(
             let farm = farm.expect("player civilians need farm context");
             gather_behavior(world, e, owner, pref, home, farm, snap, grid, rng, dt)
         }
-        (_, Job::Knight) => {
+        (_, Job::Knight | Job::Horseman) => {
             if under_limit {
                 retreat_behavior(world, e, owner, home, dt)
             } else {
+                let mobility = mobility_of(e.job, bridge_ok);
                 soldier_behavior(
-                    world, e, owner, rng, snap, rally, huts, bridge_ok, acting, dt,
+                    world, e, owner, rng, snap, rally, huts, mobility, acting, dt,
                 )
             }
         }
@@ -5030,12 +5186,7 @@ fn found_party_behavior(
             }
         }
     }
-    let speed = if e.job == Job::Knight {
-        KNIGHT_SPEED
-    } else {
-        CIVILIAN_SPEED
-    };
-    let moved = follow_path(e, speed, dt);
+    let moved = follow_path(e, speed_of(e.job), dt);
     set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
     None
 }
@@ -5504,10 +5655,18 @@ fn soldier_behavior(
     snap: &[(Vec2, Faction)],
     rally: Option<Vec2>,
     huts: &[Tile],
-    bridge_ok: bool,
+    mobility: Mobility,
     acting: bool,
     dt: f32,
 ) -> Option<StepEvent> {
+    // A horseman in the air over a stream finishes the leap before anything
+    // else: there's no stopping or turning mid-jump.
+    if e.jump.is_some() {
+        advance_jump(e, dt);
+        return None;
+    }
+    let bridge_ok = matches!(mobility, Mobility::Foot { bridge_ok: true });
+
     // Mid-action: laying a bridge tile, or hacking down a tree/rock we already
     // started on.
     if e.harvest_timer > 0.0 {
@@ -5564,14 +5723,14 @@ fn soldier_behavior(
                 let d = ((x - rt.0).abs() + (y - rt.1).abs()) as u32;
                 d.saturating_sub(RALLY_ARRIVE_MANHATTAN)
             };
-            if !plan_march(world, e, owner, bridge_ok, goal, steer) {
+            if !plan_march(world, e, owner, mobility, goal, steer) {
                 // The flag is unreachable from here; don't re-exhaust the
                 // search budget every replan tick while it stands.
                 e.set_path(Vec::new());
                 e.repath = 2.0;
             }
         }
-        return advance_or_hack(world, e, bridge_ok, dt);
+        return advance_or_hack(world, e, mobility, dt);
     }
 
     // No rally: stop and fight when a foe is already in range.
@@ -5605,7 +5764,7 @@ fn soldier_behavior(
         // only cut through when going around would take longer. Many targets
         // may be in play, so there's nothing to steer by.
         let engaged =
-            (!foes.is_empty() || siege) && plan_march(world, e, owner, bridge_ok, goal, |_, _| 0);
+            (!foes.is_empty() || siege) && plan_march(world, e, owner, mobility, goal, |_, _| 0);
         if !engaged {
             // Nothing reachable to fight or raze: drop any stale path so we idle
             // rather than grinding down trees along a dead route.
@@ -5626,7 +5785,7 @@ fn soldier_behavior(
         return None;
     }
 
-    advance_or_hack(world, e, bridge_ok, dt)
+    advance_or_hack(world, e, mobility, dt)
 }
 
 /// What a knight's route planner charges for stepping onto `(x, y)`, in tiles
@@ -5646,21 +5805,90 @@ fn knight_step_cost(world: &World, owner: u8, bridge_ok: bool, x: i32, y: i32) -
     }
 }
 
-/// Route a knight to the quickest-reached tile satisfying `goal`, with the time
-/// it would spend hacking through trees and rocks (and, when `bridge_ok`,
-/// laying bridge tiles over open water) priced in alongside the walking (see
-/// `knight_step_cost`). The knight therefore goes around an obstacle whenever
-/// that's quicker and only cuts through when it isn't. The goal is reached by
-/// standing on it, so a goal tile blocked by a tree costs the hacking too.
-/// `steer` is an admissible estimate of the remaining cost (zero when there's
-/// nothing to steer by). Sets the route on `e`, noting whether it runs through
-/// anything the knight will have to clear; returns false when no goal is
-/// reachable within the search budget.
+/// Is `(x, y)` walkable ground a horseman can take off from or land on? Open
+/// water and a bridge both fail: a leap starts and ends on solid bank.
+fn is_bank(world: &World, owner: u8, x: i32, y: i32) -> bool {
+    world.walkable_for(owner, x, y) && !world.is_bridge(x, y)
+}
+
+/// What a horseman's route planner charges for the step from `from` onto
+/// `to`: one for clear ground, `HORSEMAN_JUMP_STEP_COST` for each water tile
+/// of a leap, and `None` for everything else. A horse never hacks or bridges,
+/// so trees, rocks and wide water are simply routed around.
+///
+/// A leap is only ever a straight dash from one bank to the other, which this
+/// enforces one step at a time: a water tile may be entered only along a line
+/// that took off from a bank at most `HORSEMAN_JUMP_REACH` tiles back and
+/// lands on a bank at most that many tiles ahead. So the horse can neither
+/// turn in mid-air nor trot along a channel, and a stream wider than the
+/// reach is as much a barrier to it as to anyone on foot.
+fn horseman_step_cost(world: &World, owner: u8, from: Tile, to: Tile) -> Option<u32> {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    // A flight path has to keep its line: a step off a water tile must
+    // continue in the direction the water was entered, which is the direction
+    // that leads back to a bank within reach.
+    let in_line_from_bank = |back_x: i32, back_y: i32| -> bool {
+        (1..=HORSEMAN_JUMP_REACH).any(|k| {
+            let (bx, by) = (back_x - dx * k, back_y - dy * k);
+            (1..k).all(|m| world.is_open_water(back_x - dx * m, back_y - dy * m))
+                && is_bank(world, owner, bx, by)
+        })
+    };
+    if world.is_open_water(from.0, from.1) && !in_line_from_bank(from.0, from.1) {
+        return None;
+    }
+    if world.walkable_for(owner, to.0, to.1) {
+        return Some(1);
+    }
+    if !world.is_open_water(to.0, to.1) {
+        return None;
+    }
+    // Stepping onto water: the takeoff must be a bank within reach behind,
+    // counting `to` itself as the first water tile, and a bank must lie
+    // ahead within the remaining reach.
+    let behind = (0..HORSEMAN_JUMP_REACH).find(|&k| {
+        (1..=k).all(|m| world.is_open_water(to.0 - dx * m, to.1 - dy * m))
+            && is_bank(world, owner, to.0 - dx * (k + 1), to.1 - dy * (k + 1))
+    })?;
+    let ahead_max = HORSEMAN_JUMP_REACH - behind - 1;
+    let lands = (0..=ahead_max).any(|k| {
+        (1..=k).all(|m| world.is_open_water(to.0 + dx * m, to.1 + dy * m))
+            && is_bank(world, owner, to.0 + dx * (k + 1), to.1 + dy * (k + 1))
+    });
+    lands.then_some(HORSEMAN_JUMP_STEP_COST)
+}
+
+/// What a soldier's route planner charges for the step from `from` onto `to`
+/// (see `knight_step_cost` and `horseman_step_cost`).
+fn march_step_cost(
+    world: &World,
+    owner: u8,
+    mobility: Mobility,
+    from: Tile,
+    to: Tile,
+) -> Option<u32> {
+    match mobility {
+        Mobility::Foot { bridge_ok } => knight_step_cost(world, owner, bridge_ok, to.0, to.1),
+        Mobility::Mounted => horseman_step_cost(world, owner, from, to),
+    }
+}
+
+/// Route a soldier to the quickest-reached tile satisfying `goal`, with the
+/// time it would spend hacking through trees and rocks (and, when it may lay
+/// bridges, bridging open water) or leaping streams priced in alongside the
+/// walking (see `march_step_cost`). The soldier therefore goes around an
+/// obstacle whenever that's quicker and only cuts through (or leaps) when it
+/// isn't. The goal is reached by standing on it, so a goal tile blocked by a
+/// tree costs the hacking too. `steer` is an admissible estimate of the
+/// remaining cost (zero when there's nothing to steer by). Sets the route on
+/// `e`, noting whether it runs through anything the soldier will have to
+/// clear or leap; returns false when no goal is reachable within the search
+/// budget.
 fn plan_march(
     world: &World,
     e: &mut Entity,
     owner: u8,
-    bridge_ok: bool,
+    mobility: Mobility,
     goal: impl Fn(i32, i32) -> bool,
     steer: impl Fn(i32, i32) -> u32,
 ) -> bool {
@@ -5668,7 +5896,7 @@ fn plan_march(
         e.tile(),
         KNIGHT_PATH_BUDGET,
         goal,
-        |x, y| knight_step_cost(world, owner, bridge_ok, x, y),
+        |from, to| march_step_cost(world, owner, mobility, from, to),
         steer,
     ) else {
         return false;
@@ -5679,13 +5907,78 @@ fn plan_march(
     true
 }
 
-/// Advance a knight along its path: if the next step is a tree/rock, start
-/// hacking it down; if it's open water (a route planned across it), start
-/// laying a bridge tile over it; otherwise walk the step. Only a route planned
-/// through such obstacles (see `plan_march`) is cleared, though: on a route
-/// planned over clear ground, something that has sprung up since (a sapling
-/// that matured, say) is walked around instead, by planning afresh.
-fn advance_or_hack(world: &World, e: &mut Entity, bridge_ok: bool, dt: f32) -> Option<StepEvent> {
+/// Carry a leaping horseman through the air: a straight dash from takeoff to
+/// landing over `HORSEMAN_JUMP_TIME`, after which it stands on the far bank.
+fn advance_jump(e: &mut Entity, dt: f32) {
+    let Some(mut j) = e.jump else { return };
+    j.t += dt;
+    if j.t >= HORSEMAN_JUMP_TIME {
+        e.pos = j.to;
+        e.jump = None;
+    } else {
+        e.pos = j.from.lerp(j.to, j.t / HORSEMAN_JUMP_TIME);
+        e.jump = Some(j);
+    }
+    set_anim(e, Anim::Walk, dt);
+}
+
+/// A horseman whose next step is water takes off: the run of water tiles
+/// ahead on its path, and the bank beyond them, become a single leap, and the
+/// path cursor skips to the far side. A route that ends in the water (a flag
+/// or a foe mid-stream, say) lands on the bank straight beyond it if there is
+/// one; failing that the route is dropped to be planned afresh.
+fn start_jump(world: &World, e: &mut Entity, owner: u8) -> bool {
+    let takeoff = e.tile();
+    let mut i = e.path_cursor;
+    while i < e.path.len() && world.is_open_water(e.path[i].0, e.path[i].1) {
+        i += 1;
+    }
+    let landing = if i < e.path.len() {
+        Some(e.path[i])
+    } else {
+        let last = e.path[e.path.len() - 1];
+        let before = if e.path.len() >= 2 {
+            e.path[e.path.len() - 2]
+        } else {
+            takeoff
+        };
+        let beyond = (last.0 + (last.0 - before.0), last.1 + (last.1 - before.1));
+        is_bank(world, owner, beyond.0, beyond.1).then_some(beyond)
+    };
+    let Some(landing) = landing else {
+        e.set_path(Vec::new());
+        return false;
+    };
+    let to = tile_center(landing);
+    e.facing = dir_from_vec(to - e.pos);
+    e.jump = Some(Jump {
+        from: e.pos,
+        to,
+        t: 0.0,
+    });
+    e.path_cursor = (i + 1).min(e.path.len());
+    true
+}
+
+/// Advance a soldier along its path. A knight whose next step is a tree/rock
+/// starts hacking it down, and one whose next step is open water (a route
+/// planned across it) starts laying a bridge tile over it; a horseman whose
+/// next step is water leaps the stream instead. Otherwise the step is walked.
+/// Only a route planned through such obstacles (see `plan_march`) is cleared
+/// or leapt, though: on a route planned over clear ground, something that has
+/// sprung up since (a sapling that matured, say) is walked around instead, by
+/// planning afresh.
+fn advance_or_hack(
+    world: &World,
+    e: &mut Entity,
+    mobility: Mobility,
+    dt: f32,
+) -> Option<StepEvent> {
+    if e.jump.is_some() {
+        advance_jump(e, dt);
+        return None;
+    }
+    let bridge_ok = matches!(mobility, Mobility::Foot { bridge_ok: true });
     if !e.path_done() {
         let (wx, wy) = e.path[e.path_cursor];
         let blocked = world.node(wx, wy).is_some() || world.is_open_water(wx, wy);
@@ -5693,6 +5986,23 @@ fn advance_or_hack(world: &World, e: &mut Entity, bridge_ok: bool, dt: f32) -> O
             e.set_path(Vec::new());
             e.repath = 0.0;
             set_anim(e, Anim::Idle, dt);
+            return None;
+        }
+        if mobility == Mobility::Mounted {
+            if blocked {
+                // A horse clears nothing: a tree on a leapt route means the
+                // ground changed under the plan, so plan afresh.
+                if world.node(wx, wy).is_some() || !start_jump(world, e, owner_of(e.faction)) {
+                    e.set_path(Vec::new());
+                    e.repath = 0.0;
+                    set_anim(e, Anim::Idle, dt);
+                    return None;
+                }
+                advance_jump(e, dt);
+                return None;
+            }
+            let moved = follow_path(e, HORSEMAN_SPEED, dt);
+            set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
             return None;
         }
         if world.node(wx, wy).is_some() {
@@ -5756,7 +6066,7 @@ fn retreat_behavior(
         }
         e.repath = REPLAN_TICK;
     }
-    let moved = follow_path(e, KNIGHT_SPEED, dt);
+    let moved = follow_path(e, speed_of(e.job), dt);
     set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
     None
 }
@@ -6773,6 +7083,14 @@ fn job_u8(j: Job) -> u8 {
     match j {
         Job::Civilian => 0,
         Job::Knight => 1,
+        Job::Horseman => 2,
+    }
+}
+fn job_of(v: u8) -> Job {
+    match v {
+        1 => Job::Knight,
+        2 => Job::Horseman,
+        _ => Job::Civilian,
     }
 }
 fn site_kind_u8(k: SiteKind) -> u8 {
@@ -7084,11 +7402,7 @@ impl Game {
         let mut entities = Vec::with_capacity(ecount);
         for _ in 0..ecount {
             let faction = faction_of(r.u8()?);
-            let job = if r.u8()? == 1 {
-                Job::Knight
-            } else {
-                Job::Civilian
-            };
+            let job = job_of(r.u8()?);
             let px = r.f32()?;
             let py = r.f32()?;
             let hp = r.f32()?;
@@ -7128,6 +7442,7 @@ impl Game {
                 mercenary: false,
                 found_at: None,
                 pending: 0.0,
+                jump: None,
             });
         }
 
@@ -8883,6 +9198,232 @@ mod tests {
             })
         });
         assert!(bridged, "a broke realm must still get its knight bridges");
+    }
+
+    /// The lane of `knight_on_a_lane` with the soldier mounted instead, and a
+    /// stockpile with no wood so that no bridge could ever be laid. Returns
+    /// the horseman's index.
+    fn horseman_on_a_lane(game: &mut Game) -> usize {
+        let k = knight_on_a_lane(game);
+        let e = &mut game.entities[k];
+        e.job = Job::Horseman;
+        e.max_hp = max_hp_for(Faction::Player, Job::Horseman);
+        e.hp = e.max_hp;
+        game.wood = 0;
+        k
+    }
+
+    /// Moat (10, 0) in: a ring of open water `width` tiles across, starting
+    /// two tiles out, that no land route crosses.
+    fn moat(game: &mut Game, width: i32) {
+        for y in -6i32..=6 {
+            for x in -2i32..=16 {
+                let d = (x - 10).abs().max(y.abs());
+                if (2..2 + width).contains(&d) {
+                    game.world.carve_water(x, y);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn horsemen_leap_a_narrow_stream_rather_than_bridge_it() {
+        let mut game = Game::new(1);
+        let k = horseman_on_a_lane(&mut game);
+        moat(&mut game, HORSEMAN_JUMP_REACH);
+        game.build_mode = BuildMode::Rally;
+        assert!(game.try_build(tile_center((10, 0))));
+
+        let sim = (-6, -10, 20, 10);
+        let (mut arrived, mut leapt) = (false, false);
+        for _ in 0..600 {
+            game.update(0.1, sim);
+            leapt |= game.entities[k].jump.is_some();
+            if game.rally_point.is_none() {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(
+            arrived,
+            "the horseman never reached the flag across the stream"
+        );
+        assert!(leapt, "the horseman got across without ever leaping");
+        // The flag lifts the moment the horse is close enough, even in the
+        // air; the leap still finishes on the far bank (and the horse may
+        // well leap straight off again after some distant foe, so look at it
+        // the instant it lands).
+        for _ in 0..10 {
+            if game.entities[k].jump.is_none() {
+                break;
+            }
+            game.update(0.1, sim);
+        }
+        let e = &game.entities[k];
+        assert!(e.jump.is_none(), "still airborne long after the leap");
+        let (x, y) = e.tile();
+        assert!(
+            !game.world.is_open_water(x, y),
+            "the horseman came down in the water at ({x}, {y})"
+        );
+        assert!(
+            e.pos.distance(tile_center((10, 0))) <= RALLY_ARRIVE_RADIUS + 1.0,
+            "the horseman landed somewhere other than the island"
+        );
+        let bridged = (-6i32..=6).any(|y| (-2i32..=16).any(|x| game.world.is_bridge(x, y)));
+        assert!(!bridged, "a horseman must never lay a bridge");
+    }
+
+    #[test]
+    fn horsemen_balk_at_a_river_wider_than_their_reach() {
+        let mut game = Game::new(1);
+        let k = horseman_on_a_lane(&mut game);
+        moat(&mut game, HORSEMAN_JUMP_REACH + 1);
+        game.build_mode = BuildMode::Rally;
+        assert!(game.try_build(tile_center((10, 0))));
+
+        let sim = (-6, -10, 20, 10);
+        let flag = tile_center((10, 0));
+        let mut nearest = f32::MAX;
+        for _ in 0..400 {
+            game.update(0.1, sim);
+            let e = &game.entities[k];
+            assert!(
+                e.jump.is_none(),
+                "a horseman leapt a river wider than its reach"
+            );
+            let (x, y) = e.tile();
+            assert!(
+                !game.world.is_open_water(x, y),
+                "a horseman stood in open water at ({x}, {y})"
+            );
+            nearest = nearest.min(e.pos.distance(flag));
+        }
+        // The island inside the moat is only reachable across the water, so
+        // the horse can never have come close to the flag.
+        assert!(
+            nearest > RALLY_ARRIVE_RADIUS,
+            "the horseman got within {nearest} tiles of the flag across the wide moat"
+        );
+    }
+
+    #[test]
+    fn horsemen_never_cut_through_trees() {
+        let mut game = Game::new(1);
+        let k = horseman_on_a_lane(&mut game);
+        // A wall of trees across the whole cleared lane between the horseman
+        // and the flag.
+        for y in -6..=6 {
+            game.world.set_node(5, y, Resource::Wood, 5);
+        }
+        game.build_mode = BuildMode::Rally;
+        assert!(game.try_build(tile_center((10, 0))));
+
+        let sim = (-6, -10, 20, 10);
+        for _ in 0..400 {
+            game.update(0.1, sim);
+            for y in -6..=6 {
+                assert!(
+                    game.world.node(5, y).is_some(),
+                    "the horseman hacked down the tree at (5, {y})"
+                );
+            }
+            assert!(game.entities[k].target_node.is_none());
+        }
+    }
+
+    #[test]
+    fn horsemen_survive_a_save() {
+        let mut game = Game::new(1);
+        let i = game
+            .entities
+            .iter()
+            .position(|e| e.faction == Faction::Player)
+            .expect("the player starts with units");
+        game.entities[i].job = Job::Horseman;
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+        assert_eq!(loaded.entities[i].job, Job::Horseman, "the job was lost");
+        assert_eq!(
+            loaded
+                .entities
+                .iter()
+                .filter(|e| e.job == Job::Horseman)
+                .count(),
+            1,
+            "the job leaked onto other units"
+        );
+    }
+
+    /// A fresh realm with a working core at home, every other unit cleared,
+    /// and the houses surveyed so spawns can find them.
+    fn realm_ready_to_grow(priority: Priority, money: u32) -> Game {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        let (hx, hy) = game.player_houses()[0];
+        for _ in 0..=MIN_CIVILIANS_TO_GROW + 2 {
+            let t = adjacent_walkable(&game.world, hx, hy).expect("room by the house");
+            game.entities
+                .push(Entity::new(Faction::Player, Job::Civilian, t));
+        }
+        game.priority = priority;
+        game.money = money;
+        game.survey_villages();
+        game
+    }
+
+    /// Fire the player's spawn until the realm is full, and tally the knights
+    /// and horsemen raised.
+    fn raise_until_full(game: &mut Game) -> (usize, usize) {
+        for _ in 0..60 {
+            if game.population() >= game.pop_cap() {
+                break;
+            }
+            game.player_spawn_timer = 0.0;
+            game.handle_spawns(0.01);
+        }
+        let knights = game
+            .entities
+            .iter()
+            .filter(|e| e.job == Job::Knight)
+            .count();
+        let horsemen = game
+            .entities
+            .iter()
+            .filter(|e| e.job == Job::Horseman)
+            .count();
+        (knights, horsemen)
+    }
+
+    #[test]
+    fn military_priority_raises_horsemen_when_the_gold_allows() {
+        let mut game = realm_ready_to_grow(Priority::Military, 1000);
+        let (knights, horsemen) = raise_until_full(&mut game);
+        assert!(knights >= 2, "the realm raised only {knights} knights");
+        assert!(horsemen >= 1, "no horseman was raised under Military");
+        assert!(
+            horsemen <= knights,
+            "cavalry outnumbers the foot: {horsemen} to {knights}"
+        );
+        assert_eq!(
+            game.money,
+            1000 - knights as u32 * KNIGHT_GOLD_COST - horsemen as u32 * HORSEMAN_GOLD_COST,
+            "every horse and sword must be paid for"
+        );
+    }
+
+    #[test]
+    fn horsemen_need_their_gold_and_the_military_priority() {
+        // Too poor for a horse (but not for a knight): knights only.
+        let mut game = realm_ready_to_grow(Priority::Military, HORSEMAN_GOLD_COST - 1);
+        let (knights, horsemen) = raise_until_full(&mut game);
+        assert!(knights >= 1, "a knight was still affordable");
+        assert_eq!(horsemen, 0, "a horseman was raised on too little gold");
+
+        // Rich, but leaning Agriculture: knights only.
+        let mut game = realm_ready_to_grow(Priority::Agriculture, 1000);
+        let (_, horsemen) = raise_until_full(&mut game);
+        assert_eq!(horsemen, 0, "a horseman was raised under Agriculture");
     }
 
     /// A flat, treeless lane from the origin out to x = 16 (forced land near

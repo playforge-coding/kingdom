@@ -432,13 +432,13 @@ impl State {
         // how many same-type units are drawn on any one tile. Small crowds show
         // fully (so you see newcomers arrive), but a pathological pile-up of
         // hundreds costs a handful of quads instead of hundreds.
-        let mut stack: HashMap<(i32, i32, bool, bool), u32> = HashMap::default();
+        let mut stack: HashMap<(i32, i32, bool, Job), u32> = HashMap::default();
         for e in &game.entities {
             let key = (
                 e.pos.x.floor() as i32,
                 e.pos.y.floor() as i32,
                 matches!(e.faction, Faction::Player),
-                matches!(e.job, Job::Knight),
+                e.job,
             );
             let count = stack.entry(key).or_insert(0);
             *count += 1;
@@ -447,18 +447,36 @@ impl State {
             }
             let (sheet, col, row) = sprite_frame(e);
             let uv = self.atlas.frame_uv(sheet, col, row);
-            out.push(tinted(
-                [e.pos.x - 0.5, e.pos.y - 0.5],
-                [1.0, 1.0],
-                uv,
-                WHITE,
-            ));
+            // A horseman's frames are 32x32, drawn over a 2x2-tile footprint
+            // with the hooves on its tile, and lifted off the ground while it
+            // leaps a stream. Everyone else is a 16x16 frame on one tile.
+            let mounted = e.job == Job::Horseman;
+            let lift = e.jump_lift();
+            if mounted {
+                out.push(tinted(
+                    [e.pos.x - 1.0, e.pos.y - HORSEMAN_DRAW_RISE - lift],
+                    [2.0, 2.0],
+                    uv,
+                    WHITE,
+                ));
+            } else {
+                out.push(tinted(
+                    [e.pos.x - 0.5, e.pos.y - 0.5],
+                    [1.0, 1.0],
+                    uv,
+                    WHITE,
+                ));
+            }
 
             if e.hp < e.max_hp {
                 let ratio = (e.hp / e.max_hp).clamp(0.0, 1.0);
                 let (bw, bh) = (0.8f32, 0.12f32);
                 let bx = e.pos.x - bw / 2.0;
-                let by = e.pos.y - 0.72;
+                let by = if mounted {
+                    e.pos.y - HORSEMAN_DRAW_RISE - lift + 0.05
+                } else {
+                    e.pos.y - 0.72
+                };
                 out.push(tinted([bx, by], [bw, bh], white, [0.15, 0.0, 0.0, 0.85]));
                 let col = match e.faction {
                     Faction::Player => [0.3, 0.55, 1.0, 0.95],
@@ -945,8 +963,12 @@ impl State {
     }
 }
 
-/// Per-sheet animation layout. The sheets are 5x12 grids of 16x16 frames.
-/// Walk animations live on rows `walk_base..+4` and actions on
+/// How far above its position's center a horseman's 2x2-tile quad starts, in
+/// tiles: places the hooves on the unit's tile with the rider rising above it.
+const HORSEMAN_DRAW_RISE: f32 = 1.4;
+
+/// Per-sheet animation layout for the foot sheets, 5x12 grids of 16x16
+/// frames. Walk animations live on rows `walk_base..+4` and actions on
 /// `act_base..+4`, one row per facing in the order down, up, left, right.
 struct AnimRows {
     walk_base: u32,
@@ -970,20 +992,30 @@ const KNIGHT_ROWS: AnimRows = AnimRows {
     act_frames: 4,
 };
 
+/// Frames per second every walk and action cycle runs at.
+const ANIM_FPS: f32 = 8.0;
+
 /// Map an entity's state + facing to a (sheet, column, row) frame.
 fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
     // Civilians keep the classic farmer art whatever job they've taken up.
     let sheet = match (e.faction, e.job) {
         (Faction::Player, Job::Civilian) => "farmer",
         (Faction::Player, Job::Knight) => "knight",
+        (Faction::Player, Job::Horseman) => "horseman",
         (Faction::Enemy, Job::Civilian) => "enemy_farmer",
         (Faction::Enemy, Job::Knight) => "enemy_knight",
+        (Faction::Enemy, Job::Horseman) => "enemy_horseman",
         (Faction::Ally, Job::Civilian) => "ally_farmer",
         (Faction::Ally, Job::Knight) => "ally_knight",
+        (Faction::Ally, Job::Horseman) => "ally_horseman",
     };
     let rows = match e.job {
         Job::Civilian => FARMER_ROWS,
         Job::Knight => KNIGHT_ROWS,
+        Job::Horseman => {
+            let (col, row) = horseman_frame(e);
+            return (sheet, col, row);
+        }
     };
 
     // Row order within a state block: down, up, then the two side rows. The
@@ -1005,9 +1037,30 @@ fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
     let col = if frames <= 1 {
         0
     } else {
-        ((e.anim_time * 8.0) as u32) % frames
+        ((e.anim_time * ANIM_FPS) as u32) % frames
     };
     (sheet, col, row)
+}
+
+/// The horseman sheets are 4x12 grids of 32x32 frames laid out as a block of
+/// three rows per facing, in the order down, right, left, up: two rows of
+/// riding (one 8-frame cycle read across both rows) and then one row of the
+/// lance thrust (4 frames). Returns the (column, row) of the frame to draw.
+fn horseman_frame(e: &Entity) -> (u32, u32) {
+    let block = match e.facing {
+        Dir::Down => 0,
+        Dir::Right => 1,
+        Dir::Left => 2,
+        Dir::Up => 3,
+    } * 3;
+    match e.anim {
+        Anim::Idle => (0, block),
+        Anim::Walk => {
+            let f = ((e.anim_time * ANIM_FPS) as u32) % 8;
+            (f % 4, block + f / 4)
+        }
+        Anim::Act => (((e.anim_time * ANIM_FPS) as u32) % 4, block + 2),
+    }
 }
 
 pub struct App {
