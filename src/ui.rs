@@ -255,6 +255,11 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
         .default_pos([12.0, 12.0])
         .resizable(false)
         .show(ctx, |ui| {
+            // The panel has grown taller than small screens, so it scrolls
+            // rather than running off the bottom.
+            egui::ScrollArea::vertical()
+                .max_height(ctx.content_rect().height() - 72.0)
+                .show(ui, |ui| {
             ui.heading("Stockpile");
             icon_label(ui, icons::TREE_PINE, format!("Wood: {}", game.wood));
             icon_label(ui, icons::MOUNTAIN, format!("Stone: {}", game.stone));
@@ -402,6 +407,44 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             {
                 game.clear_rally();
             }
+            // Hired help: an allied company that answers the flag.
+            if game.player_flag()
+                && ui
+                    .button((
+                        icon(ui, icons::SWORDS),
+                        format!(
+                            "Hire allied mercenaries ({} gold)",
+                            crate::game::MERC_HIRE_COST
+                        ),
+                    ))
+                    .clicked()
+            {
+                game.hire_mercenaries();
+            }
+            let mercs = game.mercenaries();
+            let companies = game
+                .transports()
+                .iter()
+                .filter(|t| t.faction == Faction::Ally)
+                .count();
+            if mercs > 0 || companies > 0 {
+                icon_label(
+                    ui,
+                    icons::SWORDS,
+                    format!(
+                        "{} ashore, {} at sea",
+                        plural(mercs, "mercenary", "mercenaries"),
+                        plural(companies, "allied company", "allied companies")
+                    ),
+                );
+            }
+            ui.small(format!(
+                "With a flag planted, {} allied knights ship over to answer it for {} gold. \
+                 They fight beside you and hold your villages, then sail home once it's \
+                 quiet. Only your own units can capture a village.",
+                crate::game::MERC_KNIGHTS,
+                crate::game::MERC_HIRE_COST
+            ));
             ui.separator();
 
             ui.heading("Trade");
@@ -462,7 +505,9 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             );
             ui.small(format!(
                 "Click a far shore to settle it: {SETTLER_CIVILIANS} civilians board a ship in \
-                 your harbor, sail over, and found a new village on landing. At least \
+                 your harbor, sail over, and found a new village on landing. Click one of \
+                 your own villages instead and the settlers reinforce it, joining it rather \
+                 than founding anew. At least \
                  {SETTLER_CIVILIANS_SPARED} civilians always stay home, and pirates can sink the \
                  ship, settlers and all."
             ));
@@ -515,7 +560,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             let landing = game
                 .transports()
                 .iter()
-                .filter(|t| t.knights > 0)
+                .filter(|t| t.faction == Faction::Player && t.knights > 0)
                 .count();
             if landing > 0 {
                 icon_label(
@@ -555,13 +600,15 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 ui.small(format!(
                     "Structures go up to {BUILD_NEAR_RADIUS} tiles from a house you own."
                 ));
-                ui.small("Houses raise new workers only while you have 4 or more civilians.");
+                ui.small("With 3 or fewer civilians, houses raise workers only and growth is slowest.");
                 ui.small(format!(
                     "Each new knight costs {KNIGHT_GOLD_COST} gold; a broke village raises a civilian instead."
                 ));
                 ui.small("Trade: load a ship on the coast and it sails to an allied shore for gold.");
                 ui.small("Autonomous trade keeps launching ships while the stockpile covers the load.");
                 ui.small("Settlers: click a far shore and a ship carries civilians over to found a new village.");
+                ui.small("Settlers sent to one of your own villages join it as reinforcements.");
+                ui.small("New villagers are raised at whichever of your villages has the most empty homes.");
                 ui.small("Troop ships land knights on far shores; after a capture, most knights settle down as civilians.");
                 ui.small("Allies fight the enemy on their own, but never join your battles.");
                 ui.small("Civilians farm, mine, and build as needed; knights defend.");
@@ -579,6 +626,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 ui.small("Villages off screen keep working and fighting at a slower pace.");
                 ui.small("Each village supports its own population; build houses where you want growth.");
                 ui.small("A lost village or raided hut only rallies the knights nearby.");
+                });
                 });
         });
     action
@@ -987,6 +1035,12 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                         LaunchRefusal::NoRoute => {
                                             "Can't launch: no sea route reaches that shore"
                                         }
+                                        LaunchRefusal::NoRally => {
+                                            "Can't hire: plant a rally flag for the company to answer"
+                                        }
+                                        LaunchRefusal::Mercenaries => {
+                                            "Can't hire: no allied village has knights to spare"
+                                        }
                                     },
                                 ),
                                 AlertKind::SettlersSunk => (
@@ -1007,6 +1061,11 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                     color32([0.3, 0.55, 1.0, 1.0]),
                                     "Your settlers landed and founded a village",
                                 ),
+                                AlertKind::SettlersJoined => (
+                                    icons::GLOBE,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "Your settlers went ashore and joined the village",
+                                ),
                                 AlertKind::TroopsLanded => (
                                     icons::SWORDS,
                                     color32([0.3, 0.55, 1.0, 1.0]),
@@ -1016,6 +1075,36 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                     icons::WHEAT,
                                     color32([0.3, 0.55, 1.0, 1.0]),
                                     "Knights laid down their arms and settled the village",
+                                ),
+                                AlertKind::ImmigrantsArrived => (
+                                    icons::WHEAT,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "Allied immigrants came home with the ship and settled in",
+                                ),
+                                AlertKind::MercenariesSailed => (
+                                    icons::SWORDS,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "An allied company set sail for your rally flag",
+                                ),
+                                AlertKind::MercenariesLanded => (
+                                    icons::SWORDS,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "The allied company is ashore and making for your flag",
+                                ),
+                                AlertKind::MercenariesLeft => (
+                                    icons::SHIP,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "Their work done, the allied company sailed home",
+                                ),
+                                AlertKind::PeopleIncorporated => (
+                                    icons::WHEAT,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "The village's people joined your realm",
+                                ),
+                                AlertKind::PeopleLost => (
+                                    icons::TENT,
+                                    ALARM,
+                                    "Villagers were carried off into the enemy's realm",
                                 ),
                                 AlertKind::LeviesPaid => (
                                     icons::COINS,

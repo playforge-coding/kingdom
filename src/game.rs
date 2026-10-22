@@ -113,6 +113,10 @@ fn tile_center(t: Tile) -> Vec2 {
 
 pub struct Entity {
     pub faction: Faction,
+    /// The faction this unit was born into. Villagers incorporated into
+    /// another realm when their village falls (see `incorporate_civilians`)
+    /// keep it, so a realm knows which of its people were once someone else's.
+    pub origin: Faction,
     pub job: Job,
     pub pos: Vec2,
     pub hp: f32,
@@ -137,6 +141,14 @@ pub struct Entity {
     /// A civilian called up by the draft and still owed `LEVY_GOLD_PAY`. Levies
     /// return to work (paid) or desert (unpaid) once the danger has passed.
     levy: bool,
+    /// An allied knight hired by the player (see `hire_mercenaries`). Mercenaries
+    /// answer the player's rally flag and sail home once the fighting is over.
+    mercenary: bool,
+    /// For an enemy or allied unit on a founding party: the spot the party is
+    /// marching to, where it will plant a new village (see `bud_village`).
+    /// Transient: a party caught by a save simply gives up the trip on load
+    /// and settles back into ordinary village life where it stands.
+    found_at: Option<Tile>,
     /// Simulation time owed to an off-screen entity. It accrues while the unit
     /// waits its turn and is spent (capped) when its rotating batch comes up,
     /// so the far realm runs at a slower tick instead of freezing. Transient.
@@ -157,6 +169,7 @@ impl Entity {
         let max_hp = max_hp_for(faction, job);
         Entity {
             faction,
+            origin: faction,
             job,
             pos: tile_center(tile),
             hp: max_hp,
@@ -173,6 +186,8 @@ impl Entity {
             build_site: None,
             sheltered: false,
             levy: false,
+            mercenary: false,
+            found_at: None,
             pending: 0.0,
         }
     }
@@ -355,6 +370,11 @@ pub const SETTLER_CIVILIANS_SPARED: usize = 4;
 const COLONY_HOUSES: usize = 2;
 /// How far around the clicked tile to look for the shore the colony anchors on.
 const SETTLE_ANCHOR_RADIUS: i32 = 8;
+/// A settler landing with a player house within this range (Chebyshev) is a
+/// **reinforcement**: the civilians go ashore and join the standing village
+/// rather than founding a new one. It's how a struggling colony gets more
+/// hands from home.
+const REINFORCE_RADIUS: i32 = 10;
 /// A settler ship drops anchor once it reaches water within this many tiles
 /// (Chebyshev) of the colony's anchor; the settlers wade the rest.
 const SETTLE_LANDING_RADIUS: i32 = 4;
@@ -381,6 +401,61 @@ const TROOP_MARCH_RANGE: f32 = 64.0;
 /// contested ground keeps half the knights under arms, quiet ground keeps a
 /// single garrison and turns the rest to the fields.
 const SETTLE_DOWN_DANGER_RADIUS: f32 = 24.0;
+
+// Immigration: trade with the allies is also a trickle of people. A docking
+// cargo ship sometimes brings allied families home with it, who settle in
+// whichever of the player's villages has the most empty homes.
+/// Chance (percent) that a cargo ship docking at an allied port brings
+/// immigrants back with it.
+const IMMIGRANT_CHANCE_PERCENT: i32 = 50;
+/// Most immigrants one ship brings (it brings one or two).
+const IMMIGRANTS_MAX: i32 = 2;
+
+// Budding: enemy and allied villages found daughter villages of their own.
+// A mature village sends out a founding party (a few civilians and a knight)
+// that walks to a spot one village-spacing away and plants a new camp there.
+// The enemy's parties head toward the player, so the border creeps closer and
+// the party itself can be intercepted on the road.
+/// Seconds between budding checks per faction.
+const ENEMY_BUD_INTERVAL: f32 = 45.0;
+const ALLY_BUD_INTERVAL: f32 = 90.0;
+/// An enemy village must have grown to this many houses before it buds.
+const ENEMY_BUD_MIN_HOUSES: usize = 6;
+/// Who walks out: civilians to work the new camp and a knight to guard the road.
+const ENEMY_PARTY_CIVILIANS: usize = 3;
+const ALLY_PARTY_CIVILIANS: usize = 2;
+const PARTY_KNIGHTS: usize = 1;
+/// The daughter village is planted this much beyond the spacing floor at most.
+const BUD_REACH: i32 = 16;
+/// Candidate sites drawn per budding check before giving up for this round;
+/// the first half lean toward the player, the rest look anywhere.
+const BUD_SITE_TRIES: usize = 12;
+/// A party member this close (Chebyshev) to the site counts as having arrived.
+const PARTY_ARRIVE_RADIUS: i32 = 2;
+/// Tile budget for a party's walk, generous since the road is a village apart
+/// and planned only rarely (see `found_party_behavior`).
+const PARTY_PATH_BUDGET: usize = 16_000;
+
+// Mercenaries: the allies hire out knights. The player pays gold, and the
+// nearest allied village with knights to spare ships a company over that
+// answers the player's rally flag, fights as allies do, and sails home once
+// the ground has been quiet a while. Only the player can take enemy ground, so
+// mercenaries soften a village but never capture one on the player's behalf.
+/// Knights in a hired company.
+pub const MERC_KNIGHTS: usize = 4;
+/// Gold per mercenary, above a knight's own cost: someone else's army is rented.
+pub const MERC_GOLD_COST: u32 = 25;
+/// Gold a whole company costs to hire.
+pub const MERC_HIRE_COST: u32 = MERC_KNIGHTS as u32 * MERC_GOLD_COST;
+/// An allied village keeps at least this many knights home when hiring out.
+const MERC_GARRISON: usize = 1;
+/// How far from the rally flag the company's landing beach may be found.
+const MERC_LANDING_SEARCH: i32 = 40;
+/// Seconds without a flag standing or an enemy near any mercenary before the
+/// company counts its work done and sails home.
+const MERC_STAND_DOWN: f32 = 20.0;
+/// An enemy within this range of a mercenary keeps the company engaged.
+const MERC_ENGAGE_RADIUS: f32 = 30.0;
 
 /// A new structure must be ordered within this many tiles of a house you
 /// already own. Generous enough to plan a whole district ahead of time, while
@@ -484,10 +559,24 @@ const VILLAGE_POP_BASE: usize = 4;
 const VILLAGE_POP_PER_HOUSE: usize = 3;
 /// Ceiling on the player's total population across all villages.
 const PLAYER_POP_MAX: usize = 120;
-/// Population cap of a single enemy village (they seed with about five units).
-const ENEMY_VILLAGE_POP: usize = 8;
-/// Ceiling on enemy units across all their villages.
-const ENEMY_POP_MAX: usize = 64;
+/// Base population an enemy village supports before counting its houses. With
+/// the four houses a camp is founded with, this matches the old flat cap of 8.
+const ENEMY_VILLAGE_POP_BASE: usize = 4;
+/// Extra population per house in an enemy village.
+const ENEMY_POP_PER_HOUSE: usize = 1;
+/// Most houses an enemy village raises for itself (see `grow_enemy_village`):
+/// a camp left alone hardens into a stronghold, but not without limit.
+const ENEMY_VILLAGE_MAX_HOUSES: usize = 10;
+/// The enemy's total allowance scales with their settlements: a base plus
+/// headroom per standing village, so a spreading enemy fields a growing army
+/// instead of the same men stretched ever thinner. With the four villages a
+/// world starts with it matches the old flat ceiling of 64, and a hard roof
+/// keeps the endless frontier from snowballing the simulation.
+const ENEMY_POP_MAX_BASE: usize = 24;
+const ENEMY_POP_PER_VILLAGE: usize = 10;
+const ENEMY_POP_HARD_MAX: usize = 128;
+/// Seconds between checks for an established enemy village raising a new house.
+const ENEMY_GROW_INTERVAL: f32 = 20.0;
 /// Population cap of a single allied village.
 const ALLY_VILLAGE_POP: usize = 6;
 /// Ceiling on allied units across all their villages.
@@ -496,8 +585,12 @@ const ALLY_POP_MAX: usize = 36;
 /// population when deciding which village may raise the next unit. Villages
 /// are spaced farther apart than this, so the attribution is unambiguous.
 const VILLAGE_ATTRIBUTION_RADIUS: f32 = 32.0;
-/// Houses only raise new workers while the faction has *more than* this many
-/// civilians to support them.
+/// The workforce a faction needs behind it to raise soldiers. At or below this
+/// many civilians, its houses raise only civilians, whatever its priority says,
+/// and growth runs at its slowest (see `spawn_interval`). It is deliberately
+/// not a gate on growth itself: a realm whose people have been cut down must
+/// always be able to work its way back, or empty homes would stand empty
+/// forever for want of the very hands they raise.
 const MIN_CIVILIANS_TO_GROW: usize = 3;
 /// Shortest possible spawn interval, however many civilians there are.
 const MIN_SPAWN_INTERVAL: f32 = 1.5;
@@ -523,10 +616,21 @@ fn spawn_interval(base: f32, civilians: usize) -> f32 {
     (base / (1.0 + extra * 0.25)).max(MIN_SPAWN_INTERVAL)
 }
 
+/// Population cap of an enemy village with this many houses. Like the player's
+/// villages, an enemy settlement supports more people the more houses it has.
+fn enemy_village_cap(houses: usize) -> usize {
+    ENEMY_VILLAGE_POP_BASE + houses * ENEMY_POP_PER_HOUSE
+}
+
 /// Houses within this Chebyshev distance belong to the same village.
 const CLUSTER_GAP: i32 = 8;
 /// A unit this close to a village's houses counts as present there.
 const CAPTURE_RADIUS: f32 = 5.0;
+/// Civilians this close to a fallen village's center change hands with it
+/// (see `incorporate_civilians`). Wider than the capture radius, whose units
+/// would have blocked the capture itself: it catches the village's people
+/// caught in the open just outside.
+const INCORPORATE_RADIUS: f32 = 20.0;
 /// How many enemy villages to scatter around the map at world creation.
 const ENEMY_VILLAGES: usize = 4;
 /// How many allied (trade-partner) villages to plant on far-off coasts.
@@ -538,9 +642,11 @@ const ALLY_SPAWN_INTERVAL: f32 = 10.0;
 // seed: fresh enemy and allied settlements keep being founded forever, each
 // planted farther out on an ever-widening frontier and spaced apart so the map
 // never clumps.
-/// Seconds between founding a brand-new enemy / allied village.
-const ENEMY_FOUND_INTERVAL: f32 = 35.0;
-const ALLY_FOUND_INTERVAL: f32 = 65.0;
+/// Seconds between founding a brand-new enemy / allied village out on the
+/// frontier. Slow, since villages now mostly spread by budding from standing
+/// ones (see `bud_village`); this clock only keeps the far map filling in.
+const ENEMY_FOUND_INTERVAL: f32 = 70.0;
+const ALLY_FOUND_INTERVAL: f32 = 120.0;
 /// A newly founded village must sit at least this far (Chebyshev) from every
 /// existing settlement of any faction, so villages stay spread out.
 const VILLAGE_SPACING: i32 = 42;
@@ -704,6 +810,10 @@ pub struct Ship {
 /// ship, is just as unarmored, and everyone aboard is lost if pirates sink it.
 pub struct Transport {
     pub pos: Vec2,
+    /// Whose ship and people these are: the player's settlers and troops, or
+    /// an allied company of mercenaries sailing to the player's aid. Public so
+    /// the renderer can tint the hull.
+    pub faction: Faction,
     /// Water tiles leading to the landing (last tile is where it drops anchor).
     path: Vec<Tile>,
     path_cursor: usize,
@@ -847,10 +957,26 @@ pub enum AlertKind {
     WarshipSunk,
     /// Settlers landed and founded a new village on a far shore.
     ColonyFounded,
+    /// Settlers landed by one of your standing villages and joined it as
+    /// reinforcements.
+    SettlersJoined,
     /// A landing party of knights went ashore on a far coast.
     TroopsLanded,
     /// After a capture, knights laid down their arms to settle the village.
     KnightsSettled,
+    /// A docking cargo ship brought allied immigrants home, who settled in
+    /// one of your villages.
+    ImmigrantsArrived,
+    /// A hired allied company cast off for the rally flag.
+    MercenariesSailed,
+    /// A hired allied company went ashore by the rally flag.
+    MercenariesLanded,
+    /// The fighting over, the hired company sailed home.
+    MercenariesLeft,
+    /// A captured village's surviving people joined your realm as civilians.
+    PeopleIncorporated,
+    /// A fallen village's people were carried off into the enemy's realm.
+    PeopleLost,
     /// The draft stood down and the levies were paid and went home to farm.
     LeviesPaid,
     /// The draft stood down but the treasury couldn't pay some levies, so they
@@ -874,6 +1000,11 @@ pub enum LaunchRefusal {
     TooClose,
     /// No sea route reaches that shore from the harbor.
     NoRoute,
+    /// Hiring only: no rally flag of the player's stands for the company to
+    /// answer.
+    NoRally,
+    /// Hiring only: no allied village has enough knights to spare a company.
+    Mercenaries,
 }
 
 #[derive(Clone, Copy)]
@@ -1029,6 +1160,16 @@ pub struct Game {
     player_spawn_cycle: u32,
     enemy_spawn_cycle: u32,
     ally_spawn_cycle: u32,
+    /// Countdown to the next check for an enemy village raising a new house
+    /// (see `grow_enemy_village`). Transient.
+    enemy_grow_timer: f32,
+    /// Countdowns to the next budding check per faction (see `bud_village`).
+    /// Transient.
+    enemy_bud_timer: f32,
+    ally_bud_timer: f32,
+    /// Seconds the hired mercenaries have gone without a flag to answer or an
+    /// enemy near them; they sail home at `MERC_STAND_DOWN`. Transient.
+    merc_quiet: f32,
     /// Clocks and counters for founding ever-farther new villages (see the
     /// `*_FOUND_INTERVAL` constants). The counts drive the frontier radius, so
     /// each new settlement reaches farther out than the last.
@@ -1245,6 +1386,10 @@ impl Game {
             player_spawn_cycle: 0,
             enemy_spawn_cycle: 0,
             ally_spawn_cycle: 0,
+            enemy_grow_timer: ENEMY_GROW_INTERVAL,
+            enemy_bud_timer: ENEMY_BUD_INTERVAL,
+            ally_bud_timer: ALLY_BUD_INTERVAL,
+            merc_quiet: 0.0,
             enemy_found_timer: ENEMY_FOUND_INTERVAL,
             ally_found_timer: ALLY_FOUND_INTERVAL,
             enemy_villages_founded: ENEMY_VILLAGES as u32,
@@ -1284,6 +1429,17 @@ impl Game {
             .iter()
             .filter(|e| e.faction == Faction::Enemy)
             .count()
+    }
+    /// The enemy's total population allowance: a base plus headroom for each
+    /// standing enemy village (ceilinged), so taking their villages shrinks
+    /// the army they can field and leaving them alone grows it.
+    fn enemy_pop_max(&self) -> usize {
+        let villages = self
+            .villages
+            .iter()
+            .filter(|v| v.faction == Faction::Enemy)
+            .count();
+        (ENEMY_POP_MAX_BASE + villages * ENEMY_POP_PER_VILLAGE).min(ENEMY_POP_HARD_MAX)
     }
     fn ally_count(&self) -> usize {
         self.entities
@@ -1359,6 +1515,7 @@ impl Game {
         self.plan_auto_trade(dt);
         self.run_draft(dt);
         self.stand_down_levies(dt);
+        self.stand_down_mercenaries(dt);
         self.grow_saplings(dt);
 
         // Decide who is stepped this frame, and by how much. Everyone near the
@@ -1591,22 +1748,28 @@ impl Game {
                     None,
                     adt,
                 ),
-                (Faction::Ally, _) => ai_step(
-                    &self.world,
-                    &mut self.entities[i],
-                    &mut self.rng,
-                    &snap,
-                    &grid,
-                    acting[i],
-                    under,
-                    &self.world.ally_house_tiles,
-                    None,
-                    None,
-                    &self.hut_tiles,
-                    false,
-                    None,
-                    adt,
-                ),
+                (Faction::Ally, _) => {
+                    // Hired mercenaries answer the player's flag and never
+                    // fall back to an allied village; the allies' own units
+                    // keep to their own affairs.
+                    let merc = self.entities[i].mercenary;
+                    ai_step(
+                        &self.world,
+                        &mut self.entities[i],
+                        &mut self.rng,
+                        &snap,
+                        &grid,
+                        acting[i],
+                        under && !merc,
+                        &self.world.ally_house_tiles,
+                        None,
+                        if merc { rally } else { None },
+                        &self.hut_tiles,
+                        false,
+                        None,
+                        adt,
+                    )
+                }
             };
             match event {
                 Some(StepEvent::Harvest(node)) => {
@@ -1685,6 +1848,7 @@ impl Game {
         }
 
         self.emerge_from_huts();
+        self.found_parties_arrive();
         self.clear_reached_rally();
         self.resolve_captures();
         self.age_alerts(dt);
@@ -1715,10 +1879,44 @@ impl Game {
                 );
                 self.money += s.reward;
                 self.ships.swap_remove(i);
+                self.welcome_immigrants();
             } else {
                 i += 1;
             }
         }
+    }
+
+    /// A cargo ship has docked at an allied port, and every so often allied
+    /// families take passage home with its crew: trade with the allies is a
+    /// trickle of people too. One or two allied civilians settle in whichever
+    /// of the player's villages has the most empty homes (the same choice new
+    /// villagers make), only while there's room, and keep their allied origin.
+    /// Returns how many settled.
+    fn welcome_immigrants(&mut self) -> usize {
+        if self.rng.range(0, 100) >= IMMIGRANT_CHANCE_PERCENT {
+            return 0;
+        }
+        let n = 1 + self.rng.range(0, IMMIGRANTS_MAX);
+        let mut settled = 0;
+        let mut at = None;
+        for _ in 0..n {
+            if self.population() >= self.pop_cap() {
+                break;
+            }
+            let Some(t) = self.spawn_site(Faction::Player) else {
+                break;
+            };
+            let mut e = Entity::new(Faction::Player, Job::Civilian, t);
+            e.origin = Faction::Ally;
+            self.entities.push(e);
+            at.get_or_insert(tile_center(t));
+            settled += 1;
+        }
+        if let Some(pos) = at {
+            log::info!("{settled} allied immigrants settled in the realm");
+            self.push_alert(AlertKind::ImmigrantsArrived, pos);
+        }
+        settled
     }
 
     /// Sail the settler ships. Like the cargo fleet they are always simulated;
@@ -1748,11 +1946,28 @@ impl Game {
     fn land_transport(&mut self, s: Transport) {
         let (ax, ay) = s.anchor;
         self.world.ensure_region(ax - 8, ay - 8, ax + 8, ay + 8);
-        // Settlers found a colony. Spaced houses first (the pattern enemy and
-        // allied camps use); if the shore turned out cramped, take whatever
-        // open grass is closest.
+        // An allied company goes ashore as mercenaries: allied knights who
+        // answer the player's flag from here on (see `hire_mercenaries`).
+        if s.faction == Faction::Ally {
+            for _ in 0..s.knights {
+                let spot = adjacent_walkable(&self.world, ax, ay).unwrap_or(s.anchor);
+                let mut e = Entity::new(Faction::Ally, Job::Knight, spot);
+                e.mercenary = true;
+                self.entities.push(e);
+            }
+            self.merc_quiet = 0.0;
+            log::info!("{} mercenaries went ashore at ({ax}, {ay})", s.knights);
+            self.push_alert(AlertKind::MercenariesLanded, tile_center(s.anchor));
+            return;
+        }
+        // Settlers dropping anchor by a standing player village reinforce it:
+        // they go ashore and join it, and no new houses go up.
+        let reinforcing = s.civilians > 0 && self.near_player_village(s.anchor);
+        // Otherwise settlers found a colony. Spaced houses first (the pattern
+        // enemy and allied camps use); if the shore turned out cramped, take
+        // whatever open grass is closest.
         let mut houses: Vec<Tile> = Vec::new();
-        if s.civilians > 0 {
+        if s.civilians > 0 && !reinforcing {
             'spaced: for ry in -4..=4i32 {
                 for rx in -4..=4i32 {
                     if houses.len() >= COLONY_HOUSES {
@@ -1794,7 +2009,10 @@ impl Game {
             let spot = adjacent_walkable(&self.world, home.0, home.1).unwrap_or(s.anchor);
             self.entities.push(Entity::new(Faction::Player, job, spot));
         }
-        if s.civilians > 0 {
+        if reinforcing {
+            log::info!("settlers landed at ({ax}, {ay}) and joined the standing village");
+            self.push_alert(AlertKind::SettlersJoined, tile_center(s.anchor));
+        } else if s.civilians > 0 {
             log::info!(
                 "settlers landed at ({ax}, {ay}) and founded a colony of {} houses",
                 houses.len()
@@ -2002,7 +2220,9 @@ impl Game {
             };
             log::info!("a transport was sunk by pirates, all souls lost at sea!");
             self.push_alert(kind, s.pos);
-            self.units_lost += s.civilians + s.knights;
+            if s.faction == Faction::Player {
+                self.units_lost += s.civilians + s.knights;
+            }
             return true;
         }
         if let Some(wi) = self
@@ -2251,7 +2471,9 @@ impl Game {
     fn clear_reached_rally(&mut self) {
         if let Some(r) = self.rally_point {
             let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
-            let knights = |e: &&Entity| e.faction == Faction::Player && e.job == Job::Knight;
+            // The player's knights and any hired mercenaries count as answering.
+            let knights =
+                |e: &&Entity| (e.faction == Faction::Player || e.mercenary) && e.job == Job::Knight;
             let arrived = self
                 .entities
                 .iter()
@@ -2287,8 +2509,12 @@ impl Game {
                     self.world.convert_house(x, y, 0);
                     self.world.reown_walls_near(x, y, 4, 1, 0);
                 }
-                self.push_alert(AlertKind::VillageCaptured, village_center(&village));
+                let center = village_center(&village);
+                self.push_alert(AlertKind::VillageCaptured, center);
                 self.settle_captured_village(&village);
+                if self.incorporate_civilians(center, Faction::Enemy, Faction::Player) > 0 {
+                    self.push_alert(AlertKind::PeopleIncorporated, center);
+                }
                 changed = true;
             }
         }
@@ -2303,9 +2529,13 @@ impl Game {
                 // Sound the alarm: rally the knights near the fallen village to
                 // come to their allies' aid and retake it. Knights farther out
                 // stay at their own posts.
-                self.rally_point = Some(village_center(&village));
+                let center = village_center(&village);
+                self.rally_point = Some(center);
                 self.rally_response = Some(AUTO_RALLY_RADIUS);
-                self.push_alert(AlertKind::VillageLost, village_center(&village));
+                self.push_alert(AlertKind::VillageLost, center);
+                if self.incorporate_civilians(center, Faction::Player, Faction::Enemy) > 0 {
+                    self.push_alert(AlertKind::PeopleLost, center);
+                }
                 log::info!("village lost, knights rallying to retake it");
                 changed = true;
             }
@@ -2379,6 +2609,44 @@ impl Game {
         self.push_alert(AlertKind::KnightsSettled, center);
     }
 
+    /// A fallen village's people change hands with it: `from`-faction civilians
+    /// near its heart are incorporated into the conqueror's realm, nearest
+    /// first, about two thirds of them (the rest scatter). Those hiding in huts
+    /// escape notice, and knights never turn. Each convert keeps their
+    /// `origin`, the faction they were born into. Returns how many converted.
+    fn incorporate_civilians(&mut self, center: Vec2, from: Faction, to: Faction) -> usize {
+        let r2 = INCORPORATE_RADIUS * INCORPORATE_RADIUS;
+        let mut nearby: Vec<(f32, usize)> = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let d2 = e.pos.distance_squared(center);
+                (e.faction == from && e.job == Job::Civilian && !e.sheltered && d2 <= r2)
+                    .then_some((d2, i))
+            })
+            .collect();
+        nearby.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let take = (nearby.len() * 2).div_ceil(3);
+        for &(_, i) in nearby.iter().take(take) {
+            let e = &mut self.entities[i];
+            e.faction = to;
+            let max_hp = max_hp_for(to, Job::Civilian);
+            e.hp = (e.hp / e.max_hp * max_hp).max(1.0);
+            e.max_hp = max_hp;
+            // Any claims held under the old banner are dropped.
+            e.build_site = None;
+            e.target_node = None;
+            e.mine_target = None;
+            e.harvest_timer = 0.0;
+            e.set_path(Vec::new());
+        }
+        if take > 0 {
+            log::info!("{take} villagers were incorporated into the conqueror's realm");
+        }
+        take
+    }
+
     /// True when the village has no `owner` defender within capture range but at
     /// least one unit of the specific attacker faction `by` is standing in it.
     /// Requiring a named attacker keeps a neutral third party (the allies) from
@@ -2392,7 +2660,9 @@ impl Game {
                 .iter()
                 .any(|&(hx, hy)| e.pos.distance_squared(tile_center((hx, hy))) <= r2);
             if inside {
-                if e.faction == owner {
+                // Anyone at peace with the owner holds the village for them:
+                // the player's own garrison, or hired allies standing in it.
+                if !hostile(e.faction, owner) {
                     owner_present = true;
                 } else if e.faction == by {
                     attacker_present = true;
@@ -2424,7 +2694,7 @@ impl Game {
                     .fold((i32::MIN, i32::MIN), |m, &(x, y)| (m.0.max(x), m.1.max(y)));
                 let cap = match faction {
                     Faction::Player => VILLAGE_POP_BASE + houses.len() * VILLAGE_POP_PER_HOUSE,
-                    Faction::Enemy => ENEMY_VILLAGE_POP,
+                    Faction::Enemy => enemy_village_cap(houses.len()),
                     Faction::Ally => ALLY_VILLAGE_POP,
                 };
                 let mut v = Village {
@@ -2718,13 +2988,25 @@ impl Game {
     /// of its houses. `None` when every village is full (or none is surveyed
     /// yet, right after a world is created or loaded).
     fn spawn_site(&mut self, faction: Faction) -> Option<Tile> {
-        let candidates: Vec<usize> = self
-            .villages
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| v.faction == faction && v.pop < v.cap)
-            .map(|(i, _)| i)
-            .collect();
+        // New blood goes where the homes stand emptiest: of the villages with
+        // room, those least full (by share of their cap) get the next unit, so
+        // a fresh colony of a few settlers fills up instead of waiting its
+        // turn behind the bustling capital. Ties are broken at random.
+        let mut candidates: Vec<usize> = Vec::new();
+        let mut best_fill = usize::MAX;
+        for (i, v) in self.villages.iter().enumerate() {
+            if v.faction != faction || v.pop >= v.cap {
+                continue;
+            }
+            let fill = v.pop * 1000 / v.cap.max(1);
+            if fill < best_fill {
+                best_fill = fill;
+                candidates.clear();
+            }
+            if fill == best_fill {
+                candidates.push(i);
+            }
+        }
         if candidates.is_empty() {
             return None;
         }
@@ -2751,11 +3033,10 @@ impl Game {
         if self.enemy_spawn_timer <= 0.0 {
             let civilians = self.civilian_count(Faction::Enemy);
             self.enemy_spawn_timer = spawn_interval(ENEMY_SPAWN_INTERVAL, civilians);
-            if self.enemy_count() < ENEMY_POP_MAX
-                && civilians > MIN_CIVILIANS_TO_GROW
+            if self.enemy_count() < self.enemy_pop_max()
                 && let Some(t) = self.spawn_site(Faction::Enemy)
             {
-                let job = if self.enemy_spawn_cycle % 3 == 2 {
+                let job = if self.enemy_spawn_cycle % 3 == 2 || civilians <= MIN_CIVILIANS_TO_GROW {
                     Job::Civilian
                 } else {
                     Job::Knight
@@ -2770,7 +3051,6 @@ impl Game {
             let civilians = self.civilian_count(Faction::Player);
             self.player_spawn_timer = spawn_interval(PLAYER_SPAWN_INTERVAL, civilians);
             if self.population() < self.pop_cap()
-                && civilians > MIN_CIVILIANS_TO_GROW
                 && let Some(t) = self.spawn_site(Faction::Player)
             {
                 // Agriculture favors civilians (2:1); Military favors
@@ -2792,6 +3072,12 @@ impl Game {
                         }
                     }
                 };
+                // A realm short of workers raises hands first, whatever the
+                // priority says: homes always refill with civilians, so a
+                // realm cut down to a few people can work its way back.
+                if civilians <= MIN_CIVILIANS_TO_GROW {
+                    job = Job::Civilian;
+                }
                 // Knights must be paid for; an empty treasury raises a
                 // (free) civilian instead, so the village still grows.
                 if job == Job::Knight {
@@ -2813,10 +3099,9 @@ impl Game {
             let civilians = self.civilian_count(Faction::Ally);
             self.ally_spawn_timer = spawn_interval(ALLY_SPAWN_INTERVAL, civilians);
             if self.ally_count() < ALLY_POP_MAX
-                && civilians > MIN_CIVILIANS_TO_GROW
                 && let Some(t) = self.spawn_site(Faction::Ally)
             {
-                let job = if self.ally_spawn_cycle % 3 == 2 {
+                let job = if self.ally_spawn_cycle % 3 == 2 || civilians <= MIN_CIVILIANS_TO_GROW {
                     Job::Civilian
                 } else {
                     Job::Knight
@@ -2824,6 +3109,29 @@ impl Game {
                 self.ally_spawn_cycle += 1;
                 self.entities.push(Entity::new(Faction::Ally, job, t));
             }
+        }
+
+        // Established enemy villages grow on their own clock: a village at its
+        // cap with hands to spare raises another house, lifting its own
+        // ceiling, so a camp the player leaves alone hardens over time.
+        self.enemy_grow_timer -= dt;
+        if self.enemy_grow_timer <= 0.0 {
+            self.enemy_grow_timer = ENEMY_GROW_INTERVAL;
+            self.grow_enemy_village();
+        }
+
+        // Mature villages bud: a founding party walks out to plant a daughter
+        // village a spacing away, so enemy and allied ground spreads from
+        // where it already stands rather than only out on the far frontier.
+        self.enemy_bud_timer -= dt;
+        if self.enemy_bud_timer <= 0.0 {
+            self.enemy_bud_timer = ENEMY_BUD_INTERVAL;
+            self.bud_village(Faction::Enemy);
+        }
+        self.ally_bud_timer -= dt;
+        if self.ally_bud_timer <= 0.0 {
+            self.ally_bud_timer = ALLY_BUD_INTERVAL;
+            self.bud_village(Faction::Ally);
         }
 
         // Found brand-new villages on their own slow clocks, pushing the
@@ -2853,6 +3161,26 @@ impl Game {
             && spaced(&self.player_house_tiles)
     }
 
+    /// Like `village_spot_clear`, but only against enemy and allied houses:
+    /// the check for a reinforcement landing, which may crowd the player's own
+    /// village but never someone else's.
+    fn spot_clear_of_rivals(&self, anchor: Tile) -> bool {
+        let spaced = |tiles: &[Tile]| {
+            tiles.iter().all(|&(hx, hy)| {
+                (hx - anchor.0).abs() >= VILLAGE_SPACING || (hy - anchor.1).abs() >= VILLAGE_SPACING
+            })
+        };
+        spaced(&self.world.enemy_house_tiles) && spaced(&self.world.ally_house_tiles)
+    }
+
+    /// Is a player house within reinforcement range of this anchor? Settlers
+    /// landing here join the standing village instead of founding a new one.
+    fn near_player_village(&self, anchor: Tile) -> bool {
+        self.player_house_tiles
+            .iter()
+            .any(|&(hx, hy)| (hx - anchor.0).abs().max((hy - anchor.1).abs()) <= REINFORCE_RADIUS)
+    }
+
     /// Ensure the cached home-continent tile set exists (flood-filled from the
     /// capital), computing it lazily on first need (after a load, say).
     fn ensure_home_set(&mut self) {
@@ -2865,6 +3193,266 @@ impl Game {
                 .unwrap_or((0, 0));
             let set = home_continent_tiles(&mut self.world, seed_tile, 300, 60_000);
             self.home_continent = Some(set);
+        }
+    }
+
+    /// Let one established enemy village raise a new house. Eligible villages
+    /// are full (or within one of it), have a civilian at home to do the
+    /// raising, aren't under attack, and haven't hit their house limit. The
+    /// house goes on the camp's 3-tile grid beside an existing one, so the
+    /// cluster keeps its shape, and the extra house lifts the village's
+    /// population cap on the next survey. Raiding a village early is what
+    /// stops it becoming a stronghold later.
+    fn grow_enemy_village(&mut self) {
+        let candidates: Vec<usize> = self
+            .villages
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| {
+                v.faction == Faction::Enemy
+                    && v.houses < ENEMY_VILLAGE_MAX_HOUSES
+                    && !v.threatened
+                    && v.civilians > 0
+                    && v.pop + 1 >= v.cap
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let pick = candidates[self.rng.range(0, candidates.len() as i32) as usize];
+        let (min, max) = (self.villages[pick].min, self.villages[pick].max);
+        let houses: Vec<Tile> = self
+            .world
+            .enemy_house_tiles
+            .iter()
+            .copied()
+            .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
+            .collect();
+        for &(hx, hy) in &houses {
+            for (dx, dy) in [
+                (3, 0),
+                (-3, 0),
+                (0, 3),
+                (0, -3),
+                (3, 3),
+                (-3, 3),
+                (3, -3),
+                (-3, -3),
+            ] {
+                let (x, y) = (hx + dx, hy + dy);
+                if self.world.is_open_grass(x, y) {
+                    self.world
+                        .plant_faction_house(x, y, owner_of(Faction::Enemy));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Let one mature village of `faction` bud: a founding party of civilians
+    /// and a knight sets out for a site a village-spacing away and plants a
+    /// daughter village on arrival (see `found_parties_arrive`). Enemy parties
+    /// head toward the player's nearest village, so enemy ground creeps closer
+    /// and a party can be met on the road; allied parties keep to the coasts
+    /// off the player's home continent, where their ports belong. A village
+    /// buds only when full, quiet, and (for the enemy) grown to a real town,
+    /// and only toward a site its party can actually walk to.
+    fn bud_village(&mut self, faction: Faction) {
+        let party_civilians = match faction {
+            Faction::Enemy => ENEMY_PARTY_CIVILIANS,
+            _ => ALLY_PARTY_CIVILIANS,
+        };
+        let candidates: Vec<usize> = self
+            .villages
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| {
+                v.faction == faction
+                    && !v.threatened
+                    && v.pop + 1 >= v.cap
+                    && (faction != Faction::Enemy || v.houses >= ENEMY_BUD_MIN_HOUSES)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let pick = candidates[self.rng.range(0, candidates.len() as i32) as usize];
+        let center = self.villages[pick].center;
+        // The party: this village's own people, standing in the open and not
+        // already on the road, nearest the heart first.
+        let attr2 = VILLAGE_ATTRIBUTION_RADIUS * VILLAGE_ATTRIBUTION_RADIUS;
+        let mut members: Vec<(f32, usize)> = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let d2 = e.pos.distance_squared(center);
+                (e.faction == faction
+                    && !e.sheltered
+                    && !e.mercenary
+                    && e.found_at.is_none()
+                    && d2 <= attr2)
+                    .then_some((d2, i))
+            })
+            .collect();
+        members.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let civilians: Vec<usize> = members
+            .iter()
+            .filter(|&&(_, i)| self.entities[i].job == Job::Civilian)
+            .map(|&(_, i)| i)
+            .take(party_civilians)
+            .collect();
+        let knights: Vec<usize> = members
+            .iter()
+            .filter(|&&(_, i)| self.entities[i].job == Job::Knight)
+            .map(|&(_, i)| i)
+            .take(PARTY_KNIGHTS)
+            .collect();
+        if civilians.len() < party_civilians || knights.len() < PARTY_KNIGHTS {
+            return;
+        }
+        let v = &self.villages[pick];
+        let half = (v.max.0 - v.min.0).max(v.max.1 - v.min.1) / 2 + 1;
+        // The road is checked from where the party actually stands: the
+        // village's center is often a house hemmed in by trees and huts.
+        let start = self.entities[civilians[0]].tile();
+        let Some(site) = self.bud_site(faction, center, half, start) else {
+            return;
+        };
+        for &i in civilians.iter().chain(knights.iter()) {
+            let e = &mut self.entities[i];
+            e.found_at = Some(site);
+            e.target_node = None;
+            e.mine_target = None;
+            e.build_site = None;
+            e.harvest_timer = 0.0;
+            e.repath = 0.0;
+            e.set_path(Vec::new());
+        }
+        log::info!(
+            "a founding party of {} set out for ({}, {})",
+            civilians.len() + knights.len(),
+            site.0,
+            site.1
+        );
+    }
+
+    /// Where a budding village's daughter goes: one village-spacing beyond the
+    /// parent's own footprint (`half` is the parent's half-extent), a little
+    /// more at most, on land, clear of every settlement, and reachable on foot
+    /// from `start`, where the party stands. Enemy sites lean toward the
+    /// player's nearest village; allied sites must be ocean coast off the home
+    /// continent.
+    fn bud_site(&mut self, faction: Faction, center: Vec2, half: i32, start: Tile) -> Option<Tile> {
+        let from = (center.x.floor() as i32, center.y.floor() as i32);
+        let toward = match faction {
+            Faction::Enemy => self
+                .villages
+                .iter()
+                .filter(|v| v.faction == Faction::Player)
+                .map(|v| v.center)
+                .min_by(|a, b| {
+                    a.distance_squared(center)
+                        .total_cmp(&b.distance_squared(center))
+                })
+                .map(|p| p - center)
+                .filter(|d| d.length_squared() > 1.0)
+                .map(|d| d.y.atan2(d.x)),
+            _ => None,
+        };
+        let owner = owner_of(faction);
+        for attempt in 0..BUD_SITE_TRIES {
+            // The first draws lean toward the player (within a third of a turn
+            // either side of the way there); if that side is hemmed in by
+            // other settlements or water, the rest look in any direction, so
+            // a crowded village still spreads where there's room.
+            let ang = match toward.filter(|_| attempt < BUD_SITE_TRIES / 2) {
+                Some(a) => a + self.rng.range(-10472, 10473) as f32 / 10000.0,
+                None => self.rng.range(0, 62832) as f32 / 10000.0,
+            };
+            // Spacing is measured per axis (Chebyshev), so lay the site on a
+            // square ring rather than a circle: far enough along the longer
+            // axis to clear the parent's own houses and the spacing floor,
+            // with a little slack for the anchor search pulling it inward.
+            let (dx, dy) = (ang.cos(), ang.sin());
+            let scale = 1.0 / dx.abs().max(dy.abs());
+            let r = (VILLAGE_SPACING + half + 4 + self.rng.range(0, BUD_REACH + 1)) as f32;
+            let target = (
+                from.0 + (dx * scale * r) as i32,
+                from.1 + (dy * scale * r) as i32,
+            );
+            let anchor = match faction {
+                Faction::Ally => find_ocean_coast_anchor(&mut self.world, target, 16),
+                _ => find_land_anchor(&mut self.world, target, 12),
+            };
+            let Some(anchor) = anchor else {
+                continue;
+            };
+            if !self.village_spot_clear(anchor) {
+                continue;
+            }
+            if faction == Faction::Ally && self.on_home_continent(anchor) {
+                continue;
+            }
+            // Only a site the party can walk to: generate the road's terrain
+            // (ungenerated chunks read as walls to the pathfinder) and try it.
+            self.world.ensure_region(
+                start.0.min(anchor.0) - 8,
+                start.1.min(anchor.1) - 8,
+                start.0.max(anchor.0) + 8,
+                start.1.max(anchor.1) + 8,
+            );
+            if pathfind::path_to(&self.world, owner, start, anchor, PARTY_PATH_BUDGET).is_none() {
+                continue;
+            }
+            return Some(anchor);
+        }
+        None
+    }
+
+    /// Does `anchor` sit on (or within a few tiles of) the player's home
+    /// landmass? Allied villages are kept off it so reaching them means a
+    /// voyage.
+    fn on_home_continent(&mut self, anchor: Tile) -> bool {
+        self.ensure_home_set();
+        let home = self.home_continent.as_ref().unwrap();
+        (-5..=5).any(|dy| (-5..=5).any(|dx| home.contains(&(anchor.0 + dx, anchor.1 + dy))))
+    }
+
+    /// Plant the daughter village once a founding party reaches its site: the
+    /// camp goes up where the party was bound, and everyone on that party
+    /// becomes its first villagers. If the site was built over in the meantime
+    /// (another camp got there first, say), the party just settles where it
+    /// stands.
+    fn found_parties_arrive(&mut self) {
+        let mut arrived: Vec<(Faction, Tile)> = Vec::new();
+        for e in &self.entities {
+            if let Some(site) = e.found_at {
+                let (x, y) = e.tile();
+                let near = (x - site.0).abs().max((y - site.1).abs()) <= PARTY_ARRIVE_RADIUS;
+                if near && !arrived.contains(&(e.faction, site)) {
+                    arrived.push((e.faction, site));
+                }
+            }
+        }
+        for (faction, site) in arrived {
+            if self.village_spot_clear(site) {
+                self.world.plant_camp(site, 4, owner_of(faction));
+                self.hut_tiles = self.world.all_hut_tiles();
+                log::info!(
+                    "a founding party planted a new village at ({}, {})",
+                    site.0,
+                    site.1
+                );
+            }
+            for e in &mut self.entities {
+                if e.faction == faction && e.found_at == Some(site) {
+                    e.found_at = None;
+                    e.set_path(Vec::new());
+                }
+            }
         }
     }
 
@@ -2885,6 +3473,7 @@ impl Game {
             }
             let before = self.world.enemy_house_tiles.len();
             self.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
+            self.hut_tiles = self.world.all_hut_tiles();
             let houses: Vec<Tile> = self.world.enemy_house_tiles[before..].to_vec();
             if houses.is_empty() {
                 continue;
@@ -2926,19 +3515,12 @@ impl Game {
             if !self.village_spot_clear(anchor) {
                 continue;
             }
-            let on_home = (-5..=5).any(|dy| {
-                (-5..=5).any(|dx| {
-                    self.home_continent
-                        .as_ref()
-                        .unwrap()
-                        .contains(&(anchor.0 + dx, anchor.1 + dy))
-                })
-            });
-            if on_home {
+            if self.on_home_continent(anchor) {
                 continue;
             }
             let before = self.world.ally_house_tiles.len();
             self.world.plant_camp(anchor, 4, owner_of(Faction::Ally));
+            self.hut_tiles = self.world.all_hut_tiles();
             let houses: Vec<Tile> = self.world.ally_house_tiles[before..].to_vec();
             if houses.is_empty() {
                 continue;
@@ -3095,9 +3677,14 @@ impl Game {
         let Some(anchor) = find_land_anchor(&mut self.world, t, SETTLE_ANCHOR_RADIUS) else {
             return refuse(self, LaunchRefusal::NoShore);
         };
-        // Keep colonies clear of every existing settlement, your own included:
-        // settling is for new ground, not for crowding a village that stands.
-        if !self.village_spot_clear(anchor) {
+        // Keep colonies clear of existing settlements, with one exception:
+        // a landing at one of your own villages is a reinforcement (the
+        // settlers join it), not a founding, so it may crowd that village but
+        // never anyone else's. Ground merely *near* your village (too close
+        // to found, too far to join) is still refused.
+        if !self.village_spot_clear(anchor)
+            && !(self.near_player_village(anchor) && self.spot_clear_of_rivals(anchor))
+        {
             return refuse(self, LaunchRefusal::TooClose);
         }
         let Some((port, path)) = self.plan_settler_route(anchor) else {
@@ -3116,6 +3703,7 @@ impl Game {
             .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
         self.transports.push(Transport {
             pos: start,
+            faction: Faction::Player,
             path,
             path_cursor: 0,
             anchor,
@@ -3176,6 +3764,7 @@ impl Game {
             .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
         self.transports.push(Transport {
             pos: start,
+            faction: Faction::Player,
             path,
             path_cursor: 0,
             anchor,
@@ -3331,14 +3920,79 @@ impl Game {
 
     /// A spot the harbor can launch a cargo ship from on its own: open water
     /// within `SHIP_NEAR_RADIUS` of one of the player's houses that has a sea
-    /// route to an allied coast, plus that route. Every dock tile in the realm
-    /// is seeded into one search at once (see `plan_trade_route`), so the ship
-    /// casts off from whichever harbor genuinely connects to a port, a
-    /// colony's included.
+    /// route to an allied coast, plus that route.
+    ///
+    /// A **random** one of the realm's coastal villages is asked first, so
+    /// autonomous trade sails out of every port the realm holds over time
+    /// rather than forever out of the one that happens to lie nearest the
+    /// allies. Seeding every dock in the realm into one search (as the
+    /// fallback does, see `plan_trade_route`) always returns that same
+    /// closest harbor, which left a colony's quay idle however long it stood.
+    /// If the village drawn has no sea route, the whole realm's docks go into
+    /// one search as before, so trade never stalls on an unlucky draw.
     fn plan_harbor_route(&mut self) -> Option<(Tile, Vec<Tile>)> {
-        let docks = self.collect_docks();
         let allies = self.world.ally_house_tiles.clone();
+        let mine: Vec<usize> = (0..self.villages.len())
+            .filter(|&i| self.villages[i].faction == Faction::Player)
+            .collect();
+        let mut coastal: Vec<Vec<Tile>> = Vec::new();
+        for i in mine {
+            let docks = self.village_docks(i);
+            if !docks.is_empty() {
+                coastal.push(docks);
+            }
+        }
+        if !coastal.is_empty() {
+            let pick = self.rng.range(0, coastal.len() as i32) as usize;
+            if let Some(route) = plan_trade_route(&mut self.world, &coastal[pick], &allies) {
+                return Some(route);
+            }
+        }
+        let docks = self.collect_docks();
         plan_trade_route(&mut self.world, &docks, &allies)
+    }
+
+    /// Every tile one village can launch from: open water within
+    /// `SHIP_NEAR_RADIUS` of a house of its own. The village's surroundings are
+    /// generated first, so a freshly loaded realm doesn't misread its quay.
+    fn village_docks(&mut self, village: usize) -> Vec<Tile> {
+        let Some(v) = self.villages.get(village) else {
+            return Vec::new();
+        };
+        let (min, max) = (v.min, v.max);
+        let houses: Vec<Tile> = self
+            .player_house_tiles
+            .iter()
+            .copied()
+            .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
+            .collect();
+        self.docks_near(&houses)
+    }
+
+    /// Every open-water tile within `SHIP_NEAR_RADIUS` of any of `houses`,
+    /// deduplicated: a village's quay, whichever faction's houses they are.
+    /// The surroundings are generated first, so a freshly loaded realm
+    /// doesn't misread a harbor.
+    fn docks_near(&mut self, houses: &[Tile]) -> Vec<Tile> {
+        let mut seen: HashSet<Tile> = HashSet::default();
+        let mut docks = Vec::new();
+        for &(hx, hy) in houses {
+            self.world.ensure_region(
+                hx - SHIP_NEAR_RADIUS,
+                hy - SHIP_NEAR_RADIUS,
+                hx + SHIP_NEAR_RADIUS,
+                hy + SHIP_NEAR_RADIUS,
+            );
+            for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
+                    let t = (hx + dx, hy + dy);
+                    if self.world.is_open_water(t.0, t.1) && seen.insert(t) {
+                        docks.push(t);
+                    }
+                }
+            }
+        }
+        docks
     }
 
     /// Place a construction order of `kind` at `t`, or cancel the pending order
@@ -3545,6 +4199,156 @@ impl Game {
         counts
     }
 
+    /// Does a flag the player planted stand (rather than an auto-raised alarm)?
+    pub fn player_flag(&self) -> bool {
+        self.rally_point.is_some() && self.rally_response.is_none()
+    }
+
+    /// Hired allied knights currently ashore.
+    pub fn mercenaries(&self) -> usize {
+        self.entities.iter().filter(|e| e.mercenary).count()
+    }
+
+    /// Hire an allied company to answer the player's rally flag. The nearest
+    /// allied village to the flag with knights to spare (beyond its garrison)
+    /// loads `MERC_KNIGHTS` onto one of its ships, which sails for the coast
+    /// nearest the flag; ashore, the company answers the flag like the player's
+    /// own knights, fights as allies do, and sails home once the ground is
+    /// quiet (see `stand_down_mercenaries`). Gold is paid up front. Refused,
+    /// with nothing spent and a toast saying why, when no player flag stands,
+    /// the treasury is short, no ally has the knights, no beach lies near the
+    /// flag, or no sea route reaches it.
+    pub fn hire_mercenaries(&mut self) -> bool {
+        let flag = self.rally_point.filter(|_| self.rally_response.is_none());
+        let at = flag.unwrap_or_else(|| self.start_center());
+        let refuse = |game: &mut Game, why: LaunchRefusal| {
+            game.push_alert(AlertKind::LaunchRefused(why), at);
+            false
+        };
+        let Some(flag) = flag else {
+            return refuse(self, LaunchRefusal::NoRally);
+        };
+        if self.money < MERC_HIRE_COST {
+            return refuse(self, LaunchRefusal::Stockpile);
+        }
+        // The company comes from the nearest allied village that can spare it.
+        let attr2 = VILLAGE_ATTRIBUTION_RADIUS * VILLAGE_ATTRIBUTION_RADIUS;
+        let mut villages: Vec<(f32, usize)> = self
+            .villages
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.faction == Faction::Ally)
+            .map(|(i, v)| (v.center.distance_squared(flag), i))
+            .collect();
+        villages.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut chosen = None;
+        for (_, vi) in villages {
+            let center = self.villages[vi].center;
+            let knights: Vec<usize> = self
+                .entities
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    e.faction == Faction::Ally
+                        && e.job == Job::Knight
+                        && !e.mercenary
+                        && e.found_at.is_none()
+                        && e.pos.distance_squared(center) <= attr2
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if knights.len() >= MERC_KNIGHTS + MERC_GARRISON {
+                chosen = Some((vi, knights));
+                break;
+            }
+        }
+        let Some((vi, mut knights)) = chosen else {
+            return refuse(self, LaunchRefusal::Mercenaries);
+        };
+        let flag_tile = (flag.x.floor() as i32, flag.y.floor() as i32);
+        let Some(anchor) = find_ocean_coast_anchor(&mut self.world, flag_tile, MERC_LANDING_SEARCH)
+        else {
+            return refuse(self, LaunchRefusal::NoShore);
+        };
+        let (min, max) = (self.villages[vi].min, self.villages[vi].max);
+        let houses: Vec<Tile> = self
+            .world
+            .ally_house_tiles
+            .iter()
+            .copied()
+            .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
+            .collect();
+        let docks = self.docks_near(&houses);
+        let Some((port, path)) = plan_voyage(&mut self.world, &docks, anchor) else {
+            return refuse(self, LaunchRefusal::NoRoute);
+        };
+        // The knights nearest the quay board. Remove from the highest index
+        // down so the earlier ones stay valid.
+        let start = tile_center(port);
+        knights.sort_by(|&a, &b| {
+            self.entities[a]
+                .pos
+                .distance_squared(start)
+                .total_cmp(&self.entities[b].pos.distance_squared(start))
+        });
+        knights.truncate(MERC_KNIGHTS);
+        knights.sort_unstable_by(|a, b| b.cmp(a));
+        for i in knights {
+            self.entities.swap_remove(i);
+        }
+        self.money -= MERC_HIRE_COST;
+        let facing = path
+            .first()
+            .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
+        self.transports.push(Transport {
+            pos: start,
+            faction: Faction::Ally,
+            path,
+            path_cursor: 0,
+            anchor,
+            civilians: 0,
+            knights: MERC_KNIGHTS as u32,
+            bob: 0.0,
+            facing,
+        });
+        self.merc_quiet = 0.0;
+        log::info!("hired an allied company of {MERC_KNIGHTS} for {MERC_HIRE_COST} gold");
+        self.push_alert(AlertKind::MercenariesSailed, start);
+        true
+    }
+
+    /// Once no flag stands and no enemy has come near any mercenary for
+    /// `MERC_STAND_DOWN` seconds, the hired company counts its work done and
+    /// sails home: the knights leave the realm (their village raises
+    /// replacements in time), and an alert says so.
+    fn stand_down_mercenaries(&mut self, dt: f32) {
+        if !self.entities.iter().any(|e| e.mercenary) {
+            return;
+        }
+        let r2 = MERC_ENGAGE_RADIUS * MERC_ENGAGE_RADIUS;
+        let engaged = self.rally_point.is_some()
+            || self.entities.iter().filter(|e| e.mercenary).any(|m| {
+                self.entities
+                    .iter()
+                    .any(|e| e.faction == Faction::Enemy && e.pos.distance_squared(m.pos) <= r2)
+            });
+        if engaged {
+            self.merc_quiet = 0.0;
+            return;
+        }
+        self.merc_quiet += dt;
+        if self.merc_quiet < MERC_STAND_DOWN {
+            return;
+        }
+        self.merc_quiet = 0.0;
+        let at = self.entities.iter().find(|e| e.mercenary).map(|e| e.pos);
+        self.entities.retain(|e| !e.mercenary);
+        if let Some(pos) = at {
+            log::info!("the hired company sailed home");
+            self.push_alert(AlertKind::MercenariesLeft, pos);
+        }
+    }
+
     /// Lift the rally flag; knights resume defending on their own.
     pub fn clear_rally(&mut self) {
         self.rally_point = None;
@@ -3700,6 +4504,10 @@ fn ai_step(
 ) -> Option<StepEvent> {
     e.repath -= dt;
     let owner = owner_of(e.faction);
+    // A founding party on the road: march to the site, nothing else matters.
+    if let Some(site) = e.found_at {
+        return found_party_behavior(world, e, owner, site, dt);
+    }
     match (e.faction, e.job) {
         (Faction::Player, Job::Civilian) => {
             let farm = farm.expect("player civilians need farm context");
@@ -3724,6 +4532,38 @@ fn ai_step(
             None
         }
     }
+}
+
+/// A founding party member on the road to the new village's site: walk there,
+/// planning the whole route at once and replanning only rarely, since it's a
+/// long walk by village standards. If no route can be found, the trip is given
+/// up and the unit goes back to ordinary village life where it stands.
+fn found_party_behavior(
+    world: &World,
+    e: &mut Entity,
+    owner: u8,
+    site: Tile,
+    dt: f32,
+) -> Option<StepEvent> {
+    if e.path_done() && e.may_replan() {
+        e.repath = 3.0;
+        match pathfind::path_to(world, owner, e.tile(), site, PARTY_PATH_BUDGET) {
+            Some(p) => e.set_path(p),
+            None => {
+                e.found_at = None;
+                set_anim(e, Anim::Idle, dt);
+                return None;
+            }
+        }
+    }
+    let speed = if e.job == Job::Knight {
+        KNIGHT_SPEED
+    } else {
+        CIVILIAN_SPEED
+    };
+    let moved = follow_path(e, speed, dt);
+    set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
+    None
 }
 
 /// Shared, per-frame context the player's civilians reason over: mines and
@@ -5365,10 +6205,12 @@ const MAGIC: &[u8; 4] = b"KGDM";
 /// version listed in `from_bytes` loadable: new sections go at the tail of the
 /// blob and default to empty when a save predates them, so upgrading the game
 /// never strands a player's world.
-const VERSION: u8 = 15;
+const VERSION: u8 = 17;
 /// Oldest save version `from_bytes` still accepts. Version 13 is the last
-/// format before transports (it has no transport section to read), and v14's
-/// transports carried only settlers (no per-ship knight count).
+/// format before transports (it has no transport section to read), v14's
+/// transports carried only settlers (no per-ship knight count), v15 predates
+/// the per-unit birth-faction (origin) tail section, and v16 predates the
+/// unit-flag and transport-owner tail sections.
 const MIN_VERSION: u8 = 13;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
@@ -5645,6 +6487,26 @@ impl Game {
                 wi32(&mut b, ty);
             }
         }
+
+        // Birth factions, one byte per entity in entity order: a tail section
+        // new in v16. An older save simply lacks it, and every unit's origin
+        // then defaults to its current faction.
+        wu32(&mut b, self.entities.len() as u32);
+        for e in &self.entities {
+            wu8(&mut b, faction_u8(e.origin));
+        }
+
+        // v17 tail sections: each unit's flags (bit 0: a hired mercenary) and
+        // each transport's owner, so a hired company survives a save both at
+        // sea and ashore. Older saves lack them and default to the player's.
+        wu32(&mut b, self.entities.len() as u32);
+        for e in &self.entities {
+            wu8(&mut b, e.mercenary as u8);
+        }
+        wu32(&mut b, self.transports.len() as u32);
+        for s in &self.transports {
+            wu8(&mut b, faction_u8(s.faction));
+        }
         b
     }
 
@@ -5714,6 +6576,7 @@ impl Game {
             let levy = r.u8()? != 0;
             entities.push(Entity {
                 faction,
+                origin: faction,
                 job,
                 pos: Vec2::new(px, py),
                 hp,
@@ -5730,6 +6593,8 @@ impl Game {
                 build_site: None,
                 sheltered: false,
                 levy,
+                mercenary: false,
+                found_at: None,
                 pending: 0.0,
             });
         }
@@ -5917,6 +6782,7 @@ impl Game {
                     .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - pos));
                 transports.push(Transport {
                     pos,
+                    faction: Faction::Player,
                     path,
                     path_cursor,
                     anchor,
@@ -5925,6 +6791,37 @@ impl Game {
                     bob,
                     facing,
                 });
+            }
+        }
+
+        // Birth factions (v16 tail section). Entities from an older save keep
+        // the default set when they were built above: their current faction.
+        if version >= 16 {
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let origin = faction_of(r.u8()?);
+                if let Some(e) = entities.get_mut(i) {
+                    e.origin = origin;
+                }
+            }
+        }
+
+        // Unit flags and transport owners (v17 tail sections); older saves
+        // keep the defaults set above (no mercenaries, player-owned ships).
+        if version >= 17 {
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let flags = r.u8()?;
+                if let Some(e) = entities.get_mut(i) {
+                    e.mercenary = flags & 1 != 0;
+                }
+            }
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let faction = faction_of(r.u8()?);
+                if let Some(s) = transports.get_mut(i) {
+                    s.faction = faction;
+                }
             }
         }
 
@@ -6007,6 +6904,10 @@ impl Game {
             player_spawn_cycle: 0,
             enemy_spawn_cycle: 0,
             ally_spawn_cycle: 0,
+            enemy_grow_timer: ENEMY_GROW_INTERVAL,
+            enemy_bud_timer: ENEMY_BUD_INTERVAL,
+            ally_bud_timer: ALLY_BUD_INTERVAL,
+            merc_quiet: 0.0,
             enemy_found_timer: ENEMY_FOUND_INTERVAL,
             ally_found_timer: ALLY_FOUND_INTERVAL,
             enemy_villages_founded,
@@ -6030,6 +6931,19 @@ mod tests {
         cy: 0.0,
         view_height: 28.0,
     };
+
+    /// Clear the board for a long, isolated run: every unit removed and every
+    /// player house razed, so the realm neither gathers nor raises anyone while
+    /// thousands of ticks play out. Removing the units alone no longer does it,
+    /// because houses raise civilians from nothing by design: growth must never
+    /// deadlock for want of the very hands it produces.
+    fn strip_realm(game: &mut Game) {
+        game.entities.clear();
+        for (x, y) in std::mem::take(&mut game.player_house_tiles) {
+            game.world.set_house(x, y, false);
+        }
+        game.survey_villages();
+    }
 
     /// Find a water tile touching an allied house, the destination coast a ship
     /// sails to. Returns `None` if no allied coast exists.
@@ -6122,11 +7036,11 @@ mod tests {
             assert_eq!(game.money, money0, "reward paid before delivery");
 
             // The voyage from the home port is long, and the realm no longer
-            // freezes off-screen. Strip every land unit so the thousands of
+            // freezes off-screen. Strip the realm bare so the thousands of
             // updates below don't simulate two warring factions, and so
             // nothing drifts the treasury (knights cost gold to raise),
             // isolating the ship's payout as the only change to `money`.
-            game.entities.clear();
+            strip_realm(&mut game);
 
             let sim = (port.0 - 6, port.1 - 6, port.0 + 6, port.1 + 6);
             let mut steps = 0;
@@ -6227,6 +7141,10 @@ mod tests {
             );
 
             // Strip the land war so the long voyage below is all that runs.
+            // Home keeps its houses (the colony's are counted against them),
+            // so the capital goes on raising civilians of its own; the
+            // settlers are counted where they land instead of realm-wide.
+            let landing = game.transports()[0].anchor;
             game.entities.clear();
             let sim = (port.0 - 6, port.1 - 6, port.0 + 6, port.1 + 6);
             let mut steps = 0;
@@ -6243,9 +7161,17 @@ mod tests {
                 houses0 + COLONY_HOUSES,
                 "seed {seed}: the colony's houses never went up",
             );
+            let ashore = game
+                .entities
+                .iter()
+                .filter(|e| {
+                    e.faction == Faction::Player
+                        && e.job == Job::Civilian
+                        && e.pos.distance(tile_center(landing)) <= 12.0
+                })
+                .count();
             assert_eq!(
-                game.civilian_count(Faction::Player),
-                SETTLER_CIVILIANS,
+                ashore, SETTLER_CIVILIANS,
                 "seed {seed}: the settlers should step ashore",
             );
             assert!(
@@ -6272,6 +7198,7 @@ mod tests {
         let mut game = Game::new(3);
         game.transports.push(Transport {
             pos: Vec2::new(12.5, -3.5),
+            faction: Faction::Player,
             path: vec![(13, -4), (14, -4), (15, -5)],
             path_cursor: 1,
             anchor: (18, -6),
@@ -6282,6 +7209,7 @@ mod tests {
         });
         game.transports.push(Transport {
             pos: Vec2::new(10.5, -2.5),
+            faction: Faction::Ally,
             path: vec![(11, -3), (12, -3)],
             path_cursor: 0,
             anchor: (16, -8),
@@ -6295,6 +7223,7 @@ mod tests {
         assert_eq!(loaded.transports().len(), 2);
         for (a, b) in game.transports.iter().zip(loaded.transports()) {
             assert_eq!(a.pos, b.pos);
+            assert!(a.faction == b.faction, "the ship's owner was lost");
             assert_eq!(a.anchor, b.anchor);
             assert_eq!(a.civilians, b.civilians);
             assert_eq!(a.knights, b.knights);
@@ -6305,13 +7234,19 @@ mod tests {
 
     #[test]
     fn loads_a_v13_save_without_a_transport_section() {
-        // A v13 file is exactly a current file minus the transport section:
-        // the section sits at the tail, so strip the empty count and relabel
-        // the version byte. Loading it must still work, with nothing at sea.
+        // A v13 file is exactly a current file minus the tail sections (the
+        // origins and the transports), so strip them and relabel the version
+        // byte. Loading it must still work, with nothing at sea.
         let game = Game::new(3);
         let mut bytes = game.to_bytes(CAM);
+        // Strip the tail sections newer than v15: transport owners and unit
+        // flags (v17), then origins (v16).
+        let n = game.entities.len();
+        bytes.truncate(bytes.len() - 4); // transport owners (none at sea)
+        bytes.truncate(bytes.len() - (4 + n)); // unit flags
+        bytes.truncate(bytes.len() - (4 + n)); // origins
         assert_eq!(&bytes[bytes.len() - 4..], &[0, 0, 0, 0]);
-        bytes.truncate(bytes.len() - 4);
+        bytes.truncate(bytes.len() - 4); // empty transport count
         bytes[4] = 13;
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v13 save no longer loads");
         assert!(loaded.transports().is_empty());
@@ -6328,6 +7263,12 @@ mod tests {
         // save and relabel the version: it must load as a pure settler ship.
         let game = Game::new(3);
         let mut bytes = game.to_bytes(CAM);
+        // Strip the tail sections newer than v15: transport owners and unit
+        // flags (v17), then origins (v16).
+        let n = game.entities.len();
+        bytes.truncate(bytes.len() - 4); // transport owners (none at sea)
+        bytes.truncate(bytes.len() - (4 + n)); // unit flags
+        bytes.truncate(bytes.len() - (4 + n)); // origins
         bytes.truncate(bytes.len() - 4); // drop the empty transport section
         bytes[4] = 14;
         wu32(&mut bytes, 1);
@@ -6489,6 +7430,147 @@ mod tests {
     }
 
     #[test]
+    fn captured_villagers_join_the_conqueror() {
+        let mut game = Game::new(3);
+        game.entities.clear();
+
+        // An enemy camp whose people are caught in the open just outside the
+        // capture radius: a lone knight takes the undefended village, and most
+        // of the villagers change hands with it.
+        let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
+        let before = game.world.enemy_house_tiles.len();
+        game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
+        assert!(
+            game.world.enemy_house_tiles.len() > before,
+            "camp failed to plant"
+        );
+        let outside = (anchor.0 + 12, anchor.1);
+        for _ in 0..3 {
+            game.entities
+                .push(Entity::new(Faction::Enemy, Job::Civilian, outside));
+        }
+        // One hid in a hut and one is a soldier: neither ever changes sides.
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Civilian, outside));
+        game.entities.last_mut().unwrap().sheltered = true;
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Knight, outside));
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Knight, anchor));
+        game.resolve_captures();
+
+        let turned: Vec<&Entity> = game
+            .entities
+            .iter()
+            .filter(|e| e.faction == Faction::Player && e.job == Job::Civilian)
+            .collect();
+        assert_eq!(turned.len(), 2, "two of the three villagers must turn");
+        assert!(
+            turned.iter().all(|e| e.origin == Faction::Enemy),
+            "converts keep their birth faction"
+        );
+        assert!(
+            game.entities
+                .iter()
+                .any(|e| e.faction == Faction::Enemy && e.job == Job::Civilian && !e.sheltered),
+            "the third villager scatters instead of turning"
+        );
+        assert!(
+            game.entities
+                .iter()
+                .any(|e| e.faction == Faction::Enemy && e.sheltered),
+            "a villager hiding in a hut escapes notice"
+        );
+        assert!(
+            game.entities
+                .iter()
+                .any(|e| e.faction == Faction::Enemy && e.job == Job::Knight),
+            "knights never turn"
+        );
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::PeopleIncorporated),
+            "no incorporation alert"
+        );
+    }
+
+    #[test]
+    fn lost_villagers_are_taken_by_the_enemy() {
+        let mut game = Game::new(3);
+        game.entities.clear();
+
+        // A small outpost falls with its people nearby: the enemy incorporates
+        // most of them into its own realm.
+        let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land");
+        game.world.set_house(anchor.0, anchor.1, true);
+        game.world.set_house(anchor.0 + 1, anchor.1, true);
+        game.rescan_player_houses();
+        let outside = (anchor.0 + 10, anchor.1);
+        for _ in 0..3 {
+            game.entities
+                .push(Entity::new(Faction::Player, Job::Civilian, outside));
+        }
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Knight, anchor));
+        game.resolve_captures();
+
+        assert_eq!(
+            game.entities
+                .iter()
+                .filter(|e| e.faction == Faction::Enemy && e.job == Job::Civilian)
+                .count(),
+            2,
+            "two of the three villagers are taken"
+        );
+        assert!(
+            game.entities
+                .iter()
+                .filter(|e| e.faction == Faction::Enemy && e.job == Job::Civilian)
+                .all(|e| e.origin == Faction::Player),
+            "the taken keep their birth faction"
+        );
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::PeopleLost),
+            "no people-lost alert"
+        );
+    }
+
+    #[test]
+    fn origin_survives_a_save() {
+        let mut game = Game::new(1);
+        let i = game
+            .entities
+            .iter()
+            .position(|e| e.faction == Faction::Player)
+            .expect("the player starts with units");
+        game.entities[i].origin = Faction::Enemy;
+        game.entities[i].mercenary = true;
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+        assert!(loaded.entities[i].faction == Faction::Player);
+        assert!(
+            loaded.entities[i].origin == Faction::Enemy,
+            "origin lost in the round trip"
+        );
+        assert!(
+            loaded.entities[i].mercenary,
+            "the mercenary flag was lost in the round trip"
+        );
+        assert_eq!(loaded.mercenaries(), 1, "a flag leaked onto other units");
+        assert!(
+            loaded
+                .entities
+                .iter()
+                .enumerate()
+                .all(|(k, e)| k == i || e.origin == e.faction),
+            "everyone else's origin is their own faction"
+        );
+    }
+
+    #[test]
     fn contested_ground_keeps_more_knights_armed() {
         let mut game = Game::new(3);
         game.entities.clear();
@@ -6531,6 +7613,7 @@ mod tests {
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
         let troops = |anchor| Transport {
             pos: tile_center(anchor),
+            faction: Faction::Player,
             path: Vec::new(),
             path_cursor: 0,
             anchor,
@@ -6651,12 +7734,16 @@ mod tests {
     fn autonomous_trade_waits_for_a_full_load() {
         // With the stockpile short of the configured load, nothing launches:
         // autonomous trade skims the surplus, it doesn't scrape the barrel.
+        // The load is set beyond anything the realm could gather over the run,
+        // so the shortfall holds even while its civilians work; an empty
+        // treasury then proves no ship ever sailed and banked a payout.
         let mut game = Game::new(3);
         game.entities.clear();
         game.auto_trade = true;
-        game.ship_wood = 50;
+        game.ship_wood = 10_000;
         game.ship_stone = 0;
         game.wood = 10;
+        game.money = 0;
         let c = game.start_center();
         let sim = (
             c.x as i32 - 40,
@@ -6668,7 +7755,10 @@ mod tests {
             game.update(0.1, sim);
         }
         assert!(game.ships().is_empty());
-        assert_eq!(game.wood, 10);
+        assert_eq!(
+            game.money, 0,
+            "no ship may have sailed, so nothing can have been banked"
+        );
     }
 
     #[test]
@@ -7721,7 +8811,7 @@ mod tests {
             .next()
             .expect("seed 1 plants enemy villages");
         let full_center = village_center(&full);
-        for _ in 0..ENEMY_VILLAGE_POP {
+        for _ in 0..enemy_village_cap(full.len()) {
             if let Some(t) = adjacent_walkable(&game.world, full[0].0, full[0].1) {
                 game.entities
                     .push(Entity::new(Faction::Enemy, Job::Civilian, t));
@@ -7737,6 +8827,483 @@ mod tests {
         assert!(
             spawned.pos.distance(full_center) > CAPTURE_RADIUS * 2.0,
             "the full village must not receive the new unit"
+        );
+    }
+
+    #[test]
+    fn full_enemy_villages_raise_new_houses() {
+        let mut game = Game::new(3);
+        game.entities.clear();
+
+        // Plant a quiet enemy camp away from everyone and fill it to its cap:
+        // it qualifies to grow, and the growth check raises one house, which
+        // lifts the village's population cap on the next survey.
+        let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
+        let before = game.world.enemy_house_tiles.len();
+        game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
+        let houses: Vec<Tile> = game.world.enemy_house_tiles[before..].to_vec();
+        assert!(!houses.is_empty(), "camp failed to plant");
+        for _ in 0..enemy_village_cap(houses.len()) {
+            let spot = adjacent_walkable(&game.world, houses[0].0, houses[0].1).expect("no spot");
+            game.entities
+                .push(Entity::new(Faction::Enemy, Job::Civilian, spot));
+        }
+        game.survey_villages();
+
+        let count = game.world.enemy_house_tiles.len();
+        game.grow_enemy_village();
+        assert_eq!(
+            game.world.enemy_house_tiles.len(),
+            count + 1,
+            "a full, quiet village must raise a house"
+        );
+        game.survey_villages();
+        let grown = game
+            .villages
+            .iter()
+            .find(|v| v.faction == Faction::Enemy && v.pop > 0)
+            .expect("the grown village still stands");
+        assert_eq!(grown.houses, houses.len() + 1);
+        assert_eq!(grown.cap, enemy_village_cap(houses.len() + 1));
+
+        // A threatened village digs in instead of growing: a player knight at
+        // the gates freezes construction.
+        let lurker = (anchor.0 + 3, anchor.1);
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Knight, lurker));
+        game.survey_villages();
+        let count = game.world.enemy_house_tiles.len();
+        game.grow_enemy_village();
+        assert_eq!(
+            game.world.enemy_house_tiles.len(),
+            count,
+            "a threatened village must not grow"
+        );
+    }
+
+    #[test]
+    fn a_realm_short_of_people_still_grows() {
+        // The paradox guard: houses raise the very hands they need, so a realm
+        // cut down below the workforce floor must still be able to recover.
+        let mut game = Game::new(1);
+        game.entities.clear();
+        let (hx, hy) = game.player_house_tiles[0];
+        let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot by the capital");
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Civilian, spot));
+        game.survey_villages();
+        assert!(
+            game.civilian_count(Faction::Player) <= MIN_CIVILIANS_TO_GROW,
+            "the realm must start below the workforce floor"
+        );
+
+        // Military priority and a full treasury would normally raise knights;
+        // a short-handed realm raises hands instead.
+        game.priority = Priority::Military;
+        game.money = 10_000;
+        for _ in 0..3 {
+            game.player_spawn_timer = 0.0;
+            game.handle_spawns(0.01);
+        }
+        assert!(
+            game.civilian_count(Faction::Player) > 1,
+            "a realm below the floor must still raise new civilians"
+        );
+        assert_eq!(
+            game.entities
+                .iter()
+                .filter(|e| e.faction == Faction::Player && e.job == Job::Knight)
+                .count(),
+            0,
+            "hands come before soldiers while the workforce is short"
+        );
+        assert_eq!(game.money, 10_000, "no knight was paid for");
+    }
+
+    #[test]
+    fn autonomous_trade_sails_from_more_than_one_port() {
+        // Give the realm a second harbor well away from the capital: over many
+        // launches, autonomous trade must leave from both, not just the port
+        // that happens to lie nearest the allies.
+        let mut game = Game::new(1);
+        let port = find_ally_port(&game).expect("seed 1 plants allied coasts");
+        let capital = game.player_house_tiles[0];
+        // A colony on some other coast: walk out from the capital until open
+        // water sits beside land far enough off to be its own village.
+        let mut colony = None;
+        for r in (VILLAGE_SPACING..160).step_by(8) {
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let t = (capital.0 + dx * r, capital.1 + dy * r);
+                if let Some(anchor) = find_ocean_coast_anchor(&mut game.world, t, 12)
+                    && game.village_spot_clear(anchor)
+                {
+                    colony = Some(anchor);
+                    break;
+                }
+            }
+            if colony.is_some() {
+                break;
+            }
+        }
+        let Some(colony) = colony else {
+            return; // this seed offers no second coast; nothing to prove here
+        };
+        game.world.set_house(colony.0, colony.1, true);
+        game.rescan_player_houses();
+        game.survey_villages();
+
+        // Launch many ships and note which village each sailed from.
+        let mut from_capital = 0;
+        let mut from_colony = 0;
+        for _ in 0..40 {
+            game.ships.clear();
+            game.wood = 500;
+            game.stone = 500;
+            game.auto_trade = true;
+            game.trade_timer = 0.0;
+            game.plan_auto_trade(0.01);
+            if let Some(s) = game.ships.first() {
+                let d_cap = s.pos.distance(tile_center(capital));
+                let d_col = s.pos.distance(tile_center(colony));
+                if d_col < d_cap {
+                    from_colony += 1;
+                } else {
+                    from_capital += 1;
+                }
+            }
+        }
+        assert!(
+            from_capital + from_colony > 0,
+            "no ship ever launched (port {port:?})"
+        );
+        assert!(
+            from_capital > 0 && from_colony > 0,
+            "trade must sail from both ports, got {from_capital} from the capital \
+             and {from_colony} from the colony"
+        );
+    }
+
+    #[test]
+    fn docking_ships_bring_immigrants() {
+        let mut game = Game::new(1);
+        game.survey_villages();
+        let before = game.population();
+        let cap = game.pop_cap();
+        // Forty dockings: some bring families home, none breach the cap, and
+        // every immigrant is one of the player's people with an allied origin.
+        let mut settled = 0;
+        for _ in 0..40 {
+            settled += game.welcome_immigrants();
+        }
+        assert!(settled > 0, "forty dockings must bring someone home");
+        assert!(game.population() <= cap, "immigrants must respect the cap");
+        assert_eq!(game.population(), before + settled);
+        assert_eq!(
+            game.entities
+                .iter()
+                .filter(|e| e.faction == Faction::Player && e.origin == Faction::Ally)
+                .count(),
+            settled,
+            "immigrants keep their allied origin"
+        );
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::ImmigrantsArrived),
+            "no immigration alert"
+        );
+    }
+
+    #[test]
+    fn a_full_town_buds_a_daughter_village() {
+        let mut game = Game::new(3);
+        game.entities.clear();
+
+        // A grown enemy town with room to spread: the seed villages pack the
+        // ground near the origin at full spacing, so the town goes far out
+        // past them, wherever the land allows. It's a camp widened to budding
+        // size on its grid, filled to its cap, with a knight to walk the road.
+        let mut founded = None;
+        for probe in [
+            (300, 0),
+            (0, 300),
+            (-300, 0),
+            (0, -300),
+            (300, 300),
+            (-300, -300),
+        ] {
+            let Some(anchor) = find_land_anchor(&mut game.world, probe, 40) else {
+                continue;
+            };
+            if !game.village_spot_clear(anchor) {
+                continue;
+            }
+            let before = game.world.enemy_house_tiles.len();
+            game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
+            'grid: for ry in (-6..=6).step_by(3) {
+                for rx in (-6..=6).step_by(3) {
+                    if game.world.enemy_house_tiles.len() - before >= ENEMY_BUD_MIN_HOUSES {
+                        break 'grid;
+                    }
+                    let (x, y) = (anchor.0 + rx, anchor.1 + ry);
+                    if game.world.is_open_grass(x, y) {
+                        game.world
+                            .plant_faction_house(x, y, owner_of(Faction::Enemy));
+                    }
+                }
+            }
+            let houses: Vec<Tile> = game.world.enemy_house_tiles[before..].to_vec();
+            if houses.len() < ENEMY_BUD_MIN_HOUSES {
+                continue;
+            }
+            let spot = adjacent_walkable(&game.world, houses[0].0, houses[0].1).expect("no spot");
+            let cap = enemy_village_cap(houses.len());
+            for _ in 0..cap - 1 {
+                game.entities
+                    .push(Entity::new(Faction::Enemy, Job::Civilian, spot));
+            }
+            game.entities
+                .push(Entity::new(Faction::Enemy, Job::Knight, spot));
+            game.survey_villages();
+
+            // Budding picks a site at random; give it a few draws.
+            for _ in 0..10 {
+                game.bud_village(Faction::Enemy);
+                if let Some(site) = game.entities.iter().find_map(|e| e.found_at) {
+                    founded = Some((anchor, site));
+                    break;
+                }
+            }
+            if founded.is_some() {
+                break;
+            }
+            // No road out of here; try the next stretch of land.
+            game.entities.clear();
+        }
+        let (anchor, site) = founded.expect("no founding party set out from anywhere");
+        let party = game
+            .entities
+            .iter()
+            .filter(|e| e.found_at == Some(site))
+            .count();
+        assert_eq!(party, ENEMY_PARTY_CIVILIANS + PARTY_KNIGHTS);
+        assert!(
+            game.village_spot_clear(site),
+            "the daughter village must not crowd any settlement, its parent included"
+        );
+
+        // Walk the road: the party arrives and the camp goes up at the site.
+        let sim = (
+            anchor.0 - 120,
+            anchor.1 - 120,
+            anchor.0 + 120,
+            anchor.1 + 120,
+        );
+        let mut steps = 0;
+        while game.entities.iter().any(|e| e.found_at.is_some()) && steps < 3000 {
+            game.update(0.1, sim);
+            steps += 1;
+        }
+        assert!(
+            game.entities.iter().all(|e| e.found_at.is_none()),
+            "the party never reached its site"
+        );
+        assert!(
+            game.world
+                .enemy_house_tiles
+                .iter()
+                .any(|&(x, y)| (x - site.0).abs() <= 5 && (y - site.1).abs() <= 5),
+            "no village was founded at the party's site"
+        );
+    }
+
+    #[test]
+    fn a_hired_company_answers_the_flag_and_sails_home() {
+        for seed in 0..16 {
+            let mut game = Game::new(seed);
+            if game.harbor_water().is_none() || find_ally_port(&game).is_none() {
+                continue;
+            }
+            // Garrison the first allied village with a company to spare.
+            let (hx, hy) = game.world.ally_house_tiles[0];
+            let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot by the camp");
+            for _ in 0..(MERC_KNIGHTS + MERC_GARRISON) {
+                game.entities
+                    .push(Entity::new(Faction::Ally, Job::Knight, spot));
+            }
+            game.survey_villages();
+            // A flag the player planted, on the capital's shore.
+            let flag = game.start_center();
+            game.rally_point = Some(flag);
+            game.rally_response = None;
+            game.money = MERC_HIRE_COST + 5;
+            let allies_before = game.ally_count();
+            if !game.hire_mercenaries() {
+                // This seed's allied port can't reach the capital's coast.
+                continue;
+            }
+            assert_eq!(game.money, 5, "seed {seed}: the company wasn't paid for");
+            assert_eq!(game.ally_count(), allies_before - MERC_KNIGHTS);
+            let ship = game.transports().last().expect("no company at sea");
+            assert!(
+                ship.faction == Faction::Ally,
+                "seed {seed}: not an allied ship"
+            );
+            assert_eq!(ship.knights, MERC_KNIGHTS as u32);
+            assert!(
+                game.alerts()
+                    .iter()
+                    .any(|a| a.kind == AlertKind::MercenariesSailed),
+                "seed {seed}: no sailing alert"
+            );
+
+            // The crossing is all that runs; the company lands as mercenaries.
+            strip_realm(&mut game);
+            let sim = (
+                flag.x as i32 - 6,
+                flag.y as i32 - 6,
+                flag.x as i32 + 6,
+                flag.y as i32 + 6,
+            );
+            let mut steps = 0;
+            while !game.transports().is_empty() && steps < 20_000 {
+                game.update(0.1, sim);
+                steps += 1;
+            }
+            assert!(
+                game.transports().is_empty(),
+                "seed {seed}: ship never landed"
+            );
+            assert_eq!(
+                game.mercenaries(),
+                MERC_KNIGHTS,
+                "seed {seed}: company lost"
+            );
+            assert!(
+                game.entities
+                    .iter()
+                    .all(|e| !e.mercenary || e.faction == Faction::Ally),
+                "mercenaries stay allied knights"
+            );
+            assert!(
+                game.alerts()
+                    .iter()
+                    .any(|a| a.kind == AlertKind::MercenariesLanded),
+                "seed {seed}: no landing alert"
+            );
+
+            // The flag lifted and no enemy about, the company stands down.
+            game.clear_rally();
+            game.entities.retain(|e| e.mercenary);
+            game.stand_down_mercenaries(MERC_STAND_DOWN + 1.0);
+            assert_eq!(game.mercenaries(), 0, "seed {seed}: the company never left");
+            assert!(
+                game.alerts()
+                    .iter()
+                    .any(|a| a.kind == AlertKind::MercenariesLeft),
+                "seed {seed}: no leaving alert"
+            );
+            return;
+        }
+        panic!("no test seed could hire a company");
+    }
+
+    #[test]
+    fn allies_in_a_village_hold_it_against_capture() {
+        let mut game = Game::new(3);
+        game.entities.clear();
+
+        // A player outpost held only by an allied knight: the enemy standing
+        // in it doesn't take it, since the ally holds it for the player.
+        let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land");
+        game.world.set_house(anchor.0, anchor.1, true);
+        game.rescan_player_houses();
+        game.entities
+            .push(Entity::new(Faction::Ally, Job::Knight, anchor));
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Knight, anchor));
+        game.resolve_captures();
+        assert!(
+            game.world.is_house(anchor.0, anchor.1),
+            "an allied garrison must hold the village"
+        );
+
+        // An ally alone in an enemy village still never flips it: only the
+        // player takes enemy ground.
+        let camp = cluster(&game.world.enemy_house_tiles)
+            .into_iter()
+            .next()
+            .expect("seed 3 plants enemy villages");
+        game.entities.clear();
+        game.entities
+            .push(Entity::new(Faction::Ally, Job::Knight, camp[0]));
+        game.resolve_captures();
+        assert!(
+            game.world.is_enemy_house(camp[0].0, camp[0].1),
+            "allies never capture on the player's behalf"
+        );
+    }
+
+    #[test]
+    fn spawns_favor_the_emptiest_village() {
+        let mut game = Game::new(1);
+        // A fresh outpost with empty homes: the next new villager is raised
+        // there, not at the bustling capital.
+        let (cx, cy) = game.player_house_tiles[0];
+        let anchor =
+            find_land_anchor(&mut game.world, (cx + 100, cy), 30).expect("no land for an outpost");
+        game.world.set_house(anchor.0, anchor.1, true);
+        game.world.set_house(anchor.0 + 1, anchor.1, true);
+        game.rescan_player_houses();
+        game.survey_villages();
+
+        let before = game.entities.len();
+        game.player_spawn_timer = 0.0;
+        game.handle_spawns(0.01);
+        assert_eq!(game.entities.len(), before + 1, "a spawn must fire");
+        let spawned = game.entities.last().unwrap();
+        assert!(
+            spawned.pos.distance(tile_center(anchor)) < 6.0,
+            "the new villager must be raised at the empty outpost"
+        );
+    }
+
+    #[test]
+    fn settlers_reinforce_a_standing_village() {
+        let mut game = Game::new(1);
+        // Settlers dropping anchor by a village the player already holds join
+        // it: more hands, no new houses, and the right toast.
+        let (hx, hy) = game.player_house_tiles[0];
+        let houses_before = game.player_house_tiles.len();
+        let civs_before = game.civilian_count(Faction::Player);
+        game.land_transport(Transport {
+            pos: tile_center((hx, hy)),
+            faction: Faction::Player,
+            path: Vec::new(),
+            path_cursor: 0,
+            anchor: (hx + 2, hy),
+            civilians: 3,
+            knights: 0,
+            bob: 0.0,
+            facing: Dir::Right,
+        });
+        assert_eq!(
+            game.player_house_tiles.len(),
+            houses_before,
+            "a reinforcement must not found new houses"
+        );
+        assert_eq!(game.civilian_count(Faction::Player), civs_before + 3);
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::SettlersJoined),
+            "no reinforcement alert"
+        );
+        assert!(
+            game.alerts()
+                .iter()
+                .all(|a| a.kind != AlertKind::ColonyFounded),
+            "a reinforcement is not a founding"
         );
     }
 

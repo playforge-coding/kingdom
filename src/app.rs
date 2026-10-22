@@ -29,9 +29,15 @@ const SETTLER_TINT: [f32; 4] = [0.72, 0.82, 1.0, 1.0];
 /// unmistakably the military run rather than the colonists'.
 const TROOP_TINT: [f32; 4] = [0.45, 0.6, 1.0, 1.0];
 
-/// The hull and banner tint for a transport, by its mission.
+/// The allied green that marks a hired company's ship: the allies' own color,
+/// since the mercenaries aboard remain their knights.
+const MERC_TINT: [f32; 4] = [0.6, 1.0, 0.65, 1.0];
+
+/// The hull and banner tint for a transport, by its owner and mission.
 fn transport_tint(t: &crate::game::Transport) -> [f32; 4] {
-    if t.knights > 0 {
+    if t.faction == crate::game::Faction::Ally {
+        MERC_TINT
+    } else if t.knights > 0 {
         TROOP_TINT
     } else {
         SETTLER_TINT

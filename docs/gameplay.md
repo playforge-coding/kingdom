@@ -35,6 +35,17 @@ own units. They aren't idle: enemy soldiers stream out to hunt your units, so
 you're on a clock from the start. And the map never settles: **fresh enemy and
 allied villages keep being founded** farther and farther out as you play.
 
+Enemy villages also **grow on their own**. A village left in peace raises new
+houses over time, and each house supports more people, just like yours do. The
+bigger the enemy's realm, the larger the total army it can field. Raid a camp
+early and it stays small; ignore one and you'll face a stronghold later.
+
+A town that has grown large and full goes further and **sends out a founding
+party**: a few villagers and a knight walk out to plant a daughter village a
+short way off, and the enemy's parties head **toward you**, so their border
+creeps closer over time. The party is ordinary units on the road: catch it
+before it arrives and the village is never founded.
+
 ## Factions
 
 Three factions share the world:
@@ -44,10 +55,12 @@ Three factions share the world:
   allies, and you capture ground by clearing their villages of defenders.
 - **The allies** (green): a friendly faction on coasts **across the sea**. They
   are your **trade partners**: cargo ships sail to their shores to sell goods for
-  gold.
+  gold, and now and then bring **[immigrants](#immigration)** home with them.
   Allied knights **attack the enemy** on their own, which quietly takes pressure
-  off you, but they **never join your battles**, can't be rallied, and you and
-  the allies never fight. Allied villages can't be captured by anyone, so they
+  off you, but they only join your battles when you
+  **[hire them](#hiring-mercenaries)**, and you and the allies never fight.
+  Allied units standing in one of your villages **hold it** against capture
+  just as your own would. Allied villages can't be captured by anyone, so they
   make dependable, permanent trade destinations.
 
 ## The core loop
@@ -80,9 +93,13 @@ Use the **Priority** and **Gather** toggles in the HUD to steer this loop:
 lean **Agriculture** while you're building up, swing to **Military** when a camp
 starts pressing you.
 
-!!! note "Houses only raise workers while you have 4 or more civilians"
-    New workers are spawned by houses, but only while your economy can support
-    it, so you need at least a few civilians gathering before the population grows.
+!!! note "Soldiers need a workforce behind them"
+    Your houses always raise **civilians** while they have room, however the
+    Priority toggle is set, so a realm can never be stranded without the hands
+    it needs. **Knights** are the part that needs an economy: while you have
+    3 or fewer civilians, houses raise workers only, and growth runs at its
+    slowest until the workforce recovers. The more civilians you have, the
+    faster new villagers arrive.
 
 ## Capturing villages
 
@@ -116,6 +133,14 @@ merely occupied. How many depends on the ground:
 Levies never settle (they're owed their pay back home), a lone conqueror always
 stays a knight, and an alert tells you when knights have settled a village.
 
+The village's **people change hands too**. Most of the fallen side's civilians
+caught near the village are **incorporated into the conqueror's realm** and get
+to work for their new rulers; the rest scatter. Civilians **hiding in huts
+escape notice** and keep their old loyalty, and soldiers never turn. This cuts
+both ways: when you lose a village, the enemy presses your villagers into its
+own realm, so a fallen village costs you hands as well as houses. An alert
+tells you either way.
+
 Once you hold several villages, the **[Realm panel](controls.md#the-realm-panel)**
 lists each one with its defenders and flags any that are under attack or left
 empty, and **[alerts](controls.md#alerts)** tell you when one is raided, lost, or
@@ -130,7 +155,8 @@ kingdom crosses it.
 
 Pick **Settler ship** in the HUD's **Colonies** section and **left-click a far
 shore**. If the stockpile covers the cost (30 wood, 20 stone, 50 gold), the
-spot is clear of every standing settlement, and a sea route reaches it from
+spot is clear of every standing settlement (except your own, see
+[reinforcing](#reinforcing-a-colony) below), and a sea route reaches it from
 one of your harbors (a river winding down to the ocean counts), then **3
 civilians board a ship** and set sail from whichever harbor connects best. At
 least 4 civilians always stay home, so an expedition can't hollow out your
@@ -161,7 +187,21 @@ A few things to mind:
   once there's gold and population headroom, but until then an enemy wandering
   in can [take it](#capturing-villages).
 - Settling is for **new ground**: the landing must be well away from every
-  existing village, yours, the enemy's, and the allies' alike.
+  existing enemy and allied village, and far enough from your own that the two
+  wouldn't crowd each other. Landing **at** one of your own villages is the
+  exception: that's a [reinforcement](#reinforcing-a-colony).
+
+New villagers are **raised wherever homes stand emptiest**: of your villages
+with room to grow, the least full one gets the next worker. A fresh colony of
+three settlers fills up first instead of waiting its turn behind the capital.
+
+### Reinforcing a colony
+
+A young colony short on hands doesn't have to wait for homes to fill on their
+own. Send a settler ship **at one of your own villages**, clicking its shore,
+and instead of founding anew the settlers sail over, go ashore, and **join it**:
+three more civilians, no new houses, and an alert when they land. The usual
+costs, crew rules, and pirate risk apply.
 
 See **[Building](building.md#settler-ship)** for the full launch rules.
 
@@ -188,6 +228,43 @@ pirates send it down knights and all, so shell the coast clear with
 return trip; the landing force wins its new home or holds the beach.
 
 See **[Building](building.md#troop-ship)** for the full launch rules.
+
+## Hiring mercenaries
+
+The allies hire out their knights. With a **rally flag** of your own planted,
+the HUD's Rally section offers **Hire allied mercenaries** for 100 gold, paid up
+front. The allied village nearest the flag that can spare a company (it always
+keeps a garrison home) loads **4 knights** onto one of its ships, which sails for
+the coast nearest your flag; a green-hulled ship and banner mark the crossing,
+and the Rally section counts companies at sea and mercenaries ashore.
+
+Ashore, the company **answers your flag** exactly as your own knights do, then
+fights as allies always have: hunting the enemy, battering their huts and
+walls, and holding ground. Mercenaries standing in one of your villages **hold
+it** against capture. Once no flag stands and no enemy has come near them for
+a while, their work is done and they **sail home**, with an alert to say so.
+
+Two rules keep this a *joint* invasion rather than an outsourced one:
+
+- **Only your own units capture a village.** Mercenaries soften a village's
+  defenses, but it flips to you only when one of yours stands in it with no
+  defender left.
+- **The hull is as unarmored as any transport.** Pirates can sink the company
+  you paid for, so clear the lanes or escort the crossing.
+
+A refused hire costs nothing and says why: no flag of yours standing, too
+little gold, no allied village with knights to spare, no beach near the flag,
+or no sea route to it.
+
+## Immigration
+
+Trade with the allies is a trickle of people as well as gold. When a cargo ship
+docks at an allied port, there's a fair chance **one or two allied families
+take passage home with its crew** and settle in whichever of your villages has
+the most empty homes, the same choice newly raised villagers make. They arrive
+only while your population has room, so houses still set the ceiling, and an
+alert marks each arrival. Keep the trade lanes busy and safe and the realm
+fills faster; let pirates close them and the flow stops with the gold.
 
 ## Scoring
 

@@ -86,7 +86,11 @@ every order waits for a civilian to walk over and build it:
 Below the modes sits the **"Let builders build on their own in zones"** switch:
 while it's on, builders keep raising houses inside your
 **[builder zones](building.md#builder-zones)**. A **:lucide-x: Clear rally**
-button appears while a rally flag is active.
+button appears while a rally flag is active, and while a flag *you* planted
+stands, a **:lucide-swords: Hire allied mercenaries** button offers an allied
+company that sails over to answer it for gold (see
+**[Hiring mercenaries](gameplay.md#hiring-mercenaries)**); the section counts
+companies at sea and mercenaries ashore.
 
 The HUD's **Trade**, **Colonies**, and **Navy** sections add five more
 left-click modes on the water:
@@ -101,7 +105,8 @@ left-click modes on the water:
 
 The Trade section also holds the **"Send cargo ships out on their own"** switch:
 while it's on, the harbor keeps launching laden ships whenever the stockpile
-covers the configured load in full (see
+covers the configured load in full, sailing from a different one of your
+coastal villages each time (see
 **[Autonomous trade](building.md#autonomous-trade)**). A
 **:lucide-x: Clear navy rally** button appears in the Navy section while the
 navy's flag is planted.

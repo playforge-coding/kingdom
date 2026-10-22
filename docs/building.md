@@ -38,12 +38,17 @@ of its own village** and periodically **spawns new workers** (civilians or
 knights, depending on your [Agriculture / Military priority](gameplay.md)).
 Every village supports and raises its own people, so build houses in whichever
 settlement you want to grow; the number in the HUD is the sum across all of
-them. Because houses must be adjacent to what you already own, building them is
-also how you expand your borders.
+them. New workers are raised at whichever of your villages is **least full**
+relative to its cap, so empty homes anywhere, a fresh colony's especially,
+draw the growth there first. Because houses must be adjacent to what you
+already own, building them is also how you expand your borders.
 
 !!! note "Growth needs civilians"
-    Houses only raise new workers while you have **4 or more civilians**, so keep
-    your economy running or growth stalls.
+    A house with room always raises **civilians**, so a realm cut down to a
+    handful of people can work its way back. **Knights**, though, need a
+    workforce behind them: with **3 or fewer civilians** houses raise workers
+    only, and the fewer civilians you have the slower everything arrives. Keep
+    your economy running or growth crawls.
 
 ## Bridge
 
@@ -139,7 +144,8 @@ far-off stretch of coast.
 The ship charts a course **over water to the nearest allied coast** (see
 **[Factions](gameplay.md#factions)**) and never sails through land. When it docks
 there the goods are sold and the gold is banked. **Stone fetches more than wood**
-(5 vs 2 gold per unit), so a stone-heavy hold pays best.
+(5 vs 2 gold per unit), so a stone-heavy hold pays best. Now and then a docking
+ship also brings **[allied immigrants](gameplay.md#immigration)** home with it.
 
 !!! warning "Pirates raid the shipping lanes"
     Rare **pirate ships** patrol the open ocean and fire cannonballs at any cargo
@@ -159,8 +165,15 @@ Like [builder zones](#builder-zones), trade has a hands-off mode: flip the
 harbor keeps dispatching laden ships without another click. Every so often it
 checks the stockpile, and if it covers the configured load **in full** (and no
 more than a few ships are already at sea), a ship launches from open water by
-one of your villages, whichever harbor connects best to an allied port (a
-colony's included), and sails off as if you had sent it yourself.
+one of your villages and sails off as if you had sent it yourself.
+
+Shipments leave from a **randomly chosen one of your coastal villages**, so
+every quay in the realm sees traffic over time rather than the one port nearest
+the allies carrying all of it. A colony's harbor pulls its weight the moment
+the colony stands. If the village drawn has no sea route to an allied coast (a
+quay on a landlocked lake, say), the realm's harbors are weighed together and
+the ship leaves from whichever genuinely connects, so an unlucky draw never
+stalls your trade.
 
 Only full loads go out, so autonomous trade skims your surplus rather than
 scraping the stockpile bare: set the load to what you want each shipment to
@@ -190,8 +203,10 @@ and raises a toast at the click saying which of these was the problem:
 
 - The stockpile covers the **cost**, and at least **4 civilians would stay
   home** after the crew of 3 boards, so settling can't hollow out your economy.
-- The landing is **clear of every standing settlement**: yours, the enemy's,
-  and the allies' alike. Colonies claim new ground, they don't crowd old.
+- The landing is **clear of every standing enemy and allied settlement**, and
+  of your own too unless you click right at one of your villages: then the
+  settlers **[reinforce it](gameplay.md#reinforcing-a-colony)** instead of
+  founding. Colonies claim new ground, they don't crowd old.
 - A **water route** reaches the shore from your harbor. A coast on a landlocked
   lake can't be sailed to, however inviting.
 

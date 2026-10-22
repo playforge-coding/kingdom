@@ -86,6 +86,21 @@ and spaced apart, so the world never runs out of rivals to fight or partners to
 trade with. Allied villages are always raised on coasts **across open water** from
 you, so the only way to reach them is by [ship](building.md#ship-goods).
 
+Enemy villages don't stay the size they were founded at, either: a full village
+with no fighting at its gates **raises new houses of its own**, up to a limit,
+and each house lifts the people it supports. See
+[Your starting position](gameplay.md#your-starting-position) for what that
+means for the pressure on you.
+
+Settlements also **spread from where they stand**. A full enemy town that has
+grown to a real size, or a full allied village, sends out a **founding party**
+(a few villagers and a knight) that walks about one village-spacing away and
+plants a daughter village there, provided the ground is clear of every other
+settlement and a road to it exists. Enemy parties lean toward your nearest
+village; allied ones keep to coasts across the water from you, where their
+ports belong. The far-frontier founding above goes on, but more slowly, so most
+new villages now grow out of old ones.
+
 How these change hands is covered in
 [Capturing villages](gameplay.md#capturing-villages), and you can plant
 villages of your own on far shores with a

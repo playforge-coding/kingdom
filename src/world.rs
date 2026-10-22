@@ -598,6 +598,42 @@ impl World {
         }
 
         // Give the camp a couple of huts for its farmers to shelter in.
+        self.plant_camp_huts(center, owner);
+    }
+
+    /// Raise a single faction house on open grass: how an established camp
+    /// grows. `owner` tags it as in `plant_camp` (1 = enemy, 2 = ally).
+    pub fn plant_faction_house(&mut self, x: i32, y: i32, owner: u8) {
+        self.ensure(chunk_of(x), chunk_of(y));
+        let planted = match self.chunk_at_mut(x, y) {
+            Some(c) => {
+                let i = li(local_of(x), local_of(y));
+                if c.tiles[i] == Tile::Grass {
+                    c.nodes[i] = None;
+                    if owner == 2 {
+                        c.ally_houses[i] = true;
+                    } else {
+                        c.enemy_houses[i] = true;
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+        if planted {
+            if owner == 2 {
+                self.ally_house_tiles.push((x, y));
+            } else {
+                self.enemy_house_tiles.push((x, y));
+            }
+        }
+    }
+
+    /// Scatter a couple of huts around a camp for its farmers to shelter in.
+    fn plant_camp_huts(&mut self, center: (i32, i32), owner: u8) {
+        let (cx0, cy0) = center;
         let mut huts = 0;
         'huts: for ry in -4..=4i32 {
             for rx in -4..=4i32 {
