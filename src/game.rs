@@ -957,18 +957,16 @@ const MIN_CIVILIANS_TO_GROW: usize = 3;
 /// Shortest possible spawn interval, however many civilians there are.
 const MIN_SPAWN_INTERVAL: f32 = 1.5;
 
-/// Seconds a proclaimed **draft** stays in force. While it runs, the player's
-/// civilians may be called up as knights (see `run_draft`).
-const DRAFT_DURATION: f32 = 15.0;
-/// Per-farmer, per-second chance of being conscripted during a draft. A core of
-/// civilians is always left behind to keep the village running.
-const DRAFT_CHANCE_PER_SEC: f32 = 0.2;
+/// Seconds the levies serve once a **draft** is proclaimed: four minutes. The
+/// call-up itself is instant (see `proclaim_draft`); this is how long the
+/// draftees then stay under arms before they may stand down.
+pub const LEVY_SERVICE: f32 = 240.0;
 /// Gold each surviving levy is owed when the draft stands down. Draftees serve
 /// on credit: nothing is spent when they're called up, so a broke realm can
 /// still raise one, but the bill comes due once the fighting is over.
 pub const LEVY_GOLD_PAY: u32 = 15;
-/// Seconds the realm must go without a threatened village, once the draft has
-/// ended, before the levies stand down (see `stand_down_levies`).
+/// Seconds the realm must go without a threatened village, once the levies'
+/// term of service is up, before they stand down (see `stand_down_levies`).
 const LEVY_STAND_DOWN: f32 = 15.0;
 
 /// Spawn interval scaled by civilian count: each civilian beyond the minimum
@@ -1626,13 +1624,14 @@ pub struct Game {
     pub navy_rally: Option<Vec2>,
     /// Round-robin position for stepping off-screen entities. Transient.
     offscreen_cursor: usize,
-    /// Seconds left on a proclaimed draft (0 when none is in force). While it
-    /// counts down, civilians are conscripted into knights (see `run_draft`).
-    /// Transient, since a proclamation doesn't survive a save/load.
-    draft_timer: f32,
-    /// Seconds since the draft ended with no player village under threat; the
-    /// levies stand down when it reaches `LEVY_STAND_DOWN`. Transient (the
-    /// levies themselves are saved, so a reload just restarts the wait).
+    /// Seconds left on the levies' term of service (0 when none is running).
+    /// A proclaimed draft calls civilians up at once and starts this clock;
+    /// the levies can't stand down until it runs out (see `stand_down_levies`).
+    /// Transient: the levies themselves are saved, but a loaded game's levies
+    /// are free to stand down as soon as the realm is quiet.
+    levy_term: f32,
+    /// Seconds since the term ended with no player village under threat; the
+    /// levies stand down when it reaches `LEVY_STAND_DOWN`. Transient.
     levy_quiet: f32,
 
     player_house_tiles: Vec<Tile>,
@@ -1912,7 +1911,7 @@ impl Game {
             rally_response: None,
             navy_rally: None,
             offscreen_cursor: 0,
-            draft_timer: 0.0,
+            levy_term: 0.0,
             levy_quiet: 0.0,
             player_house_tiles,
             cave_tiles: Vec::new(),
@@ -2064,7 +2063,6 @@ impl Game {
         }
         self.plan_auto_builds(dt);
         self.plan_auto_trade(dt);
-        self.run_draft(dt);
         self.stand_down_levies(dt);
         self.stand_down_mercenaries(dt);
         self.stand_down_escorts(dt);
@@ -5766,46 +5764,23 @@ impl Game {
         self.navy_rally = None;
     }
 
-    /// Proclaim a draft: for the next `DRAFT_DURATION` seconds, civilians may be
-    /// conscripted into knights, serving as levies on credit. Re-proclaiming
-    /// refreshes the clock.
-    pub fn proclaim_draft(&mut self) {
-        self.draft_timer = DRAFT_DURATION;
-    }
-
-    /// Seconds left on the active draft, or `None` when none is in force.
-    pub fn draft_remaining(&self) -> Option<f32> {
-        (self.draft_timer > 0.0).then_some(self.draft_timer)
-    }
-
-    /// Levies currently serving, and the gold they'll be owed when they stand
-    /// down.
-    pub fn levies_owed(&self) -> (usize, u32) {
-        let n = self.entities.iter().filter(|e| e.levy).count();
-        (n, n as u32 * LEVY_GOLD_PAY)
-    }
-
-    /// While a draft is in force, call up the player's civilians as knights at
-    /// random. Call-ups are free: each becomes a levy, paid when the draft
-    /// stands down (see `stand_down_levies`). A working core of civilians is
+    /// Proclaim a draft: every civilian the realm can spare takes up arms as a
+    /// knight on the spot, serving as a levy on credit, and the levies' term
+    /// of service (`LEVY_SERVICE`) starts. A working core of civilians is
     /// always spared so the economy doesn't collapse. The floor is kept just
-    /// *above* `MIN_CIVILIANS_TO_GROW` so the draft never trips the low-civilian
-    /// retreat that would march the very knights it just raised back home.
-    fn run_draft(&mut self, dt: f32) {
-        if self.draft_timer <= 0.0 {
-            return;
-        }
-        self.draft_timer -= dt;
+    /// *above* `MIN_CIVILIANS_TO_GROW` so the draft never trips the
+    /// low-civilian retreat that would march the very knights it just raised
+    /// back home. Proclaiming again calls up whoever has been raised since and
+    /// starts the term afresh for everyone serving.
+    pub fn proclaim_draft(&mut self) {
+        self.levy_term = LEVY_SERVICE;
+        self.levy_quiet = 0.0;
         for i in 0..self.entities.len() {
             if self.civilian_count(Faction::Player) <= MIN_CIVILIANS_TO_GROW + 1 {
                 break;
             }
             let e = &self.entities[i];
             if e.faction != Faction::Player || e.job != Job::Civilian {
-                continue;
-            }
-            // A small per-civilian chance each tick to be called up.
-            if (self.rng.next_u32() as f32) / (u32::MAX as f32) >= DRAFT_CHANCE_PER_SEC * dt {
                 continue;
             }
             let e = &mut self.entities[i];
@@ -5822,12 +5797,26 @@ impl Game {
         }
     }
 
-    /// Once the draft is over and no player village has been threatened for
-    /// `LEVY_STAND_DOWN` seconds, the invasion counts as repelled and the
-    /// levies stand down. Each survivor is paid `LEVY_GOLD_PAY` and goes back
-    /// to civilian work; any the treasury can't cover desert. The fallen are owed
-    /// nothing.
+    /// Seconds left on the levies' term of service, or `None` when none is
+    /// running.
+    pub fn levy_term_remaining(&self) -> Option<f32> {
+        (self.levy_term > 0.0).then_some(self.levy_term)
+    }
+
+    /// Levies currently serving, and the gold they'll be owed when they stand
+    /// down.
+    pub fn levies_owed(&self) -> (usize, u32) {
+        let n = self.entities.iter().filter(|e| e.levy).count();
+        (n, n as u32 * LEVY_GOLD_PAY)
+    }
+
+    /// Run the levies' term of service down, and once it is up and no player
+    /// village has been threatened for `LEVY_STAND_DOWN` seconds, the invasion
+    /// counts as repelled and the levies stand down. Each survivor is paid
+    /// `LEVY_GOLD_PAY` and goes back to civilian work; any the treasury can't
+    /// cover desert. The fallen are owed nothing.
     fn stand_down_levies(&mut self, dt: f32) {
+        self.levy_term = (self.levy_term - dt).max(0.0);
         if !self.entities.iter().any(|e| e.levy) {
             return;
         }
@@ -5835,7 +5824,7 @@ impl Game {
             .villages
             .iter()
             .any(|v| v.faction == Faction::Player && v.threatened);
-        if self.draft_timer > 0.0 || threatened {
+        if self.levy_term > 0.0 || threatened {
             self.levy_quiet = 0.0;
             return;
         }
@@ -8821,7 +8810,7 @@ impl Game {
             rally_response: None,
             navy_rally: None,
             offscreen_cursor: 0,
-            draft_timer: 0.0,
+            levy_term: 0.0,
             levy_quiet: 0.0,
             player_house_tiles,
             cave_tiles,
@@ -9800,9 +9789,9 @@ mod tests {
         assert!(game.money >= KNIGHT_GOLD_COST);
     }
 
-    /// A broke fresh world with extra civilians at home and a draft run to its
-    /// end. Drives `run_draft` directly so spawns and combat can't muddy the
-    /// count.
+    /// A broke fresh world with extra civilians at home and a draft just
+    /// proclaimed, so the levies' whole term still lies ahead. Drives the
+    /// draft directly so spawns and combat can't muddy the count.
     fn drafted_game() -> Game {
         let mut game = Game::new(1);
         game.money = 0;
@@ -9817,14 +9806,20 @@ mod tests {
             "need bodies to draft"
         );
         game.proclaim_draft();
-        assert!(game.draft_remaining().is_some());
-        for _ in 0..1000 {
-            game.run_draft(0.1);
-            if game.draft_remaining().is_none() {
-                break;
-            }
-        }
+        assert!(game.levy_term_remaining().is_some());
         game
+    }
+
+    /// Tick the levies' clock through their whole term of service with the
+    /// realm at peace, leaving them one quiet spell short of standing down.
+    fn serve_out_term(game: &mut Game) {
+        for _ in 0..(LEVY_SERVICE as usize * 10) {
+            game.stand_down_levies(0.1);
+        }
+        assert!(
+            game.levy_term_remaining().is_none(),
+            "the term should have run out"
+        );
     }
 
     #[test]
@@ -9839,9 +9834,41 @@ mod tests {
         assert_eq!(levies, converted, "every call-up is a levy");
         assert_eq!(owed, levies as u32 * LEVY_GOLD_PAY);
         assert_eq!(game.money, 0, "levies are paid later, not up front");
-        // A working core of civilians is always spared, and the draft expires.
-        assert!(game.civilian_count(Faction::Player) > MIN_CIVILIANS_TO_GROW);
-        assert!(game.draft_remaining().is_none(), "draft must expire");
+        // The call-up is instant and takes everyone down to the working core,
+        // which is always spared.
+        assert_eq!(
+            game.civilian_count(Faction::Player),
+            MIN_CIVILIANS_TO_GROW + 1
+        );
+        assert!(
+            game.entities
+                .iter()
+                .all(|e| !e.levy || e.job == Job::Knight)
+        );
+        assert_eq!(game.levy_term_remaining(), Some(LEVY_SERVICE));
+    }
+
+    #[test]
+    fn a_second_proclamation_calls_up_newcomers_and_restarts_the_term() {
+        let mut game = drafted_game();
+        let levies0 = game.levies_owed().0;
+        for _ in 0..600 {
+            game.stand_down_levies(0.1);
+        }
+        let partway = game.levy_term_remaining().expect("term still running");
+        assert!(partway < LEVY_SERVICE);
+
+        // Two villagers raised since; a fresh proclamation takes them too and
+        // the whole company serves a full term from now.
+        let home = game.start_center();
+        let tile = (home.x as i32, home.y as i32);
+        for _ in 0..2 {
+            game.entities
+                .push(Entity::new(Faction::Player, Job::Civilian, tile));
+        }
+        game.proclaim_draft();
+        assert_eq!(game.levies_owed().0, levies0 + 2);
+        assert_eq!(game.levy_term_remaining(), Some(LEVY_SERVICE));
     }
 
     #[test]
@@ -9851,6 +9878,11 @@ mod tests {
         assert!(levies >= 1);
         let farmers0 = game.civilian_count(Faction::Player);
         game.money = owed;
+
+        // Through their term the levies stay under arms even with the realm
+        // at peace, and are still serving the moment it runs out.
+        serve_out_term(&mut game);
+        assert_eq!(game.levies_owed().0, levies, "stood down mid-term");
 
         // While a village is under threat, the levies stay under arms however
         // long it lasts.
@@ -9895,6 +9927,7 @@ mod tests {
         let farmers0 = game.civilian_count(Faction::Player);
         // Enough gold for all but one.
         game.money = (levies as u32 - 1) * LEVY_GOLD_PAY;
+        serve_out_term(&mut game);
         for _ in 0..(LEVY_STAND_DOWN as usize * 10 + 1) {
             game.stand_down_levies(0.1);
         }

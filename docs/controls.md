@@ -67,13 +67,13 @@ Everything you build is paid for out of this pool.
 
 ### Proclamations
 
-- **:lucide-scroll-text: Proclaim draft:** declares a draft for a short spell.
-  While it runs, your civilians may spontaneously **take up arms as knights**. They
-  serve as **levies**: free to call up, but each survivor is owed gold once the
-  fighting is over. The button is replaced by a countdown while a draft is in
-  force, and while levies are serving the panel shows how many there are and
-  how much you owe them (in red if you can't cover it yet). See
-  **[Units & Combat](units.md#the-draft)**.
+- **:lucide-scroll-text: Proclaim draft:** every civilian you can spare
+  **takes up arms as a knight on the spot**. They serve as **levies** for a
+  4-minute term: free to call up, but each survivor is owed gold once the term
+  is up and the fighting is over. While levies are serving, the panel counts
+  down their term and shows how many there are and how much you owe them (in
+  red if you can't cover it yet). Proclaiming again calls up any newcomers
+  and restarts the term. See **[Units & Combat](units.md#the-draft)**.
 
 ### Build (left-click)
 

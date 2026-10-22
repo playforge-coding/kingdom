@@ -29,7 +29,10 @@ A save captures everything needed to reconstruct your session exactly:
 - **All edited chunks:** buildings, bridges, and depleted resources.
 
 Rally flags (the knights' and the navy's) are deliberately transient: they
-direct a moment, not a realm, so a loaded game starts with none planted.
+direct a moment, not a realm, so a loaded game starts with none planted. The
+levies' term of service is transient too: serving levies are saved and still
+owed their pay, but a loaded game's levies are free to stand down as soon as
+the realm has been quiet for a little while.
 
 The **[testing ground](testing.md)** is never saved. It has no **Save**
 button, so experimenting there can't overwrite your one save slot with an

@@ -180,16 +180,22 @@ out in the open, so huts matter more once the arrows start flying.
 ## The draft
 
 Need soldiers *now* rather than waiting on new spawns? **Proclaim a draft** from
-the HUD (see **[Controls](controls.md#proclamations)**). For a short spell:
+the HUD (see **[Controls](controls.md#proclamations)**). The moment you do:
 
-- Your **civilians may spontaneously take up arms**, converting into knights at
-  random over the course of the draft.
+- Every **civilian you can spare takes up arms on the spot**, converting into
+  a knight at once. There is no waiting for the muster.
 - Draftees are **levies** and serve **on credit**. Calling them up costs
   nothing, so a draft works even when the treasury is empty.
 - A **working core of civilians is always spared**, so a draft can't hollow out
   your economy (or trip your knights into retreating home).
+- The levies begin a **term of service of 4 minutes**. Through that term they
+  stay under arms whatever happens, even if the realm is at peace the whole
+  time, so a draft is a commitment, not a quick scare.
 
-Once the draft has ended and none of your villages has been under threat for a
+Proclaiming again while levies are serving calls up any civilians your houses
+have raised since, and **restarts the term** for everyone serving.
+
+Once the term is up and none of your villages has been under threat for a
 little while, the invasion counts as repelled and the levies **stand down**:
 
 - Each surviving levy is **paid 15 gold** and **goes back to civilian work**,

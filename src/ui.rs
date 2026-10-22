@@ -14,8 +14,8 @@ use crate::game::{
     AlertKind, AlertResponse, BOWMAN_GOLD_COST, BRIDGE_WOOD_COST, BUILD_NEAR_RADIUS, BUILDER_WAGE,
     Brush, BuildMode, ESCORT_HIRE_COST, Faction, Game, GatherPriority, HORSEMAN_GOLD_COST,
     HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST, Job, KNIGHT_GOLD_COST,
-    LEVY_GOLD_PAY, LaunchRefusal, MAX_ESCORTS, MINE_GOLD_COST, MINE_STONE_COST, Priority,
-    SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST,
+    LEVY_GOLD_PAY, LEVY_SERVICE, LaunchRefusal, MAX_ESCORTS, MINE_GOLD_COST, MINE_STONE_COST,
+    Priority, SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST,
     SETTLER_WOOD_COST, STONE_PRICE, SandboxTool, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST,
     TROOP_WOOD_COST, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST,
     WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
@@ -467,17 +467,22 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ui.separator();
 
             ui.heading("Proclamations");
-            if let Some(secs) = game.draft_remaining() {
-                icon_label(
-                    ui,
-                    icons::SCROLL_TEXT,
-                    format!("Draft in force, {:.0}s left", secs.ceil()),
-                );
-            } else if ui
+            if ui
                 .button((icon(ui, icons::SCROLL_TEXT), "Proclaim draft"))
+                .on_hover_text(
+                    "Every civilian you can spare takes up arms this instant. Proclaim \
+                     again to call up newcomers and start the term afresh.",
+                )
                 .clicked()
             {
                 game.proclaim_draft();
+            }
+            if let Some(secs) = game.levy_term_remaining() {
+                icon_label(
+                    ui,
+                    icons::SCROLL_TEXT,
+                    format!("Levies serve {:.0}s more", secs.ceil()),
+                );
             }
             let (levies, owed) = game.levies_owed();
             if levies > 0 {
@@ -491,9 +496,11 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 });
             }
             ui.small(format!(
-                "Draft: civilians take up arms for free. Once the realm is quiet, each \
-                 survivor is paid {LEVY_GOLD_PAY} gold and goes back to work. \
-                 Any you can't pay will desert."
+                "Draft: every civilian you can spare takes up arms at once, for free, and \
+                 serves {:.0} minutes. Once the term is up and the realm is quiet, each \
+                 survivor is paid {LEVY_GOLD_PAY} gold and goes back to work. Any you \
+                 can't pay will desert.",
+                LEVY_SERVICE / 60.0
             ));
             ui.separator();
 

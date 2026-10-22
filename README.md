@@ -77,11 +77,12 @@ both natively and in the browser (via WebGL) using **Trunk**.
   alerts plus the Realm panel keep you posted on trouble far away.
 - **Priorities.** Toggle **Agriculture / Military** to bias which workers your
   houses raise, and **Balanced / Wood / Stone** to steer what civilians gather.
-- **Proclaim a draft.** Need soldiers now? Declare a draft and, for a short
-  spell, your **civilians spontaneously take up arms as knights**. These levies
-  serve on credit, so even a broke realm can raise them, while a core of
-  civilians is always spared. Once the realm is quiet again, each survivor is
-  paid and goes back to work. Any you can't pay will desert.
+- **Proclaim a draft.** Need soldiers now? Declare a draft and every
+  **civilian you can spare takes up arms as a knight on the spot**. These
+  levies serve on credit for a **4-minute term**, so even a broke realm can
+  raise them, while a core of civilians is always spared. Once the term is up
+  and the realm is quiet again, each survivor is paid and goes back to work.
+  Any you can't pay will desert.
 - **Economy.** Alongside wood and stone you keep a purse of **gold**. You start
   with some seed gold; every new **knight** costs gold to arm (a broke village
   raises a free civilian instead), and most structures cost gold too, the
