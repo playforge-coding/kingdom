@@ -104,12 +104,14 @@ on their own.
 
 ### Rallying
 
-Switch to **:lucide-flag: Rally your knights** and a left-click plants your
-knights' rally flag, exactly as the
-**[rally mode](units.md#rallying-your-knights)** does in a real game: your
-knights drop everything and rush to it, and the flag lifts once they arrive.
-A **:lucide-x: Clear rally** button appears while the flag stands. Right-click
-still erases in this tool, so use the button to lift the flag.
+Switch to **:lucide-flag: Rally your knights** and a left-click plants a
+rally flag for your soldiers, exactly as the
+**[rally mode](units.md#rallying-your-knights)** does in a real game: plant
+as many as you like, your soldiers split up among them nearest first (an
+under-manned flag drawing more), and each flag lifts once someone reaches it.
+Clicking a flagged tile lifts that flag, and a **:lucide-x: Clear rally
+flags** button appears while any stand. Right-click still erases units and
+tiles in this tool, so use the button or a second click to lift a flag.
 
 ## What is different from a real game
 

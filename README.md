@@ -44,9 +44,11 @@ both natively and in the browser (via WebGL) using **Trunk**.
   left in the field
   they **press the assault on enemy huts and walls** instead of idling. When the
   only way to a target is across water, they **lay their own bridges** as they
-  march (3 wood a tile, no gold: they're already paid for serving). Set a
-  **rally flag** (left-click in rally mode; right-click to clear) to pull them to
-  a point.
+  march (3 wood a tile, no gold: they're already paid for serving). Plant
+  **rally flags** (left-click in rally mode; right-click to clear them all) to
+  pull them to a point. Plant several and the soldiers **split up among
+  them**, nearest first, with an under-manned flag drawing more; each flag
+  lifts once someone reaches it.
 - **Horsemen** are your cavalry. Under the Military priority, a house raises
   one in place of a knight (50 gold) whenever you have fewer than one horseman
   per two knights. They ride far faster than the foot, take more punishment,
@@ -117,10 +119,11 @@ both natively and in the browser (via WebGL) using **Trunk**.
   village and it fights on its own: it **hunts pirates and enemy ships** and
   **bombards enemies ashore with cannonballs**, holding **off in the water** so
   it never beaches. Warships have a hull bar and can be sunk by pirate or
-  enemy fire, so escort convoys with a few. Plant a **navy rally flag**
-  (left-click open water in rally-warships mode) and every warship drops its
-  hunt and sails there, guns still hot; the flag lifts once one arrives, just
-  like the knights' flag. The allies **hire out warships** too: an allied
+  enemy fire, so escort convoys with a few. Plant **navy rally flags**
+  (left-click open water in rally-warships mode) and the warships drop their
+  hunts and share the flags out among themselves, guns still hot; each flag
+  lifts once a ship arrives, just like the knights' flags. The allies **hire
+  out warships** too: an allied
   escort crosses to your harbor and sails with the navy, flag and all, until
   the sea has been quiet a while.
 - **The enemy navy.** An enemy village grown to 7 houses sends **sea raids**:
@@ -168,7 +171,7 @@ both natively and in the browser (via WebGL) using **Trunk**.
 | `Q` or `-` (hold) | Zoom out (far out, the map becomes a flat overview) |
 | `M` | Jump to the overview and back |
 | Left-click | Perform the current build action / place a rally flag (on the testing ground: place the chosen unit or paint the chosen tile) |
-| Right-click | Clear the rally flags (knights' and navy's) (on the testing ground: remove the units on the tile, or wipe an empty tile) |
+| Right-click | Clear every rally flag (knights' and navy's) (on the testing ground: remove the units on the tile, or wipe an empty tile) |
 | `Esc` | Return to menu (from the menu: quit on native) |
 
 The **egui** panel in the top-left shows your stockpile, population, score, and

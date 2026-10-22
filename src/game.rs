@@ -841,6 +841,83 @@ const RALLY_ARRIVE_MANHATTAN: u32 = 3;
 /// this range of the flag, so one brushfire doesn't drag the whole realm's
 /// army across the map. A flag the player plants calls everyone.
 const AUTO_RALLY_RADIUS: f32 = 64.0;
+
+/// A knights' rally flag. Any number may stand at once; the soldiers
+/// answering them are shared out so every flag gets its fair share, nearest
+/// first (see `share_out`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Rally {
+    pub pos: Vec2,
+    /// `None` for a flag the player planted, which calls every soldier in the
+    /// realm; for an auto-raised flag, only soldiers within this range answer.
+    pub response: Option<f32>,
+}
+
+impl Rally {
+    /// Did the player plant this flag (rather than an alarm raising it)?
+    pub fn planted(&self) -> bool {
+        self.response.is_none()
+    }
+
+    /// May a unit standing at `pos` answer this flag?
+    fn calls(&self, pos: Vec2) -> bool {
+        self.response
+            .is_none_or(|rad| pos.distance_squared(self.pos) <= rad * rad)
+    }
+}
+
+/// Share `units` out among `flags`: each goes to the nearest flag it may
+/// answer (`eligible(unit, flag)`), except that a flag left with less than an
+/// equal share pulls in the nearest units it may call from flags that have
+/// more than their share, until every flag that can be filled is. Returns the
+/// flag each unit answers, or `None` for a unit no flag calls. So one flag
+/// still draws everyone, two flags split the force between them by distance,
+/// and a flag planted far from the fighting still gets its company instead
+/// of standing empty while everyone piles on the nearer one.
+fn share_out(
+    units: &[Vec2],
+    flags: &[Vec2],
+    eligible: impl Fn(usize, usize) -> bool,
+) -> Vec<Option<usize>> {
+    if flags.is_empty() {
+        return vec![None; units.len()];
+    }
+    let dist2 = |u: usize, f: usize| units[u].distance_squared(flags[f]);
+    let mut choice: Vec<Option<usize>> = (0..units.len())
+        .map(|u| {
+            (0..flags.len())
+                .filter(|&f| eligible(u, f))
+                .min_by(|&a, &b| dist2(u, a).total_cmp(&dist2(u, b)))
+        })
+        .collect();
+    let mut counts = vec![0usize; flags.len()];
+    for f in choice.iter().flatten() {
+        counts[*f] += 1;
+    }
+    let answering = choice.iter().flatten().count();
+    let share = (answering / flags.len()).max(1);
+
+    // Top up the emptiest flag from the fullest ones, one unit at a time,
+    // until every flag has its share or nothing more can be moved.
+    let mut stuck = vec![false; flags.len()];
+    while let Some(f) = (0..flags.len())
+        .filter(|&f| !stuck[f] && counts[f] < share)
+        .min_by_key(|&f| counts[f])
+    {
+        let donor = (0..units.len())
+            .filter(|&u| eligible(u, f) && choice[u].is_some_and(|g| g != f && counts[g] > share))
+            .min_by(|&a, &b| dist2(a, f).total_cmp(&dist2(b, f)));
+        match donor {
+            Some(u) => {
+                counts[choice[u].expect("donor is assigned")] -= 1;
+                choice[u] = Some(f);
+                counts[f] += 1;
+            }
+            None => stuck[f] = true,
+        }
+    }
+    choice
+}
 const ATTACK_DPS: f32 = 16.0;
 /// How far a bowman shoots. Well past melee reach, so a line of bowmen gets
 /// a couple of volleys off before the foot arrives, and a stream a knight
@@ -1612,16 +1689,15 @@ pub struct Game {
     pub gather_priority: GatherPriority,
     pub enemies_defeated: u32,
     pub units_lost: u32,
-    /// Player-set waypoint knights rush to (overriding combat); cleared once
-    /// they arrive. Also raised automatically when a village is lost.
-    pub rally_point: Option<Vec2>,
-    /// `None` for a flag the player planted (it calls every knight); for an
-    /// auto-raised flag, only knights within this range answer. Transient.
-    rally_response: Option<f32>,
-    /// Waypoint the navy sails to, overriding hunts and patrols; cleared once
-    /// a warship arrives. Planted by the player or raised by the
-    /// summon-warship alert response. Transient.
-    pub navy_rally: Option<Vec2>,
+    /// The knights' rally flags, planted by the player or raised automatically
+    /// when a village is lost or a hut is raided. Soldiers share themselves
+    /// out among the standing flags (see `share_out`), and each flag lifts
+    /// once someone reaches it. Transient.
+    rallies: Vec<Rally>,
+    /// The navy's rally flags, planted by the player or raised by an alert's
+    /// one-click response. Warships share themselves out among them the same
+    /// way, and each lifts once a warship arrives. Transient.
+    navy_rallies: Vec<Vec2>,
     /// Round-robin position for stepping off-screen entities. Transient.
     offscreen_cursor: usize,
     /// Seconds left on the levies' term of service (0 when none is running).
@@ -1907,9 +1983,8 @@ impl Game {
             gather_priority: GatherPriority::Balanced,
             enemies_defeated: 0,
             units_lost: 0,
-            rally_point: None,
-            rally_response: None,
-            navy_rally: None,
+            rallies: Vec::new(),
+            navy_rallies: Vec::new(),
             offscreen_cursor: 0,
             levy_term: 0.0,
             levy_quiet: 0.0,
@@ -2332,14 +2407,13 @@ impl Game {
             self.world.damage_wall(tile.0, tile.1, dmg);
         }
         for (tile, dmg) in hut_damage {
-            // A hut under attack with civilians inside rallies the knights to save
-            // them (overriding any manual rally flag).
+            // A hut under attack with civilians inside raises an alarm flag
+            // that rallies the knights nearby to save them.
             if let Some(h) = self.world.hut(tile.0, tile.1)
                 && h.owner == owner_of(Faction::Player)
                 && h.occupants > 0
             {
-                self.rally_point = Some(tile_center(tile));
-                self.rally_response = Some(AUTO_RALLY_RADIUS);
+                self.raise_rally(tile_center(tile), Some(AUTO_RALLY_RADIUS));
                 self.alert_ongoing(AlertKind::HutRaided, tile_center(tile));
             }
             if let Some(hut) = self.world.damage_hut(tile.0, tile.1, dmg) {
@@ -2354,6 +2428,9 @@ impl Game {
             }
         }
 
+        // Share the answering soldiers out among the standing rally flags.
+        let rally_of = self.assign_rallies();
+
         // AI + movement.
         for i in 0..n {
             let Some(adt) = step_dt[i] else { continue };
@@ -2363,12 +2440,7 @@ impl Game {
                 Faction::Enemy => enemy_under,
                 Faction::Ally => ally_under,
             };
-            // An auto-raised rally flag only calls knights close enough to
-            // answer; a player-planted one calls everyone.
-            let rally = self.rally_point.filter(|r| {
-                self.rally_response
-                    .is_none_or(|rad| self.entities[i].pos.distance_squared(*r) <= rad * rad)
-            });
+            let rally = rally_of[i];
             let event = match (faction, self.entities[i].job) {
                 // On the testing ground a civilian of yours has no village to
                 // work for until a house of yours is painted down, so until
@@ -2864,8 +2936,7 @@ impl Game {
     /// planted themselves is never overridden, and a shore with no enemy
     /// village in range leaves the knights to their own instincts.
     fn march_on_nearest_village(&mut self, from: Vec2) {
-        let player_flag = self.rally_point.is_some() && self.rally_response.is_none();
-        if player_flag {
+        if self.player_flag() {
             return;
         }
         let target = self
@@ -2880,10 +2951,96 @@ impl Game {
         if let Some(t) = target
             && t.distance(from) <= TROOP_MARCH_RANGE
         {
-            self.rally_point = Some(t);
-            self.rally_response = Some(AUTO_RALLY_RADIUS);
+            self.raise_rally(t, Some(AUTO_RALLY_RADIUS));
             log::info!("the landing party is marching on the village at {t}");
         }
+    }
+
+    /// The knights' rally flags standing right now, for the HUD and the map.
+    pub fn rallies(&self) -> &[Rally] {
+        &self.rallies
+    }
+
+    /// The navy's rally flags standing right now, for the HUD and the map.
+    pub fn navy_rallies(&self) -> &[Vec2] {
+        &self.navy_rallies
+    }
+
+    /// Raise a rally flag at `pos`, unless one already stands close enough
+    /// that a soldier reaching one has reached the other: an alarm that fires
+    /// every frame (a hut under attack) must not plant a forest of flags.
+    fn raise_rally(&mut self, pos: Vec2, response: Option<f32>) {
+        let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
+        if self
+            .rallies
+            .iter()
+            .any(|r| r.pos.distance_squared(pos) <= r2)
+        {
+            return;
+        }
+        self.rallies.push(Rally { pos, response });
+    }
+
+    /// Raise a navy rally flag at `pos`, unless one already stands within a
+    /// warship's arrival range of it.
+    fn raise_navy_rally(&mut self, pos: Vec2) {
+        let r2 = NAVY_RALLY_ARRIVE * NAVY_RALLY_ARRIVE;
+        if self
+            .navy_rallies
+            .iter()
+            .any(|r| r.distance_squared(pos) <= r2)
+        {
+            return;
+        }
+        self.navy_rallies.push(pos);
+    }
+
+    /// Which rally flag, if any, each entity answers this frame. Only the
+    /// player's soldiers and hired mercenaries answer; everyone else gets
+    /// `None`. Among those, each goes to the nearest flag that calls it,
+    /// except that an under-manned flag pulls in its share (see `share_out`).
+    fn assign_rallies(&self) -> Vec<Option<Vec2>> {
+        let mut out = vec![None; self.entities.len()];
+        if self.rallies.is_empty() {
+            return out;
+        }
+        let answering: Vec<usize> = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| (e.faction == Faction::Player || e.mercenary) && e.is_soldier())
+            .map(|(i, _)| i)
+            .collect();
+        let units: Vec<Vec2> = answering.iter().map(|&i| self.entities[i].pos).collect();
+        let flags: Vec<Vec2> = self.rallies.iter().map(|r| r.pos).collect();
+        let choice = share_out(&units, &flags, |u, f| self.rallies[f].calls(units[u]));
+        for (k, &i) in answering.iter().enumerate() {
+            out[i] = choice[k].map(|f| flags[f]);
+        }
+        out
+    }
+
+    /// Which navy flag, if any, each warship answers this frame: the player's
+    /// ships and the hired escorts share the flags out among themselves (see
+    /// `share_out`); enemy ships answer none.
+    fn assign_navy_rallies(&self) -> Vec<Option<Vec2>> {
+        let mut out = vec![None; self.warships.len()];
+        if self.navy_rallies.is_empty() {
+            return out;
+        }
+        let answering: Vec<usize> = self
+            .warships
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.faction != Faction::Enemy)
+            .map(|(i, _)| i)
+            .collect();
+        let units: Vec<Vec2> = answering.iter().map(|&i| self.warships[i].pos).collect();
+        let choice = share_out(&units, &self.navy_rallies, |_, _| true);
+        for (k, &i) in answering.iter().enumerate() {
+            out[i] = choice[k].map(|f| self.navy_rallies[f]);
+        }
+        out
     }
 
     /// Ships currently at sea, for rendering.
@@ -3251,23 +3408,26 @@ impl Game {
     /// station off the coast it came to bombard and withdraws once its sortie
     /// is up.
     fn update_navy(&mut self, dt: f32) {
-        // Set once a warship reaches the navy rally flag, lifting it for the
-        // whole fleet after the loop (mirrors the knights' flag).
-        let mut rally_arrived = false;
-        let mut i = 0;
-        while i < self.warships.len() {
+        // An enemy sortie ends with the ship sailing for home, which is
+        // simply off the map. Done first so the fleet's indices hold steady
+        // through the loop below.
+        let before = self.warships.len();
+        self.warships
+            .retain(|w| !(w.faction == Faction::Enemy && w.sortie + dt >= ENEMY_SORTIE));
+        if self.warships.len() < before {
+            log::info!("an enemy warship withdrew, its sortie over");
+        }
+
+        // Share the fleet out among the navy's flags. A flag a warship reaches
+        // is lifted after the loop (mirrors the knights' flags).
+        let orders_of = self.assign_navy_rallies();
+        let mut reached: Vec<Vec2> = Vec::new();
+        for i in 0..self.warships.len() {
             let faction = self.warships[i].faction;
             self.warships[i].bob += dt;
             self.warships[i].reload -= dt;
             self.warships[i].repath -= dt;
             self.warships[i].sortie += dt;
-            // An enemy sortie ends with the ship sailing for home, which is
-            // simply off the map.
-            if faction == Faction::Enemy && self.warships[i].sortie >= ENEMY_SORTIE {
-                log::info!("an enemy warship withdrew, its sortie over");
-                self.warships.swap_remove(i);
-                continue;
-            }
             let wp = self.warships[i].pos;
             let wt = (wp.x.floor() as i32, wp.y.floor() as i32);
             // Keep the surrounding sea real so tile reads (and BFS) are accurate.
@@ -3276,13 +3436,13 @@ impl Game {
 
             let target = self.navy_target(faction, wp);
 
-            // Standing orders, if any: the shared navy flag for the player's
-            // ships and the escorts (an escort still crossing over answers
-            // its own goal when no flag stands), the ship's own goal for the
-            // enemy's.
+            // Standing orders, if any: the navy flag this ship was dealt for
+            // the player's ships and the escorts (an escort still crossing
+            // over answers its own goal when no flag stands), the ship's own
+            // goal for the enemy's.
             let orders = match faction {
-                Faction::Player => self.navy_rally,
-                Faction::Ally => self.navy_rally.or(self.warships[i].goal),
+                Faction::Player => orders_of[i],
+                Faction::Ally => orders_of[i].or(self.warships[i].goal),
                 Faction::Enemy => self.warships[i].goal,
             };
 
@@ -3295,11 +3455,11 @@ impl Game {
             if let Some(r) = orders {
                 // Orders override the hunt: make for the spot (the guns stay
                 // hot on the way; see the firing block below). Close enough
-                // counts as arrived: the shared flag then lifts for the whole
-                // fleet after the loop, a ship's own goal for that ship alone.
+                // counts as arrived: a navy flag then lifts after the loop, a
+                // ship's own goal for that ship alone.
                 if (r - wp).length() <= NAVY_RALLY_ARRIVE {
-                    if faction != Faction::Enemy && self.navy_rally == Some(r) {
-                        rally_arrived = true;
+                    if faction != Faction::Enemy && self.navy_rallies.contains(&r) {
+                        reached.push(r);
                     }
                     if self.warships[i].goal == Some(r) {
                         self.warships[i].goal = None;
@@ -3385,11 +3545,8 @@ impl Game {
                     self.warships[i].reload = WARSHIP_RELOAD;
                 }
             }
-            i += 1;
         }
-        if rally_arrived {
-            self.navy_rally = None;
-        }
+        self.navy_rallies.retain(|r| !reached.contains(r));
     }
 
     /// Gold the next dispatched ship would fetch, given the current load and
@@ -3427,33 +3584,27 @@ impl Game {
         }
     }
 
-    /// Lift the rally flag once a knight has reached it, handing the group back
-    /// to normal combat AI right where they're needed.
+    /// Lift each rally flag once a soldier has reached it, handing that
+    /// company back to normal combat AI right where they're needed.
     fn clear_reached_rally(&mut self) {
-        if let Some(r) = self.rally_point {
-            let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
-            // The player's soldiers and any hired mercenaries count as answering.
-            let knights =
-                |e: &&Entity| (e.faction == Faction::Player || e.mercenary) && e.is_soldier();
-            let arrived = self
-                .entities
-                .iter()
-                .filter(knights)
-                .any(|e| e.pos.distance_squared(r) <= r2);
+        if self.rallies.is_empty() {
+            return;
+        }
+        let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
+        // The player's soldiers and any hired mercenaries count as answering.
+        let knights: Vec<Vec2> = self
+            .entities
+            .iter()
+            .filter(|e| (e.faction == Faction::Player || e.mercenary) && e.is_soldier())
+            .map(|e| e.pos)
+            .collect();
+        self.rallies.retain(|r| {
+            let arrived = knights.iter().any(|&p| p.distance_squared(r.pos) <= r2);
             // An auto-raised flag with no knight close enough to answer is
             // pointless; lift it rather than leave it standing forever.
-            let unanswerable = self.rally_response.is_some_and(|rad| {
-                !self
-                    .entities
-                    .iter()
-                    .filter(knights)
-                    .any(|e| e.pos.distance_squared(r) <= rad * rad)
-            });
-            if arrived || unanswerable {
-                self.rally_point = None;
-                self.rally_response = None;
-            }
-        }
+            let unanswerable = !r.planted() && !knights.iter().any(|&p| r.calls(p));
+            !(arrived || unanswerable)
+        });
     }
 
     /// Per-village capture: if a village has no defenders of its owner left but
@@ -3491,8 +3642,7 @@ impl Game {
                 // come to their allies' aid and retake it. Knights farther out
                 // stay at their own posts.
                 let center = village_center(&village);
-                self.rally_point = Some(center);
-                self.rally_response = Some(AUTO_RALLY_RADIUS);
+                self.raise_rally(center, Some(AUTO_RALLY_RADIUS));
                 self.push_alert(AlertKind::VillageLost, center);
                 if self.incorporate_civilians(center, Faction::Player, Faction::Enemy) > 0 {
                     self.push_alert(AlertKind::PeopleLost, center);
@@ -3833,7 +3983,7 @@ impl Game {
         let done = match response {
             AlertResponse::SummonWarship => self.summon_warship(alert.pos),
             AlertResponse::RallyNavy => {
-                self.navy_rally = Some(alert.pos);
+                self.raise_navy_rally(alert.pos);
                 true
             }
         };
@@ -3851,7 +4001,7 @@ impl Game {
             return false;
         };
         self.launch_warship(spot);
-        self.navy_rally = Some(pos);
+        self.raise_navy_rally(pos);
         true
     }
 
@@ -4654,34 +4804,38 @@ impl Game {
                 true
             }
             BuildMode::NavyRally => {
-                // Plant (or lift) the navy rally flag on open water: warships
-                // drop their hunts and patrols and sail to it, and the flag
-                // clears once one arrives. Clicking the flagged tile lifts it.
+                // Plant another navy rally flag on open water: the warships
+                // share the standing flags out among themselves, and each
+                // clears once a ship arrives. Clicking a flagged tile lifts
+                // that flag.
                 if !self.world.is_open_water(x, y) {
                     return false;
                 }
                 let here = tile_center((x, y));
-                self.navy_rally = if self.navy_rally == Some(here) {
-                    None
+                if let Some(k) = self.navy_rallies.iter().position(|&r| r == here) {
+                    self.navy_rallies.remove(k);
                 } else {
-                    Some(here)
-                };
+                    self.navy_rallies.push(here);
+                }
                 true
             }
         }
     }
 
-    /// Plant (or move) the rally flag on a tile. Knights head there until they
-    /// pick up an enemy. Clicking the flagged tile again lifts it. A
-    /// player-planted flag calls every knight in the realm.
+    /// Plant another rally flag on a tile, calling every soldier in the realm:
+    /// the soldiers share the standing flags out among themselves and each
+    /// flag lifts once someone reaches it. Clicking a flagged tile lifts that
+    /// flag instead.
     fn toggle_rally(&mut self, t: Tile) {
         let here = tile_center(t);
-        self.rally_point = if self.rally_point == Some(here) {
-            None
+        if let Some(k) = self.rallies.iter().position(|r| r.pos == here) {
+            self.rallies.remove(k);
         } else {
-            Some(here)
-        };
-        self.rally_response = None;
+            self.rallies.push(Rally {
+                pos: here,
+                response: None,
+            });
+        }
     }
 
     /// A left-click on the testing ground: put down a unit of the chosen
@@ -4803,8 +4957,7 @@ impl Game {
     pub fn clear_units(&mut self) {
         self.entities.clear();
         self.arrows.clear();
-        self.rally_point = None;
-        self.rally_response = None;
+        self.rallies.clear();
     }
 
     /// How many units of each faction stand on the map, as
@@ -5381,9 +5534,10 @@ impl Game {
         counts
     }
 
-    /// Does a flag the player planted stand (rather than an auto-raised alarm)?
+    /// Does a flag the player planted stand (rather than only auto-raised
+    /// alarms, or nothing)?
     pub fn player_flag(&self) -> bool {
-        self.rally_point.is_some() && self.rally_response.is_none()
+        self.rallies.iter().any(Rally::planted)
     }
 
     /// Hired allied knights currently ashore.
@@ -5391,17 +5545,23 @@ impl Game {
         self.entities.iter().filter(|e| e.mercenary).count()
     }
 
-    /// Hire an allied company to answer the player's rally flag. The nearest
-    /// allied village to the flag with knights to spare (beyond its garrison)
-    /// loads `MERC_KNIGHTS` onto one of its ships, which sails for the coast
-    /// nearest the flag; ashore, the company answers the flag like the player's
-    /// own knights, fights as allies do, and sails home once the ground is
-    /// quiet (see `stand_down_mercenaries`). Gold is paid up front. Refused,
-    /// with nothing spent and a toast saying why, when no player flag stands,
-    /// the treasury is short, no ally has the knights, no beach lies near the
+    /// Hire an allied company to answer the player's rally flag (the one most
+    /// recently planted, when several stand). The nearest allied village to
+    /// the flag with knights to spare (beyond its garrison) loads
+    /// `MERC_KNIGHTS` onto one of its ships, which sails for the coast nearest
+    /// the flag; ashore, the company answers the flags like the player's own
+    /// knights, fights as allies do, and sails home once the ground is quiet
+    /// (see `stand_down_mercenaries`). Gold is paid up front. Refused, with
+    /// nothing spent and a toast saying why, when no player flag stands, the
+    /// treasury is short, no ally has the knights, no beach lies near the
     /// flag, or no sea route reaches it.
     pub fn hire_mercenaries(&mut self) -> bool {
-        let flag = self.rally_point.filter(|_| self.rally_response.is_none());
+        let flag = self
+            .rallies
+            .iter()
+            .rev()
+            .find(|r| r.planted())
+            .map(|r| r.pos);
         let at = flag.unwrap_or_else(|| self.start_center());
         let refuse = |game: &mut Game, why: LaunchRefusal| {
             game.push_alert(AlertKind::LaunchRefused(why), at);
@@ -5508,7 +5668,7 @@ impl Game {
             return;
         }
         let r2 = MERC_ENGAGE_RADIUS * MERC_ENGAGE_RADIUS;
-        let engaged = self.rally_point.is_some()
+        let engaged = !self.rallies.is_empty()
             || self.entities.iter().filter(|e| e.mercenary).any(|m| {
                 self.entities
                     .iter()
@@ -5596,7 +5756,7 @@ impl Game {
         if escorts.is_empty() {
             return;
         }
-        let engaged = self.navy_rally.is_some()
+        let engaged = !self.navy_rallies.is_empty()
             || escorts.iter().any(|&i| {
                 let w = &self.warships[i];
                 w.goal.is_some() || self.navy_target(Faction::Ally, w.pos).is_some()
@@ -5753,15 +5913,14 @@ impl Game {
         self.push_alert(AlertKind::EnemyFleetSailed, tile_center(anchor));
     }
 
-    /// Lift the rally flag; knights resume defending on their own.
+    /// Lift every rally flag; knights resume defending on their own.
     pub fn clear_rally(&mut self) {
-        self.rally_point = None;
-        self.rally_response = None;
+        self.rallies.clear();
     }
 
-    /// Lift the navy rally flag; warships resume hunting and patrolling.
+    /// Lift every navy rally flag; warships resume hunting and patrolling.
     pub fn clear_navy_rally(&mut self) {
-        self.navy_rally = None;
+        self.navy_rallies.clear();
     }
 
     /// Proclaim a draft: every civilian the realm can spare takes up arms as a
@@ -8806,9 +8965,8 @@ impl Game {
             gather_priority,
             enemies_defeated,
             units_lost,
-            rally_point: None,
-            rally_response: None,
-            navy_rally: None,
+            rallies: Vec::new(),
+            navy_rallies: Vec::new(),
             offscreen_cursor: 0,
             levy_term: 0.0,
             levy_quiet: 0.0,
@@ -9554,11 +9712,15 @@ mod tests {
         // Going ashore raises an automatic rally on the nearest enemy village,
         // so the party invades instead of holding the beach.
         game.land_transport(troops(anchor));
-        let rally = game.rally_point.expect("the landing gave no march order");
+        let flag = *game
+            .rallies()
+            .last()
+            .expect("the landing gave no march order");
         assert!(
-            game.rally_response.is_some(),
+            !flag.planted(),
             "the march must be a self-lifting auto rally, not a player flag",
         );
+        let rally = flag.pos;
         let from = tile_center(anchor);
         let expected = game
             .world
@@ -9578,12 +9740,17 @@ mod tests {
 
         // A flag the player planted themselves is never overridden.
         let own = tile_center((0, 0));
-        game.rally_point = Some(own);
-        game.rally_response = None;
+        game.rallies = vec![Rally {
+            pos: own,
+            response: None,
+        }];
         game.land_transport(troops(anchor));
         assert_eq!(
-            game.rally_point,
-            Some(own),
+            game.rallies(),
+            &[Rally {
+                pos: own,
+                response: None,
+            }],
             "a landing stole the player's flag"
         );
     }
@@ -9711,8 +9878,8 @@ mod tests {
             assert_eq!(game.warships().len(), 1, "seed {seed}: no warship summoned");
             assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
             assert_eq!(
-                game.navy_rally,
-                Some(wreck),
+                game.navy_rallies(),
+                &[wreck],
                 "the navy rallies to the wreck"
             );
             assert!(game.alerts().is_empty(), "the toast goes once acted on");
@@ -9758,17 +9925,17 @@ mod tests {
             };
             game.build_mode = BuildMode::NavyRally;
             assert!(game.try_build(tile_center(flag)));
-            assert_eq!(game.navy_rally, Some(tile_center(flag)));
+            assert_eq!(game.navy_rallies(), &[tile_center(flag)]);
 
             game.entities.clear();
             let sim = (spot.0 - 20, spot.1 - 20, spot.0 + 20, spot.1 + 20);
             let mut steps = 0;
-            while game.navy_rally.is_some() && steps < 2_000 {
+            while !game.navy_rallies().is_empty() && steps < 2_000 {
                 game.update(0.1, sim);
                 steps += 1;
             }
             assert!(
-                game.navy_rally.is_none(),
+                game.navy_rallies().is_empty(),
                 "seed {seed}: the flag never lifted"
             );
             let w = &game.warships()[0];
@@ -10291,7 +10458,7 @@ mod tests {
         for _ in 0..1500 {
             game.update(0.1, sim);
             // The flag lifts itself once a knight reaches it.
-            if game.rally_point.is_none() {
+            if game.rallies().is_empty() {
                 arrived = true;
                 break;
             }
@@ -10345,7 +10512,7 @@ mod tests {
         for _ in 0..600 {
             game.update(0.1, sim);
             leapt |= game.entities[k].jump.is_some();
-            if game.rally_point.is_none() {
+            if game.rallies().is_empty() {
                 arrived = true;
                 break;
             }
@@ -10753,7 +10920,7 @@ mod tests {
         let mut arrived = false;
         for _ in 0..400 {
             game.update(0.1, sim);
-            if game.rally_point.is_none() {
+            if game.rallies().is_empty() {
                 arrived = true;
                 break;
             }
@@ -11155,7 +11322,7 @@ mod tests {
 
         // Neither does one while the navy flag stands.
         game.warships[0].goal = None;
-        game.navy_rally = Some(Vec2::new(5.0, 5.0));
+        game.navy_rallies = vec![Vec2::new(5.0, 5.0)];
         game.stand_down_escorts(ESCORT_STAND_DOWN + 1.0);
         assert_eq!(game.escorts(), 1, "a flagged escort stays");
     }
@@ -11219,13 +11386,13 @@ mod tests {
         // a no-op.
         assert!(!game.can_respond(AlertResponse::RallyNavy));
         game.respond_to_alert(i);
-        assert_eq!(game.navy_rally, None);
+        assert!(game.navy_rallies().is_empty());
         // With a warship afloat the flag is planted and the toast dismissed.
         game.warships
             .push(Warship::new(Faction::Player, Vec2::new(0.5, 0.5)));
         assert!(game.can_respond(AlertResponse::RallyNavy));
         game.respond_to_alert(i);
-        assert_eq!(game.navy_rally, Some(at));
+        assert_eq!(game.navy_rallies(), &[at]);
         assert!(
             !game
                 .alerts()
@@ -11843,8 +12010,10 @@ mod tests {
             game.survey_villages();
             // A flag the player planted, on the capital's shore.
             let flag = game.start_center();
-            game.rally_point = Some(flag);
-            game.rally_response = None;
+            game.rallies = vec![Rally {
+                pos: flag,
+                response: None,
+            }];
             game.money = MERC_HIRE_COST + 5;
             let allies_before = game.ally_count();
             if !game.hire_mercenaries() {
@@ -12033,21 +12202,147 @@ mod tests {
             (center.x as i32, center.y as i32),
         ));
         game.resolve_captures();
-        let rally = game.rally_point.expect("losing a village raises a rally");
-        assert_eq!(game.rally_response, Some(AUTO_RALLY_RADIUS));
+        let flag = *game
+            .rallies()
+            .last()
+            .expect("losing a village raises a rally");
+        assert_eq!(flag.response, Some(AUTO_RALLY_RADIUS));
+        let rally = flag.pos;
 
-        // The filter in `update` is what knights see: one close by answers,
-        // one far away keeps its post.
-        let answers = |response: Option<f32>, pos: Vec2| {
-            game.rally_point
-                .filter(|r| response.is_none_or(|rad| pos.distance_squared(*r) <= rad * rad))
-        };
-        let auto = game.rally_response;
-        assert_eq!(answers(auto, rally + Vec2::splat(10.0)), Some(rally));
-        assert_eq!(answers(auto, rally + Vec2::splat(200.0)), None);
+        // The assignment in `update` is what knights see: one close by
+        // answers, one far away keeps its post.
+        let near = (rally + Vec2::splat(10.0)).floor();
+        let far = (rally + Vec2::splat(200.0)).floor();
+        game.entities.clear();
+        game.entities.push(Entity::new(
+            Faction::Player,
+            Job::Knight,
+            (near.x as i32, near.y as i32),
+        ));
+        game.entities.push(Entity::new(
+            Faction::Player,
+            Job::Knight,
+            (far.x as i32, far.y as i32),
+        ));
+        let auto = game.assign_rallies();
+        assert_eq!(auto, vec![Some(rally), None]);
 
         // A player-planted flag calls everyone, however far.
-        assert_eq!(answers(None, rally + Vec2::splat(200.0)), Some(rally));
+        game.rallies = vec![Rally {
+            pos: rally,
+            response: None,
+        }];
+        assert_eq!(game.assign_rallies(), vec![Some(rally), Some(rally)]);
+    }
+
+    #[test]
+    fn soldiers_share_several_flags_out_nearest_first() {
+        // Five knights bunched by the western flag, a second flag far to the
+        // east: nearest-first alone would send all five west, so the two
+        // closest to the east flag are dealt to it instead, and each flag
+        // gets at least its equal share.
+        let units: Vec<Vec2> = (0..5).map(|i| Vec2::new(i as f32, 0.0)).collect();
+        let flags = [Vec2::new(-5.0, 0.0), Vec2::new(40.0, 0.0)];
+        let choice = share_out(&units, &flags, |_, _| true);
+        assert_eq!(choice, vec![Some(0), Some(0), Some(0), Some(1), Some(1)]);
+
+        // One flag still draws everyone.
+        let one = share_out(&units, &flags[..1], |_, _| true);
+        assert!(one.iter().all(|c| *c == Some(0)));
+
+        // A flag nobody may answer stays empty rather than stealing anyone,
+        // and a unit no flag calls gets nothing to do.
+        let gated = share_out(&units, &flags, |u, f| f == 0 || u == 4);
+        assert_eq!(gated, vec![Some(0), Some(0), Some(0), Some(0), Some(1)]);
+        let none = share_out(&units, &flags, |u, _| u != 2);
+        assert_eq!(none[2], None);
+        assert_eq!(none.iter().flatten().count(), 4);
+    }
+
+    #[test]
+    fn knights_split_between_two_flags_and_each_lifts_on_its_own() {
+        let mut game = Game::new_sandbox();
+        game.place_job = Job::Knight;
+        for i in 0..4 {
+            assert!(game.sandbox_click(Vec2::new(0.5, i as f32 + 0.5)));
+        }
+        game.sandbox_tool = SandboxTool::Rally;
+        assert!(game.sandbox_click(Vec2::new(12.5, 0.5)));
+        assert!(game.sandbox_click(Vec2::new(0.5, 14.5)));
+        assert_eq!(game.rallies().len(), 2);
+        assert!(game.rallies().iter().all(Rally::planted));
+
+        // Two knights are dealt to each flag.
+        let dealt = game.assign_rallies();
+        let east = dealt
+            .iter()
+            .filter(|r| **r == Some(Vec2::new(12.5, 0.5)))
+            .count();
+        let south = dealt
+            .iter()
+            .filter(|r| **r == Some(Vec2::new(0.5, 14.5)))
+            .count();
+        assert_eq!((east, south), (2, 2));
+
+        // Both companies arrive and both flags lift, each on its own.
+        for _ in 0..300 {
+            game.update(0.1, SANDBOX_SIM);
+            if game.rallies().is_empty() {
+                break;
+            }
+        }
+        assert!(game.rallies().is_empty(), "a flag never lifted");
+        let near = |p: Vec2| {
+            game.entities
+                .iter()
+                .filter(|e| e.pos.distance(p) <= RALLY_ARRIVE_RADIUS + 1.0)
+                .count()
+        };
+        assert!(
+            near(Vec2::new(12.5, 0.5)) >= 1,
+            "nobody reached the east flag"
+        );
+        assert!(
+            near(Vec2::new(0.5, 14.5)) >= 1,
+            "nobody reached the south flag"
+        );
+
+        // Clicking a flagged tile lifts just that flag.
+        assert!(game.sandbox_click(Vec2::new(3.5, 3.5)));
+        assert!(game.sandbox_click(Vec2::new(6.5, 6.5)));
+        assert!(game.sandbox_click(Vec2::new(3.5, 3.5)));
+        assert_eq!(game.rallies().len(), 1);
+        assert_eq!(game.rallies()[0].pos, Vec2::new(6.5, 6.5));
+    }
+
+    #[test]
+    fn warships_split_between_two_navy_flags() {
+        let mut game = Game::new_sandbox();
+        game.warships
+            .push(Warship::new(Faction::Player, Vec2::new(0.5, 0.5)));
+        game.warships
+            .push(Warship::new(Faction::Player, Vec2::new(1.5, 0.5)));
+        game.warships
+            .push(Warship::new(Faction::Enemy, Vec2::new(2.5, 0.5)));
+        game.navy_rallies = vec![Vec2::new(-20.0, 0.0), Vec2::new(30.0, 0.0)];
+        let dealt = game.assign_navy_rallies();
+        assert_eq!(
+            dealt,
+            vec![
+                Some(Vec2::new(-20.0, 0.0)),
+                Some(Vec2::new(30.0, 0.0)),
+                None
+            ]
+        );
+
+        // Lifting one flag by clicking it leaves the other standing.
+        game.navy_rallies = vec![tile_center((4, 4)), tile_center((8, 8))];
+        game.place_brush = Brush::Water;
+        game.sandbox_tool = SandboxTool::PlaceTile;
+        assert!(game.sandbox_click(tile_center((4, 4))));
+        game.build_mode = BuildMode::NavyRally;
+        assert!(game.try_build(tile_center((4, 4))));
+        assert_eq!(game.navy_rallies(), &[tile_center((8, 8))]);
     }
 
     /// A simulation rectangle wide enough that everything on the testing
@@ -12388,10 +12683,10 @@ mod tests {
 
         game.sandbox_tool = SandboxTool::Rally;
         assert!(game.sandbox_click(Vec2::new(8.5, 8.5)));
-        assert!(game.rally_point.is_some());
+        assert!(!game.rallies().is_empty());
         game.clear_units();
         assert!(game.entities.is_empty());
-        assert!(game.rally_point.is_none());
+        assert!(game.rallies().is_empty());
     }
 
     #[test]

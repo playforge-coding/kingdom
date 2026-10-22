@@ -720,15 +720,15 @@ impl State {
             ));
         }
 
-        // Rally flag: the player's knight waypoint, drawn on top of everything.
-        if let Some(r) = game.rally_point {
+        // Rally flags: the knights' waypoints, drawn on top of everything.
+        for r in game.rallies() {
             let rally = self.atlas.uv("rally");
-            out.push(quad([r.x - 0.5, r.y - 0.5], [1.0, 1.0], rally));
+            out.push(quad([r.pos.x - 0.5, r.pos.y - 0.5], [1.0, 1.0], rally));
         }
 
-        // Navy rally flag: the warships' waypoint, tinted the player's blue to
-        // tell it apart from the knights' flag.
-        if let Some(r) = game.navy_rally {
+        // Navy rally flags: the warships' waypoints, tinted the player's blue
+        // to tell them apart from the knights' flags.
+        for r in game.navy_rallies() {
             let rally = self.atlas.uv("rally");
             let mut tint = self.colors.player;
             tint[3] = 1.0;
@@ -952,17 +952,17 @@ impl State {
             });
         }
 
-        if let Some(r) = game.rally_point {
+        for r in game.rallies() {
             let size = 1.5 * kf;
             out.push(sprite(
-                [r.x - size * 0.5, r.y - size * 0.5],
+                [r.pos.x - size * 0.5, r.pos.y - size * 0.5],
                 [size, size],
                 self.atlas.uv("rally"),
             ));
         }
 
-        // The navy's flag keeps its player-blue tint out here too.
-        if let Some(r) = game.navy_rally {
+        // The navy's flags keep their player-blue tint out here too.
+        for r in game.navy_rallies() {
             let size = 1.5 * kf;
             let uv = self.atlas.uv("rally");
             let mut tint = c.player;

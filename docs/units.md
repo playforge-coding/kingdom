@@ -346,34 +346,57 @@ enemy's coastal villages keeps the sea quiet.
 
 ## Rallying your knights
 
-The **:lucide-flag: Rally** build mode turns a left-click into a **rally flag**:
+The **:lucide-flag: Rally** build mode turns a left-click into a **rally flag**,
+and you can plant **as many as you like**:
 
-- Your knights and horsemen **drop whatever they're doing** and rush to the
-  flag.
-- The flag **clears automatically once they arrive**.
-- **Right-click** (or the **:lucide-x: Clear rally** button) removes the flag manually.
+- Your knights, horsemen, and bowmen **drop whatever they're doing** and rush
+  to the flags.
+- With several flags standing, the soldiers **share themselves out** among
+  them. Each goes to the **nearest** flag it may answer, except that a flag
+  left with **less than an equal share** draws in the nearest soldiers from
+  flags that have more than theirs, so a flag planted far from the crowd
+  still gets its company instead of standing empty.
+- Each flag **clears on its own once someone reaches it**; the others stay.
+- Clicking a flagged tile again lifts that one flag. **Right-click** (or the
+  **:lucide-x: Clear rally flags** button) lifts them all.
+
+```mermaid
+flowchart TD
+    flags["Flags standing"] --> near["Each soldier picks the nearest flag it may answer"]
+    near --> share{"Any flag below an equal share?"}
+    share -- "Yes" --> pull["It draws the nearest soldiers from flags with more than their share"]
+    pull --> share
+    share -- "No" --> march["Everyone marches"]
+    march --> arrive["A flag lifts when a soldier reaches it"]
+```
 
 Rallying is also triggered automatically when you **lose a village** or a
-**hut comes under attack**: the knights **near it** converge to retake the
-ground, while those stationed farther away hold their own posts. Only a flag
-you plant yourself calls every knight in the realm, and an automatic alarm
-with no knight close enough to answer simply lifts itself.
+**hut comes under attack**: an alarm flag goes up there, and the knights
+**near it** converge to retake the ground while those stationed farther away
+hold their own posts. Alarm flags stand alongside any you planted and are
+shared out the same way, among the soldiers close enough to answer them. Only
+a flag you plant yourself calls every knight in the realm, and an alarm with
+no knight close enough to answer simply lifts itself.
 
 ## Rallying your warships
 
-The navy has a flag of its own. The **:lucide-flag: Rally warships** mode in
+The navy has flags of its own. The **:lucide-flag: Rally warships** mode in
 the HUD's **Navy** section turns a left-click on **open water** into a navy
-rally flag, drawn in your faction's blue:
+rally flag, drawn in your faction's blue, and as with the knights you can
+plant several:
 
-- Every warship **drops its hunt or patrol** and sails for the flag, though its
+- Every warship **drops its hunt or patrol** and sails for a flag, though its
   **guns stay hot**: it still fires on any pirate, enemy ship, or shore enemy
-  that comes into range along the way. Hired allied escorts answer the flag
+  that comes into range along the way. Hired allied escorts answer the flags
   too.
-- The flag **lifts once one warship arrives**, and the fleet goes back to
+- With several flags standing, the fleet **shares them out** exactly as the
+  knights do: each ship sails for the nearest flag, and a flag short of its
+  equal share draws the nearest ships from the better-manned ones.
+- Each flag **lifts once a warship arrives**, and that ship goes back to
   hunting and patrolling on its own, right where you pointed it.
-- **Right-click** (or the **:lucide-x: Clear navy rally** button) removes it
-  manually. Clicking the flagged tile again also lifts it.
+- Clicking a flagged tile again lifts that one flag. **Right-click** (or the
+  **:lucide-x: Clear navy flags** button) lifts them all.
 
 The **Summon warship** button on a sunk-cargo [alert](controls.md#alerts)
-uses this same flag: it plants one at the wreck, so the new hull and the rest
-of the navy converge on the raiders.
+uses these same flags: it plants one at the wreck, so the new hull and the
+rest of the navy converge on the raiders.

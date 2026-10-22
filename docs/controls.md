@@ -16,7 +16,7 @@ through the panel; your units carry them out on their own.
 | <kbd>Q</kbd> or <kbd>-</kbd> (hold) | Zoom out (past full detail, the map turns into the [overview](#the-overview)) |
 | <kbd>M</kbd> | Jump to the [overview](#the-overview) and back |
 | **Left-click** | Perform the current build action, or place a rally flag |
-| **Right-click** | Clear the rally flags (the knights' and the navy's) |
+| **Right-click** | Clear every rally flag (the knights' and the navy's) |
 | <kbd>Esc</kbd> | Return to the menu (from the menu on native builds: quit) |
 
 Left-click always does whatever the **Build** section of the panel is currently
@@ -28,7 +28,7 @@ each mode does.
 
 On the **[testing ground](testing.md)** the mouse does something simpler:
 left-click places the unit picked in its panel, paints the chosen terrain or
-building onto the tile at once, or plants the rally flag, and right-click
+building onto the tile at once, or plants a rally flag, and right-click
 removes whoever stands on the tile (or wipes an empty tile back to grass).
 
 ## The HUD panel
@@ -89,12 +89,12 @@ every order waits for a civilian to walk over and build it:
 | **:lucide-brick-wall: Wall** | 2 wood, 4 stone, 10 gold | Defensive blocker |
 | **:lucide-tent: Hut** | 20 gold | Click a tree; a builder raises it |
 | **:lucide-map: Builder zone** | Free | Click to mark (or clear) an area for autonomous building |
-| **:lucide-flag: Rally knights** | Free | Left-click sets a flag your knights rush to |
+| **:lucide-flag: Rally knights** | Free | Left-click plants a flag your knights rush to; plant several and they split up among them |
 
 Below the modes sits the **"Let builders build on their own in zones"** switch:
 while it's on, builders keep raising houses inside your
-**[builder zones](building.md#builder-zones)**. A **:lucide-x: Clear rally**
-button appears while a rally flag is active, and while a flag *you* planted
+**[builder zones](building.md#builder-zones)**. A **:lucide-x: Clear rally
+flags** button appears while any rally flag stands, and while a flag *you* planted
 stands, a **:lucide-swords: Hire allied mercenaries** button offers an allied
 company that sails over to answer it for gold (see
 **[Hiring mercenaries](gameplay.md#hiring-mercenaries)**); the section counts
@@ -109,15 +109,15 @@ left-click modes on the water:
 | **:lucide-globe: Settler ship** | 30 wood, 20 stone, 50 gold, 3 civilians | Click a far shore; the crew sails over and founds a new village there |
 | **:lucide-anchor: Warship** | 20 wood, 10 stone, 60 gold | Patrols, hunts pirates and enemy ships, shells the enemy coast; launches by your village |
 | **:lucide-swords: Troop ship** | 25 wood, 5 stone, 20 gold, 4 knights | Click a far shore; the party lands there ready to fight (levies stay home) |
-| **:lucide-flag: Rally warships** | Free | Click open water and every warship sails there; the flag lifts when one arrives |
+| **:lucide-flag: Rally warships** | Free | Click open water to plant a navy flag; the fleet splits up among your flags, and each lifts when a ship arrives |
 
 The Trade section also holds the **"Send cargo ships out on their own"** switch:
 while it's on, the harbor keeps launching laden ships whenever the stockpile
 covers the configured load in full, sailing from a different one of your
 coastal villages each time (see
 **[Autonomous trade](building.md#autonomous-trade)**). A
-**:lucide-x: Clear navy rally** button appears in the Navy section while the
-navy's flag is planted. The Navy section also holds the **:lucide-anchor: Hire
+**:lucide-x: Clear navy flags** button appears in the Navy section while any
+navy flag is planted. The Navy section also holds the **:lucide-anchor: Hire
 allied escort** button (60 gold), which brings an allied warship over to sail
 with your navy (see **[Hiring an escort](gameplay.md#hiring-an-escort)**),
 counts the escorts sailing with the fleet, and, while the enemy has ships out,
@@ -144,8 +144,8 @@ kingdom:
   in their faction's color (bigger for more houses), cargo ships as white
   specks, transports and warships in their owner's color (your settler and
   troop ships and warships blue, a hired company or escort green, an enemy
-  raid and its escort red), pirates black, the knights' rally flag as a yellow
-  ring, the navy's rally flag as a blue one, and each voyage's landing as a
+  raid and its escort red), pirates black, the knights' rally flags as yellow
+  rings, the navy's rally flags as blue ones, and each voyage's landing as a
   ring in its owner's color, so a red ring is where an enemy raid will come
   ashore. The white box is what's on screen. Land that hasn't been explored
   yet is dark. **Click or drag** on the minimap to move the camera there.

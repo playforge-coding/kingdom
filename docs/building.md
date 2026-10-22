@@ -293,7 +293,7 @@ settle it as civilians** (see
 ## :lucide-flag: Rally
 
 Not a building, but it lives in the same list. See
-**[Units & Combat](units.md#rallying-your-knights)** for how the rally flag
-directs your knights, and
+**[Units & Combat](units.md#rallying-your-knights)** for how rally flags
+direct your knights, and how several flags share them out, and
 **[Rallying your warships](units.md#rallying-your-warships)** for the navy's
-own flag.
+own flags.

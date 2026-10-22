@@ -366,11 +366,23 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
                     RichText::new("Rally your knights").strong(),
                 ),
             );
-            if game.rally_point.is_some()
-                && ui.button((icon(ui, icons::X), "Clear rally")).clicked()
+            if !game.rallies().is_empty()
+                && ui
+                    .button((
+                        icon(ui, icons::X),
+                        format!(
+                            "Clear {}",
+                            plural(game.rallies().len(), "rally flag", "rally flags")
+                        ),
+                    ))
+                    .clicked()
             {
                 game.clear_rally();
             }
+            ui.small(
+                "Plant as many flags as you like: your soldiers split up among them, nearest \
+                 first, and a flag short of its share draws more.",
+            );
             ui.separator();
 
             ui.heading("On the grid");
@@ -571,11 +583,21 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 BuildMode::Rally,
                 (icon(ui, icons::FLAG), "Rally knights"),
             );
-            if game.rally_point.is_some()
-                && ui.button((icon(ui, icons::X), "Clear rally")).clicked()
+            if !game.rallies().is_empty()
+                && ui
+                    .button((
+                        icon(ui, icons::X),
+                        format!("Clear {}", plural(game.rallies().len(), "rally flag", "rally flags")),
+                    ))
+                    .clicked()
             {
                 game.clear_rally();
             }
+            ui.small(
+                "Plant as many flags as you like: your soldiers split up among them, nearest \
+                 first, and a flag short of its share draws more. Each lifts once someone \
+                 arrives.",
+            );
             // Hired help: an allied company that answers the flag.
             if game.player_flag()
                 && ui
@@ -786,12 +808,23 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 BuildMode::NavyRally,
                 (icon(ui, icons::FLAG), "Rally warships"),
             );
-            if game.navy_rally.is_some()
-                && ui.button((icon(ui, icons::X), "Clear navy rally")).clicked()
+            if !game.navy_rallies().is_empty()
+                && ui
+                    .button((
+                        icon(ui, icons::X),
+                        format!(
+                            "Clear {}",
+                            plural(game.navy_rallies().len(), "navy flag", "navy flags")
+                        ),
+                    ))
+                    .clicked()
             {
                 game.clear_navy_rally();
             }
-            ui.small("Click open water to call every warship there; the flag lifts when one arrives.");
+            ui.small(
+                "Click open water to plant navy flags; the warships split up among them, \
+                 nearest first, and each flag lifts when a ship arrives.",
+            );
             ui.separator();
 
             ui.horizontal(|ui| {
@@ -831,9 +864,9 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 ui.small("Mines never run out, but only 4 miners can work one at a time.");
                 ui.small("Huts shelter civilians from raids; knights rush to defend an attacked one.");
                 ui.small("Knights lay their own bridges (wood, no gold) when water blocks their way.");
-                ui.small("Rally: knights drop combat and rush the flag; it clears on arrival.");
-                ui.small("Navy rally: warships rush their own flag the same way, guns still hot.");
-                ui.small("Right-click clears both rally flags.");
+                ui.small("Rally: knights drop combat and rush your flags, splitting up among them nearest first; each clears on arrival.");
+                ui.small("Navy rally: warships share their own flags out the same way, guns still hot.");
+                ui.small("Right-click clears every rally flag, the knights' and the navy's.");
                 ui.small("Big enemy villages send sea raids at your weakest coastal village, with warships as escort.");
                 ui.small("Hired allied escorts sail with your navy and follow the navy flag, then go home when it's quiet.");
                 ui.small("Some alerts offer a one-click action, like summoning a warship on a sinking.");
@@ -1012,10 +1045,10 @@ fn minimap_ui(
     for p in game.pirates() {
         painter.circle_filled(to_screen(p.pos), 1.8, Color32::BLACK);
     }
-    if let Some(r) = game.rally_point {
-        painter.circle_stroke(to_screen(r), 3.0, Stroke::new(1.5, CAUTION));
+    for r in game.rallies() {
+        painter.circle_stroke(to_screen(r.pos), 3.0, Stroke::new(1.5, CAUTION));
     }
-    if let Some(r) = game.navy_rally {
+    for &r in game.navy_rallies() {
         painter.circle_stroke(to_screen(r), 3.0, Stroke::new(1.5, color32(colors.player)));
     }
 
