@@ -159,7 +159,8 @@ Like [builder zones](#builder-zones), trade has a hands-off mode: flip the
 harbor keeps dispatching laden ships without another click. Every so often it
 checks the stockpile, and if it covers the configured load **in full** (and no
 more than a few ships are already at sea), a ship launches from open water by
-your village and sails off as if you had sent it yourself.
+one of your villages, whichever harbor connects best to an allied port (a
+colony's included), and sails off as if you had sent it yourself.
 
 Only full loads go out, so autonomous trade skims your surplus rather than
 scraping the stockpile bare: set the load to what you want each shipment to
@@ -178,7 +179,9 @@ Settler ships are how the kingdom **expands overseas** (see
 **[Settling overseas](gameplay.md#settling-overseas)**). Pick **Settler ship**
 in the HUD's **Colonies** section and **left-click a distant shore**; unlike
 the other modes you click the *destination*, and the expedition finds its own
-launch water by your village. When the order goes through, a **blue banner**
+launch water: it weighs every harbor you own at once and casts off from the
+one with the best sea route to the landing, sailing down a river to the ocean
+when that's the way out. When the order goes through, a **blue banner**
 marks the landing until the ship arrives, an **alert** announces the
 departure, and the Colonies section counts the expeditions at sea.
 

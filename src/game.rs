@@ -257,10 +257,6 @@ const AUTO_TRADE_INTERVAL: f32 = 20.0;
 /// Most cargo ships at sea at once while the autonomous-trade switch is on.
 /// Manual launches count toward it, so the fleet can't balloon.
 const MAX_AUTO_TRADE_SHIPS: usize = 3;
-/// Open-water tiles tried for a sea route when picking the harbor's launch
-/// spot. Nearby tiles share the same water, so a route that fails from a few
-/// of them would keep failing from the rest.
-const AUTO_DOCK_TRIES: usize = 6;
 
 // Pirates: a rare hazard that patrols the open ocean and shells cargo ships.
 /// Most pirate ships prowling at once, kept small so they stay a rare menace.
@@ -3011,8 +3007,8 @@ impl Game {
                 if wood + stone == 0 {
                     return false;
                 }
-                let Some(path) = plan_sea_route(&self.world, (x, y), &self.world.ally_house_tiles)
-                else {
+                let allies = self.world.ally_house_tiles.clone();
+                let Some((_, path)) = plan_trade_route(&mut self.world, &[(x, y)], &allies) else {
                     return false;
                 };
                 self.dispatch_ship((x, y), path, wood, stone);
@@ -3220,30 +3216,43 @@ impl Game {
         party
     }
 
-    /// A launch spot for a settler ship: open water within `SHIP_NEAR_RADIUS`
-    /// of one of the player's houses with a sea route to the landing off
-    /// `anchor`, plus that route. Tries only a handful of water tiles, like
-    /// `plan_harbor_route`, since a harbor's tiles share the same water.
-    fn plan_settler_route(&self, anchor: Tile) -> Option<(Tile, Vec<Tile>)> {
-        let mut tried = 0;
-        for &(hx, hy) in &self.player_house_tiles {
+    /// A launch spot for a transport: open water within `SHIP_NEAR_RADIUS` of
+    /// one of the player's houses with a sea route to the landing off `anchor`,
+    /// plus that route. Every dock tile in the realm is seeded into one search
+    /// at once, so the voyage leaves from whichever harbor genuinely connects
+    /// (down a river to the sea included) and the closest one at that; a pond
+    /// beside a house can't eat the search the way the old handful of
+    /// one-at-a-time tries could.
+    fn plan_settler_route(&mut self, anchor: Tile) -> Option<(Tile, Vec<Tile>)> {
+        let docks = self.collect_docks();
+        plan_voyage(&mut self.world, &docks, anchor)
+    }
+
+    /// Every tile a transport may launch from: open water within
+    /// `SHIP_NEAR_RADIUS` of one of the player's houses, deduplicated. The
+    /// house surroundings are generated first so a freshly loaded realm
+    /// doesn't misread its own harbor.
+    fn collect_docks(&mut self) -> Vec<Tile> {
+        let mut seen: HashSet<Tile> = HashSet::default();
+        let mut docks = Vec::new();
+        let houses = self.player_house_tiles.clone();
+        for (hx, hy) in houses {
+            self.world.ensure_region(
+                hx - SHIP_NEAR_RADIUS,
+                hy - SHIP_NEAR_RADIUS,
+                hx + SHIP_NEAR_RADIUS,
+                hy + SHIP_NEAR_RADIUS,
+            );
             for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                 for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                     let t = (hx + dx, hy + dy);
-                    if !self.world.is_open_water(t.0, t.1) {
-                        continue;
-                    }
-                    if let Some(path) = plan_sea_route_to_shore(&self.world, t, anchor) {
-                        return Some((t, path));
-                    }
-                    tried += 1;
-                    if tried >= AUTO_DOCK_TRIES {
-                        return None;
+                    if self.world.is_open_water(t.0, t.1) && seen.insert(t) {
+                        docks.push(t);
                     }
                 }
             }
         }
-        None
+        docks
     }
 
     /// Board `SETTLER_CIVILIANS` of the player's civilians onto a settler ship
@@ -3322,30 +3331,14 @@ impl Game {
 
     /// A spot the harbor can launch a cargo ship from on its own: open water
     /// within `SHIP_NEAR_RADIUS` of one of the player's houses that has a sea
-    /// route to an allied coast, plus that route. Only a handful of water
-    /// tiles are tried, since the harbor's tiles share the same water and a
-    /// route that fails from a few of them would keep failing from the rest.
-    fn plan_harbor_route(&self) -> Option<(Tile, Vec<Tile>)> {
-        let mut tried = 0;
-        for &(hx, hy) in &self.player_house_tiles {
-            for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
-                for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
-                    let t = (hx + dx, hy + dy);
-                    if !self.world.is_open_water(t.0, t.1) {
-                        continue;
-                    }
-                    if let Some(path) = plan_sea_route(&self.world, t, &self.world.ally_house_tiles)
-                    {
-                        return Some((t, path));
-                    }
-                    tried += 1;
-                    if tried >= AUTO_DOCK_TRIES {
-                        return None;
-                    }
-                }
-            }
-        }
-        None
+    /// route to an allied coast, plus that route. Every dock tile in the realm
+    /// is seeded into one search at once (see `plan_trade_route`), so the ship
+    /// casts off from whichever harbor genuinely connects to a port, a
+    /// colony's included.
+    fn plan_harbor_route(&mut self) -> Option<(Tile, Vec<Tile>)> {
+        let docks = self.collect_docks();
+        let allies = self.world.ally_house_tiles.clone();
+        plan_trade_route(&mut self.world, &docks, &allies)
     }
 
     /// Place a construction order of `kind` at `t`, or cancel the pending order
@@ -4484,39 +4477,145 @@ fn follow_path(e: &mut Entity, speed: f32, dt: f32) -> bool {
     true
 }
 
-/// Plot a water-only route from `start` (a water tile) to the nearest port, a
-/// water tile touching an allied house. Returns `None` if no allied coast is
-/// reachable across water within the search budget. Because the route travels
-/// only over water tiles, a ship following it never crosses land.
-fn plan_sea_route(world: &World, start: Tile, ally_houses: &[Tile]) -> Option<Vec<Tile>> {
-    use crate::world::Tile as WTile;
+/// Plot an honest water route from the realm's harbors to a landing off
+/// `anchor` (water within `SETTLE_LANDING_RADIUS` of it). Returns the dock
+/// tile the voyage leaves from and the route from that dock to the landing, or
+/// `None` when no landing is reachable across water within the search budget,
+/// which also rules out shores that only front a landlocked lake.
+fn plan_voyage(world: &mut World, docks: &[Tile], anchor: Tile) -> Option<(Tile, Vec<Tile>)> {
+    let landed = |(x, y): Tile| {
+        (x - anchor.0).abs() <= SETTLE_LANDING_RADIUS
+            && (y - anchor.1).abs() <= SETTLE_LANDING_RADIUS
+    };
+    let h = |(x, y): Tile| ((x - anchor.0).abs() + (y - anchor.1).abs()) as u32;
+    sea_astar(world, docks, landed, h)
+}
+
+/// Plot an honest water route from `seeds` to the nearest allied port (water
+/// touching an allied house), the trade fleet's counterpart of `plan_voyage`.
+/// The heuristic steers by allied village centers (one waypoint per village,
+/// relaxed by the villages' footprint so it never overshoots a port), which
+/// keeps it cheap however many allied houses stand. Returns the seed the route
+/// leaves from and the route itself.
+fn plan_trade_route(
+    world: &mut World,
+    seeds: &[Tile],
+    ally_houses: &[Tile],
+) -> Option<(Tile, Vec<Tile>)> {
     if ally_houses.is_empty() {
         return None;
     }
     let ports: HashSet<Tile> = ally_houses.iter().copied().collect();
-    let sea = |x: i32, y: i32| world.tile(x, y) == WTile::Water;
-    let is_port = |x: i32, y: i32| {
-        sea(x, y)
-            && [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                .iter()
-                .any(|&(dx, dy)| ports.contains(&(x + dx, y + dy)))
+    let is_port = |(x, y): Tile| {
+        [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .iter()
+            .any(|&(dx, dy)| ports.contains(&(x + dx, y + dy)))
     };
-    pathfind::bfs(start, SHIP_PATH_BUDGET, is_port, sea)
+    // A village's houses spread a few tiles from its center and the port is a
+    // tile beside one, so relax the distance by that much to stay admissible.
+    const PORT_SLACK: u32 = 8;
+    let centers: Vec<Tile> = cluster(ally_houses)
+        .iter()
+        .map(|v| {
+            let c = village_center(v);
+            (c.x.floor() as i32, c.y.floor() as i32)
+        })
+        .collect();
+    let h = |(x, y): Tile| {
+        centers
+            .iter()
+            .map(|&(cx, cy)| ((cx - x).abs() + (cy - y).abs()) as u32)
+            .min()
+            .unwrap_or(0)
+            .saturating_sub(PORT_SLACK)
+    };
+    sea_astar(world, seeds, is_port, h)
 }
 
-/// Plot a water-only route from `start` (a water tile) to a landing off the
-/// settling `anchor`: water within `SETTLE_LANDING_RADIUS` of it. Returns
-/// `None` when no such landing is reachable across water within the search
-/// budget, which also rules out shores that only front a landlocked lake.
-fn plan_sea_route_to_shore(world: &World, start: Tile, anchor: Tile) -> Option<Vec<Tile>> {
+/// The honest sea search under `plan_voyage` and `plan_trade_route`: a
+/// multi-source A* over water from every seed at once toward whatever
+/// `is_goal` accepts, guided by the heuristic `h` (a lower bound on the water
+/// distance to a goal). Returns the seed the winning route leaves from and the
+/// route from it (seed excluded, goal included); a seed that is itself a goal
+/// returns an empty route.
+///
+/// This search fixes three ways the old per-dock BFS went wrong:
+///
+/// - **Every seed enters one search** with cost zero, so the route leaves from
+///   whichever harbor truly connects, and the nearest one at that. A pond
+///   beside a house is just a seed that goes nowhere, not a wasted attempt.
+/// - **It is A*, not BFS.** The frontier is drawn toward the goal by `h`, so
+///   open ocean is crossed in a corridor and a winding river is followed down
+///   its course, instead of flooding a whole disc of sea and dying on the
+///   budget. Water steps all cost one, so the route is still a shortest one.
+/// - **It generates the chunks it explores.** Ungenerated terrain reads as
+///   default water, so a search over `World::tile` alone invents routes
+///   through land that doesn't exist yet (and misses nothing that does). Here
+///   every tile is generated before it is read, the same honesty
+///   `reachable_overseas_coasts` buys at world creation; clean chunks are
+///   evicted again later, so the memory cost is transient.
+fn sea_astar(
+    world: &mut World,
+    seeds: &[Tile],
+    is_goal: impl Fn(Tile) -> bool,
+    h: impl Fn(Tile) -> u32,
+) -> Option<(Tile, Vec<Tile>)> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
     use crate::world::Tile as WTile;
-    let sea = |x: i32, y: i32| world.tile(x, y) == WTile::Water;
-    let is_landing = |x: i32, y: i32| {
-        sea(x, y)
-            && (x - anchor.0).abs() <= SETTLE_LANDING_RADIUS
-            && (y - anchor.1).abs() <= SETTLE_LANDING_RADIUS
+
+    let sea = |w: &mut World, x: i32, y: i32| {
+        w.ensure(x.div_euclid(CHUNK), y.div_euclid(CHUNK));
+        w.tile(x, y) == WTile::Water
     };
-    pathfind::bfs(start, SHIP_PATH_BUDGET, is_landing, sea)
+
+    // (f = g + h, tile) in a min-heap; `best` holds the cheapest g seen per
+    // tile and `came_from` the tree to walk back (a seed maps to itself).
+    let mut open: BinaryHeap<Reverse<(u32, Tile)>> = BinaryHeap::new();
+    let mut best: HashMap<Tile, u32> = HashMap::default();
+    let mut came_from: HashMap<Tile, Tile> = HashMap::default();
+    for &d in seeds {
+        if best.insert(d, 0).is_none() {
+            came_from.insert(d, d);
+            open.push(Reverse((h(d), d)));
+        }
+    }
+
+    let mut expanded = 0usize;
+    while let Some(Reverse((f, t))) = open.pop() {
+        let g = best[&t];
+        if f > g + h(t) {
+            continue; // A stale heap entry; the tile was reached cheaper.
+        }
+        if is_goal(t) {
+            let mut path = Vec::new();
+            let mut cur = t;
+            while came_from[&cur] != cur {
+                path.push(cur);
+                cur = came_from[&cur];
+            }
+            path.reverse();
+            return Some((cur, path));
+        }
+        expanded += 1;
+        if expanded > SHIP_PATH_BUDGET {
+            return None;
+        }
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let n = (t.0 + dx, t.1 + dy);
+            if !sea(world, n.0, n.1) {
+                continue;
+            }
+            let ng = g + 1;
+            if best.get(&n).is_none_or(|&old| ng < old) {
+                best.insert(n, ng);
+                came_from.insert(n, t);
+                open.push(Reverse((ng + h(n), n)));
+            }
+        }
+    }
+    None
 }
 
 /// Advance a ship one step along its water route. Returns true once it has
@@ -5985,21 +6084,8 @@ mod tests {
 
     /// A launchable home port: open water within the player's harbor that has a
     /// sea route to an allied coast. `None` if the village can't ship anywhere.
-    fn find_player_port(game: &Game) -> Option<Tile> {
-        for &(hx, hy) in &game.player_house_tiles {
-            for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
-                for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
-                    let (wx, wy) = (hx + dx, hy + dy);
-                    if game.world.is_open_water(wx, wy)
-                        && plan_sea_route(&game.world, (wx, wy), &game.world.ally_house_tiles)
-                            .is_some()
-                    {
-                        return Some((wx, wy));
-                    }
-                }
-            }
-        }
-        None
+    fn find_player_port(game: &mut Game) -> Option<Tile> {
+        game.plan_harbor_route().map(|(dock, _)| dock)
     }
 
     #[test]
@@ -6014,7 +6100,7 @@ mod tests {
     fn ship_delivers_gold_at_the_allied_coast() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
-            let Some(port) = find_player_port(&game) else {
+            let Some(port) = find_player_port(&mut game) else {
                 continue;
             };
 
@@ -6063,7 +6149,7 @@ mod tests {
     fn settlers_found_an_overseas_colony() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
-            let Some(port) = find_player_port(&game) else {
+            let Some(port) = find_player_port(&mut game) else {
                 continue;
             };
             // A far shore the harbor's water genuinely reaches, kept clear of
@@ -6121,6 +6207,19 @@ mod tests {
                     .any(|a| a.kind == AlertKind::SettlersSailed),
                 "seed {seed}: no departure alert",
             );
+            // The route must be honest: every tile of it real, generated
+            // water, never the default-water of an ungenerated chunk (which
+            // would let the ship sail across land once the terrain appears).
+            for &(x, y) in &game.transports()[0].path {
+                assert!(
+                    game.world.is_generated(x, y),
+                    "seed {seed}: route through ungenerated terrain at ({x}, {y})",
+                );
+                assert!(
+                    game.world.tile(x, y) == crate::world::Tile::Water,
+                    "seed {seed}: route crosses land at ({x}, {y})",
+                );
+            }
             assert_eq!(
                 game.civilian_count(Faction::Player),
                 civs0 - SETTLER_CIVILIANS,
@@ -6255,7 +6354,7 @@ mod tests {
     fn troops_land_on_a_far_shore() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
-            let Some(port) = find_player_port(&game) else {
+            let Some(port) = find_player_port(&mut game) else {
                 continue;
             };
             let home = game.home_continent.clone().unwrap();
@@ -6509,7 +6608,7 @@ mod tests {
     fn autonomous_trade_dispatches_the_configured_load() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
-            if find_player_port(&game).is_none() {
+            if find_player_port(&mut game).is_none() {
                 continue;
             }
             // Nobody gathers or fights, so the dispatches below are the only
@@ -6846,7 +6945,7 @@ mod tests {
     fn save_round_trips_money_ally_houses_and_ships() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
-            let Some(port) = find_player_port(&game) else {
+            let Some(port) = find_player_port(&mut game) else {
                 continue;
             };
             let ally_houses = game.world.ally_house_tiles.len();
@@ -6955,7 +7054,7 @@ mod tests {
     fn warship_needs_water_a_dock_and_the_resources() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
-            let Some(port) = find_player_port(&game) else {
+            let Some(port) = find_player_port(&mut game) else {
                 continue;
             };
             game.build_mode = BuildMode::Warship;

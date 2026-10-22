@@ -131,8 +131,10 @@ kingdom crosses it.
 Pick **Settler ship** in the HUD's **Colonies** section and **left-click a far
 shore**. If the stockpile covers the cost (30 wood, 20 stone, 50 gold), the
 spot is clear of every standing settlement, and a sea route reaches it from
-your harbor, then **3 civilians board a ship** and set sail. At least 4
-civilians always stay home, so an expedition can't hollow out your economy.
+one of your harbors (a river winding down to the ocean counts), then **3
+civilians board a ship** and set sail from whichever harbor connects best. At
+least 4 civilians always stay home, so an expedition can't hollow out your
+economy.
 
 You'll know the order went through: a **blue banner is planted on the landing**
 the moment the ship casts off and stays there until it arrives, an
