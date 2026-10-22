@@ -13,10 +13,11 @@ use crate::atlas::MapColors;
 use crate::game::{
     AlertKind, AlertResponse, BRIDGE_WOOD_COST, BUILD_NEAR_RADIUS, BUILDER_WAGE, BuildMode,
     Faction, Game, GatherPriority, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
-    HUT_GOLD_COST, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, MINE_GOLD_COST, MINE_STONE_COST, Priority,
-    SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST,
-    SETTLER_WOOD_COST, STONE_PRICE, SettleRefusal, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST,
-    WARSHIP_GOLD_COST, WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
+    HUT_GOLD_COST, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, LaunchRefusal, MINE_GOLD_COST, MINE_STONE_COST,
+    Priority, SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST,
+    SETTLER_WOOD_COST, STONE_PRICE, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST,
+    TROOP_WOOD_COST, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST,
+    WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -467,7 +468,11 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ));
             // Say when an expedition is actually under way: the ship casts off
             // from the harbor, usually nowhere near where the click landed.
-            let at_sea = game.settlers().len();
+            let at_sea = game
+                .transports()
+                .iter()
+                .filter(|t| t.civilians > 0)
+                .count();
             if at_sea > 0 {
                 icon_label(
                     ui,
@@ -492,6 +497,36 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 ),
             );
             ui.small("Launch on open water by your village; it hunts pirates and shells enemies ashore.");
+            ui.radio_value(
+                &mut game.build_mode,
+                BuildMode::LandTroops,
+                (
+                    icon(ui, icons::SWORDS),
+                    format!(
+                        "Troop ship  ({TROOP_WOOD_COST} wood, {TROOP_STONE_COST} stone, {TROOP_GOLD_COST} gold)"
+                    ),
+                ),
+            );
+            ui.small(format!(
+                "Click a far shore and {TROOP_KNIGHTS} knights board a ship and land there, \
+                 ready to fight (levies stay home). Once a captured village is quiet, most of \
+                 the knights in it lay down their arms and settle it."
+            ));
+            let landing = game
+                .transports()
+                .iter()
+                .filter(|t| t.knights > 0)
+                .count();
+            if landing > 0 {
+                icon_label(
+                    ui,
+                    icons::SWORDS,
+                    format!(
+                        "{} at sea, each bound for its banner",
+                        plural(landing, "landing party", "landing parties")
+                    ),
+                );
+            }
             ui.radio_value(
                 &mut game.build_mode,
                 BuildMode::NavyRally,
@@ -527,6 +562,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 ui.small("Trade: load a ship on the coast and it sails to an allied shore for gold.");
                 ui.small("Autonomous trade keeps launching ships while the stockpile covers the load.");
                 ui.small("Settlers: click a far shore and a ship carries civilians over to found a new village.");
+                ui.small("Troop ships land knights on far shores; after a capture, most knights settle down as civilians.");
                 ui.small("Allies fight the enemy on their own, but never join your battles.");
                 ui.small("Civilians farm, mine, and build as needed; knights defend.");
                 ui.small("Builds take a few seconds; the builder's pay is part of the cost.");
@@ -698,7 +734,7 @@ fn minimap_ui(
     for s in game.ships() {
         painter.circle_filled(to_screen(s.pos), 1.5, Color32::WHITE);
     }
-    for s in game.settlers() {
+    for s in game.transports() {
         painter.circle_filled(to_screen(s.pos), 1.5, color32(colors.player));
         // The expedition's landing, so you can see where a colony is headed.
         let landing = Vec2::new(s.anchor.0 as f32 + 0.5, s.anchor.1 as f32 + 0.5);
@@ -924,24 +960,32 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                     color32([0.3, 0.55, 1.0, 1.0]),
                                     "Settlers set sail for the far shore",
                                 ),
-                                AlertKind::SettleRefused(why) => (
+                                AlertKind::TroopsSailed => (
+                                    icons::SWORDS,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "A landing party set sail for the far shore",
+                                ),
+                                AlertKind::LaunchRefused(why) => (
                                     icons::GLOBE,
                                     CAUTION,
                                     match why {
-                                        SettleRefusal::Stockpile => {
-                                            "Can't settle: the stockpile doesn't cover an expedition"
+                                        LaunchRefusal::Stockpile => {
+                                            "Can't launch: the stockpile doesn't cover an expedition"
                                         }
-                                        SettleRefusal::Civilians => {
+                                        LaunchRefusal::Civilians => {
                                             "Can't settle: too few civilians to spare a crew"
                                         }
-                                        SettleRefusal::NoShore => {
-                                            "Can't settle: no shore to land on there"
+                                        LaunchRefusal::Knights => {
+                                            "Can't land troops: too few standing knights (levies stay home)"
                                         }
-                                        SettleRefusal::TooClose => {
+                                        LaunchRefusal::NoShore => {
+                                            "Can't launch: no shore to land on there"
+                                        }
+                                        LaunchRefusal::TooClose => {
                                             "Can't settle: too close to a standing village"
                                         }
-                                        SettleRefusal::NoRoute => {
-                                            "Can't settle: no sea route reaches that shore"
+                                        LaunchRefusal::NoRoute => {
+                                            "Can't launch: no sea route reaches that shore"
                                         }
                                     },
                                 ),
@@ -950,6 +994,11 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                     ALARM,
                                     "Pirates sank a settler ship, all souls lost",
                                 ),
+                                AlertKind::TroopsSunk => (
+                                    icons::SWORDS,
+                                    ALARM,
+                                    "Pirates sank a troop ship, the knights lost at sea",
+                                ),
                                 AlertKind::WarshipSunk => {
                                     (icons::ANCHOR, ALARM, "Pirates sank a warship")
                                 }
@@ -957,6 +1006,16 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                     icons::GLOBE,
                                     color32([0.3, 0.55, 1.0, 1.0]),
                                     "Your settlers landed and founded a village",
+                                ),
+                                AlertKind::TroopsLanded => (
+                                    icons::SWORDS,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "Your knights are ashore on the far coast",
+                                ),
+                                AlertKind::KnightsSettled => (
+                                    icons::WHEAT,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "Knights laid down their arms and settled the village",
                                 ),
                                 AlertKind::LeviesPaid => (
                                     icons::COINS,

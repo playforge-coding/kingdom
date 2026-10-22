@@ -99,6 +99,23 @@ Territory changes hands per-village:
 This makes defense and offense the same skill: keep a presence in your villages,
 and strip the enemy's before you move in.
 
+### After the battle
+
+A captured village converts whole: its **houses become yours** on the spot, and
+the walls around it change hands with them. The army settles in right behind
+the conquest: of the knights standing in the village when it falls, **some lay
+down their arms and become civilians** so the place is worked rather than
+merely occupied. How many depends on the ground:
+
+- **Contested** (enemies still prowling nearby): **half** the knights settle
+  and the rest stay under arms.
+- **Quiet** (no enemy in the area, as when you walk into an **empty village**):
+  **everyone but a single garrison** settles, so the village starts producing
+  at once.
+
+Levies never settle (they're owed their pay back home), a lone conqueror always
+stays a knight, and an alert tells you when knights have settled a village.
+
 Once you hold several villages, the **[Realm panel](controls.md#the-realm-panel)**
 lists each one with its defenders and flags any that are under attack or left
 empty, and **[alerts](controls.md#alerts)** tell you when one is raided, lost, or
@@ -145,6 +162,30 @@ A few things to mind:
   existing village, yours, the enemy's, and the allies' alike.
 
 See **[Building](building.md#settler-ship)** for the full launch rules.
+
+## Invading overseas
+
+Colonies claim empty shores; **troop ships** take held ones. Pick **Troop
+ship** in the HUD's **Navy** section and **left-click a far shore**, right by
+an enemy village if you like: **4 of your standing knights board at the
+harbor** (levies stay home) and go ashore at the banner, ready to fight. On
+landing they **march on the nearest enemy village** within range on their own
+(a self-lifting rally, which never overrides a flag you planted yourself), then
+their ordinary instincts take over: they hunt the defenders, batter the huts
+and walls, and the moment the village stands undefended with your knights
+inside, it's [captured](#capturing-villages) and some of them
+[settle it](#after-the-battle). Land at an **empty** village and all of that
+happens the moment they walk in. Only a shore with no enemy village within
+marching reach leaves the party waiting at the beach for your rally flag.
+
+The same feedback applies as for settling: a banner on the landing, a departure
+alert, a landing-parties count in the Navy section, and a toast explaining any
+refused click. The same risk applies too: a troop ship is **unarmored**, and
+pirates send it down knights and all, so shell the coast clear with
+[warships](building.md#warship-the-navy) and escort the crossing. There's no
+return trip; the landing force wins its new home or holds the beach.
+
+See **[Building](building.md#troop-ship)** for the full launch rules.
 
 ## Scoring
 

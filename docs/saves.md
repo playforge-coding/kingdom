@@ -17,7 +17,8 @@ A save captures everything needed to reconstruct your session exactly:
 - **Every unit:** position, faction, role, and state.
 - **Cargo ships** currently at sea, with their load and payout, plus the
   **autonomous-trade switch** and the configured cargo load.
-- **Settler ships** under sail, with their crew and destination.
+- **Settler and troop ships** under sail, with everyone aboard and their
+  destination.
 - **Warships** afloat, with their remaining hull.
 - **Construction orders** in progress, your **builder zones**, and the
   **autonomous-building switch**.

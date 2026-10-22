@@ -363,6 +363,29 @@ const SETTLE_ANCHOR_RADIUS: i32 = 8;
 /// (Chebyshev) of the colony's anchor; the settlers wade the rest.
 const SETTLE_LANDING_RADIUS: i32 = 4;
 
+// Troop ships: the military transport. The same unarmored hull as a settler
+// ship, but it carries knights, may land right by an enemy village, and the
+// party goes ashore ready to fight. Knights ashore fall back on their usual
+// AI, so a landing near an enemy camp is an invasion without further orders.
+/// Materials and gold a troop landing costs: the hull and the crossing. The
+/// knights were already paid for when they were raised.
+pub const TROOP_WOOD_COST: u32 = 25;
+pub const TROOP_STONE_COST: u32 = 5;
+pub const TROOP_GOLD_COST: u32 = 20;
+/// Knights who board a troop ship. They go down with it if pirates sink it.
+pub const TROOP_KNIGHTS: usize = 4;
+/// How far from the beach a landing party will march to its objective: on
+/// going ashore, the knights are auto-rallied to the nearest enemy village
+/// within this range, so they invade instead of holding the beach. Beyond it
+/// they fall back on their ordinary instincts.
+const TROOP_MARCH_RANGE: f32 = 64.0;
+/// When the player captures a village, the battle is won and some knights
+/// standing in it hang up their swords to settle it as civilians. How many
+/// depends on whether enemies still prowl within this range of the village:
+/// contested ground keeps half the knights under arms, quiet ground keeps a
+/// single garrison and turns the rest to the fields.
+const SETTLE_DOWN_DANGER_RADIUS: f32 = 24.0;
+
 /// A new structure must be ordered within this many tiles of a house you
 /// already own. Generous enough to plan a whole district ahead of time, while
 /// still keeping the realm growing outward from what it holds.
@@ -580,6 +603,9 @@ pub enum BuildMode {
     /// Left-click a far shore to send a settler ship there: a few civilians
     /// board at the harbor, sail over, and found a new village on landing.
     Settle,
+    /// Left-click a far shore to land knights there: a party boards a troop
+    /// ship at the harbor and goes ashore ready to fight.
+    LandTroops,
     /// Left-click open water by the village to lay down a warship: it patrols
     /// the coast, hunts pirates, and shells enemies ashore.
     Warship,
@@ -676,20 +702,23 @@ pub struct Ship {
     pub facing: Dir,
 }
 
-/// A settler ship carrying civilians out to found a new village on a far shore.
-/// It follows a water route like a cargo ship; when it drops anchor off the
-/// chosen coast the settlers go ashore and raise the colony's first houses.
-pub struct SettlerShip {
+/// A transport carrying people out to a far shore: a **settler ship** full of
+/// civilians who found a new village on landing, or a **troop ship** full of
+/// knights who go ashore and fight. It follows a water route like a cargo
+/// ship, is just as unarmored, and everyone aboard is lost if pirates sink it.
+pub struct Transport {
     pub pos: Vec2,
     /// Water tiles leading to the landing (last tile is where it drops anchor).
     path: Vec<Tile>,
     path_cursor: usize,
-    /// The shore tile the colony is founded around. Public so the renderer can
+    /// The shore tile the voyage is bound for. Public so the renderer can
     /// plant the expedition's banner on the landing until the ship arrives.
     pub anchor: Tile,
-    /// Civilians aboard; they step ashore on landing, and are lost with the
-    /// ship if pirates sink it.
-    civilians: u32,
+    /// Civilians aboard; they found a colony where they land. Public (with
+    /// `knights`) so the renderer can tell the two missions apart.
+    pub civilians: u32,
+    /// Knights aboard; they go ashore ready to fight.
+    pub knights: u32,
     /// Seconds afloat, used to animate the gentle bob of the sprite.
     pub bob: f32,
     /// Heading, picking which directional sprite frame to draw.
@@ -810,14 +839,22 @@ pub enum AlertKind {
     CargoSunk,
     /// A settler expedition cast off from the harbor and is under sail.
     SettlersSailed,
-    /// A settle order couldn't go through, and this is why. Raised at the
-    /// click, so a click that does nothing is never a mystery.
-    SettleRefused(SettleRefusal),
+    /// A troop ship cast off from the harbor and is under sail.
+    TroopsSailed,
+    /// A settle or troop-landing order couldn't go through, and this is why.
+    /// Raised at the click, so a click that does nothing is never a mystery.
+    LaunchRefused(LaunchRefusal),
     /// Pirates sank a settler ship; the crew is lost with it.
     SettlersSunk,
+    /// Pirates sank a troop ship; the knights are lost with it.
+    TroopsSunk,
     WarshipSunk,
     /// Settlers landed and founded a new village on a far shore.
     ColonyFounded,
+    /// A landing party of knights went ashore on a far coast.
+    TroopsLanded,
+    /// After a capture, knights laid down their arms to settle the village.
+    KnightsSettled,
     /// The draft stood down and the levies were paid and went home to farm.
     LeviesPaid,
     /// The draft stood down but the treasury couldn't pay some levies, so they
@@ -825,17 +862,19 @@ pub enum AlertKind {
     LeviesDeserted,
 }
 
-/// Why a settle order was refused, carried on its `SettleRefused` toast so the
-/// player learns what to fix rather than guessing.
+/// Why a settle or troop-landing order was refused, carried on its
+/// `LaunchRefused` toast so the player learns what to fix rather than guessing.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum SettleRefusal {
+pub enum LaunchRefusal {
     /// The stockpile doesn't cover the expedition's wood, stone, or gold.
     Stockpile,
-    /// Too few civilians would stay home after the crew boards.
+    /// Too few civilians would stay home after a settler crew boards.
     Civilians,
-    /// No shore to settle near the click.
+    /// Too few standing knights to form a landing party (levies don't ship out).
+    Knights,
+    /// No shore to land on near the click.
     NoShore,
-    /// The landing would crowd a standing settlement.
+    /// Settling only: the landing would crowd a standing settlement.
     TooClose,
     /// No sea route reaches that shore from the harbor.
     NoRoute,
@@ -872,7 +911,9 @@ impl AlertKind {
     /// The one-click response this kind of alert offers, if any.
     pub fn response(self) -> Option<AlertResponse> {
         match self {
-            AlertKind::CargoSunk | AlertKind::SettlersSunk => Some(AlertResponse::SummonWarship),
+            AlertKind::CargoSunk | AlertKind::SettlersSunk | AlertKind::TroopsSunk => {
+                Some(AlertResponse::SummonWarship)
+            }
             _ => None,
         }
     }
@@ -931,8 +972,9 @@ pub struct Game {
     pub auto_trade: bool,
     /// Countdown to the next autonomous-trade check. Transient.
     trade_timer: f32,
-    /// Settler ships at sea, sailing out to found new villages.
-    settlers: Vec<SettlerShip>,
+    /// Transports at sea: settler ships out to found new villages and troop
+    /// ships carrying knights to a far shore.
+    transports: Vec<Transport>,
     /// The player's navy: warships patrolling the water.
     warships: Vec<Warship>,
     /// Pirate raiders prowling the open ocean (transient, not saved).
@@ -1175,7 +1217,7 @@ impl Game {
             ships: Vec::new(),
             auto_trade: false,
             trade_timer: 0.0,
-            settlers: Vec::new(),
+            transports: Vec::new(),
             warships: Vec::new(),
             pirates: Vec::new(),
             cannonballs: Vec::new(),
@@ -1651,7 +1693,7 @@ impl Game {
         self.resolve_captures();
         self.age_alerts(dt);
         self.update_ships(dt);
-        self.update_settlers(dt);
+        self.update_transports(dt);
         self.update_pirates(dt);
         // Sail the navy after the pirates so warships react to this frame's
         // pirate positions, then fly every cannonball both sides fired.
@@ -1686,75 +1728,117 @@ impl Game {
     /// Sail the settler ships. Like the cargo fleet they are always simulated;
     /// when one drops anchor at the end of its route the settlers go ashore and
     /// found their colony.
-    fn update_settlers(&mut self, dt: f32) {
+    fn update_transports(&mut self, dt: f32) {
         let mut i = 0;
-        while i < self.settlers.len() {
-            self.settlers[i].bob += dt;
-            let s = &mut self.settlers[i];
+        while i < self.transports.len() {
+            self.transports[i].bob += dt;
+            let s = &mut self.transports[i];
             let arrived =
                 advance_vessel(&mut s.pos, &mut s.facing, &s.path, &mut s.path_cursor, dt);
             if arrived {
-                let s = self.settlers.swap_remove(i);
-                self.land_settlers(s);
+                let s = self.transports.swap_remove(i);
+                self.land_transport(s);
             } else {
                 i += 1;
             }
         }
     }
 
-    /// The settlers have dropped anchor: raise the colony's first houses on the
-    /// shore and put the crew ashore beside them. The new village then grows on
-    /// its own like any other, and its coast doubles as a harbor.
-    fn land_settlers(&mut self, s: SettlerShip) {
+    /// The transport has dropped anchor. Settlers raise the colony's first
+    /// houses on the shore and get to work beside them; a landing party of
+    /// knights simply goes ashore, and their ordinary AI takes the fight from
+    /// there. The new colony then grows on its own like any other village, and
+    /// its coast doubles as a harbor.
+    fn land_transport(&mut self, s: Transport) {
         let (ax, ay) = s.anchor;
         self.world.ensure_region(ax - 8, ay - 8, ax + 8, ay + 8);
-        // Spaced houses first (the pattern enemy and allied camps use); if the
-        // shore turned out cramped, take whatever open grass is closest.
+        // Settlers found a colony. Spaced houses first (the pattern enemy and
+        // allied camps use); if the shore turned out cramped, take whatever
+        // open grass is closest.
         let mut houses: Vec<Tile> = Vec::new();
-        'spaced: for ry in -4..=4i32 {
-            for rx in -4..=4i32 {
-                if houses.len() >= COLONY_HOUSES {
-                    break 'spaced;
-                }
-                if rx.rem_euclid(3) != 0 || ry.rem_euclid(3) != 0 {
-                    continue;
-                }
-                if self.world.is_open_grass(ax + rx, ay + ry) {
-                    houses.push((ax + rx, ay + ry));
-                }
-            }
-        }
-        'loose: for ry in -5..=5i32 {
-            for rx in -5..=5i32 {
-                if houses.len() >= COLONY_HOUSES {
-                    break 'loose;
-                }
-                let t = (ax + rx, ay + ry);
-                if self.world.is_open_grass(t.0, t.1) && !houses.contains(&t) {
-                    houses.push(t);
+        if s.civilians > 0 {
+            'spaced: for ry in -4..=4i32 {
+                for rx in -4..=4i32 {
+                    if houses.len() >= COLONY_HOUSES {
+                        break 'spaced;
+                    }
+                    if rx.rem_euclid(3) != 0 || ry.rem_euclid(3) != 0 {
+                        continue;
+                    }
+                    if self.world.is_open_grass(ax + rx, ay + ry) {
+                        houses.push((ax + rx, ay + ry));
+                    }
                 }
             }
+            'loose: for ry in -5..=5i32 {
+                for rx in -5..=5i32 {
+                    if houses.len() >= COLONY_HOUSES {
+                        break 'loose;
+                    }
+                    let t = (ax + rx, ay + ry);
+                    if self.world.is_open_grass(t.0, t.1) && !houses.contains(&t) {
+                        houses.push(t);
+                    }
+                }
+            }
+            for &(x, y) in &houses {
+                self.world.set_house(x, y, true);
+                self.player_house_tiles.push((x, y));
+            }
         }
-        for &(x, y) in &houses {
-            self.world.set_house(x, y, true);
-            self.player_house_tiles.push((x, y));
-        }
-        // The crew steps ashore beside the new houses (or onto the anchor tile
-        // itself in the freak case that nothing could be raised).
-        for k in 0..s.civilians as usize {
+        // Everyone steps ashore beside the new houses (or onto the anchor tile
+        // itself when there are none, as on a troop landing).
+        let roster = (0..s.civilians).map(|_| Job::Civilian);
+        let roster = roster.chain((0..s.knights).map(|_| Job::Knight));
+        for (k, job) in roster.enumerate() {
             let home = houses
                 .get(k % houses.len().max(1))
                 .copied()
                 .unwrap_or(s.anchor);
             let spot = adjacent_walkable(&self.world, home.0, home.1).unwrap_or(s.anchor);
-            self.entities
-                .push(Entity::new(Faction::Player, Job::Civilian, spot));
+            self.entities.push(Entity::new(Faction::Player, job, spot));
         }
-        log::info!(
-            "settlers landed at ({ax}, {ay}) and founded a colony of {} houses",
-            houses.len()
-        );
-        self.push_alert(AlertKind::ColonyFounded, tile_center(s.anchor));
+        if s.civilians > 0 {
+            log::info!(
+                "settlers landed at ({ax}, {ay}) and founded a colony of {} houses",
+                houses.len()
+            );
+            self.push_alert(AlertKind::ColonyFounded, tile_center(s.anchor));
+        } else {
+            log::info!("{} knights landed ashore at ({ax}, {ay})", s.knights);
+            self.push_alert(AlertKind::TroopsLanded, tile_center(s.anchor));
+            self.march_on_nearest_village(tile_center(s.anchor));
+        }
+    }
+
+    /// Point a fresh landing party at its objective: an automatic rally (the
+    /// same self-lifting kind the retake alarm uses) on the nearest enemy
+    /// village within marching range of the beach, answered only by knights
+    /// near the landing. Without it, a party dropped on a quiet stretch of
+    /// coast would hold the beach instead of fighting. A flag the player
+    /// planted themselves is never overridden, and a shore with no enemy
+    /// village in range leaves the knights to their own instincts.
+    fn march_on_nearest_village(&mut self, from: Vec2) {
+        let player_flag = self.rally_point.is_some() && self.rally_response.is_none();
+        if player_flag {
+            return;
+        }
+        let target = self
+            .world
+            .enemy_house_tiles
+            .iter()
+            .map(|&h| tile_center(h))
+            .min_by(|a, b| {
+                a.distance_squared(from)
+                    .total_cmp(&b.distance_squared(from))
+            });
+        if let Some(t) = target
+            && t.distance(from) <= TROOP_MARCH_RANGE
+        {
+            self.rally_point = Some(t);
+            self.rally_response = Some(AUTO_RALLY_RADIUS);
+            log::info!("the landing party is marching on the village at {t}");
+        }
     }
 
     /// Ships currently at sea, for rendering.
@@ -1762,9 +1846,9 @@ impl Game {
         &self.ships
     }
 
-    /// Settler ships at sea, for rendering.
-    pub fn settlers(&self) -> &[SettlerShip] {
-        &self.settlers
+    /// Transports (settler and troop ships) at sea, for rendering.
+    pub fn transports(&self) -> &[Transport] {
+        &self.transports
     }
 
     /// The player's warships, for rendering.
@@ -1805,7 +1889,7 @@ impl Game {
             // a warship), else wander.
             let target = nearest_player_vessel(
                 &self.ships,
-                &self.settlers,
+                &self.transports,
                 &self.warships,
                 pp,
                 PIRATE_DETECT_RANGE,
@@ -1850,7 +1934,7 @@ impl Game {
                 let pp = self.pirates[i].pos;
                 if let Some(t) = nearest_player_vessel(
                     &self.ships,
-                    &self.settlers,
+                    &self.transports,
                     &self.warships,
                     pp,
                     PIRATE_FIRE_RANGE,
@@ -1907,17 +1991,22 @@ impl Game {
             self.ships.swap_remove(si);
             return true;
         }
-        // Settler ships are as unarmored as cargo ships: one hit sinks them,
-        // settlers and all. The lost crew counts toward the realm's casualties.
+        // Transports are as unarmored as cargo ships: one hit sinks them, crew
+        // and all. The lost souls count toward the realm's casualties.
         if let Some(si) = self
-            .settlers
+            .transports
             .iter()
             .position(|s| (s.pos - bp).length_squared() < r2)
         {
-            log::info!("a settler ship was sunk by pirates, all souls lost at sea!");
-            self.push_alert(AlertKind::SettlersSunk, self.settlers[si].pos);
-            self.units_lost += self.settlers[si].civilians;
-            self.settlers.swap_remove(si);
+            let s = self.transports.swap_remove(si);
+            let kind = if s.civilians > 0 {
+                AlertKind::SettlersSunk
+            } else {
+                AlertKind::TroopsSunk
+            };
+            log::info!("a transport was sunk by pirates, all souls lost at sea!");
+            self.push_alert(kind, s.pos);
+            self.units_lost += s.civilians + s.knights;
             return true;
         }
         if let Some(wi) = self
@@ -2203,6 +2292,7 @@ impl Game {
                     self.world.reown_walls_near(x, y, 4, 1, 0);
                 }
                 self.push_alert(AlertKind::VillageCaptured, village_center(&village));
+                self.settle_captured_village(&village);
                 changed = true;
             }
         }
@@ -2229,6 +2319,68 @@ impl Game {
             self.world.rescan_enemy_houses();
             self.rescan_player_houses();
         }
+    }
+
+    /// The battle for a captured village is won, so some of the knights
+    /// standing in it hang up their swords and settle it as civilians; the
+    /// conquering army becomes the village. How many stand down depends on
+    /// whether the ground is still contested: with enemies prowling within
+    /// `SETTLE_DOWN_DANGER_RADIUS`, half the knights (rounded down) settle and
+    /// the rest stay under arms; on quiet ground everyone but a single
+    /// garrison does, so a village taken without a fight is worked, not
+    /// occupied. The knights nearest the village's heart settle first, levies
+    /// never do (they're owed their pay at home), and a lone conqueror always
+    /// stays a knight.
+    fn settle_captured_village(&mut self, village: &[Tile]) {
+        let center = village_center(village);
+        let danger2 = SETTLE_DOWN_DANGER_RADIUS * SETTLE_DOWN_DANGER_RADIUS;
+        let contested = self
+            .entities
+            .iter()
+            .any(|e| e.faction == Faction::Enemy && e.pos.distance_squared(center) <= danger2);
+        let r2 = CAPTURE_RADIUS * CAPTURE_RADIUS;
+        let mut inside: Vec<usize> = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.faction == Faction::Player
+                    && e.job == Job::Knight
+                    && !e.levy
+                    && village
+                        .iter()
+                        .any(|&h| e.pos.distance_squared(tile_center(h)) <= r2)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let n = inside.len();
+        if n <= 1 {
+            return;
+        }
+        let keep = if contested { n - n / 2 } else { 1 };
+        inside.sort_by(|&a, &b| {
+            self.entities[a]
+                .pos
+                .distance_squared(center)
+                .total_cmp(&self.entities[b].pos.distance_squared(center))
+        });
+        for &i in inside.iter().take(n - keep) {
+            let e = &mut self.entities[i];
+            let max_hp = max_hp_for(e.faction, Job::Civilian);
+            e.hp = (e.hp / e.max_hp * max_hp).max(1.0);
+            e.max_hp = max_hp;
+            e.job = Job::Civilian;
+            e.build_site = None;
+            e.target_node = None;
+            e.mine_target = None;
+            e.harvest_timer = 0.0;
+            e.set_path(Vec::new());
+        }
+        log::info!(
+            "{} knights settled the captured village as civilians, {keep} stand garrison",
+            n - keep
+        );
+        self.push_alert(AlertKind::KnightsSettled, center);
     }
 
     /// True when the village has no `owner` defender within capture range but at
@@ -2867,6 +3019,7 @@ impl Game {
                 true
             }
             BuildMode::Settle => self.order_settlers((x, y)),
+            BuildMode::LandTroops => self.order_troops((x, y)),
             BuildMode::Warship => {
                 // Lay down a warship in open water within the home harbor. No
                 // sea route is needed, since it patrols rather than voyaging.
@@ -2930,33 +3083,33 @@ impl Game {
     /// every refusal says why with a toast at the click, so a click that does
     /// nothing is never a mystery.
     fn order_settlers(&mut self, t: Tile) -> bool {
-        let refuse = |game: &mut Game, why: SettleRefusal| {
-            game.push_alert(AlertKind::SettleRefused(why), tile_center(t));
+        let refuse = |game: &mut Game, why: LaunchRefusal| {
+            game.push_alert(AlertKind::LaunchRefused(why), tile_center(t));
             false
         };
         if self.wood < SETTLER_WOOD_COST
             || self.stone < SETTLER_STONE_COST
             || self.money < SETTLER_GOLD_COST
         {
-            return refuse(self, SettleRefusal::Stockpile);
+            return refuse(self, LaunchRefusal::Stockpile);
         }
         if self.civilian_count(Faction::Player) < SETTLER_CIVILIANS + SETTLER_CIVILIANS_SPARED {
-            return refuse(self, SettleRefusal::Civilians);
+            return refuse(self, LaunchRefusal::Civilians);
         }
         let Some(anchor) = find_land_anchor(&mut self.world, t, SETTLE_ANCHOR_RADIUS) else {
-            return refuse(self, SettleRefusal::NoShore);
+            return refuse(self, LaunchRefusal::NoShore);
         };
         // Keep colonies clear of every existing settlement, your own included:
         // settling is for new ground, not for crowding a village that stands.
         if !self.village_spot_clear(anchor) {
-            return refuse(self, SettleRefusal::TooClose);
+            return refuse(self, LaunchRefusal::TooClose);
         }
         let Some((port, path)) = self.plan_settler_route(anchor) else {
-            return refuse(self, SettleRefusal::NoRoute);
+            return refuse(self, LaunchRefusal::NoRoute);
         };
         let crew = self.board_settlers(tile_center(port));
         if crew == 0 {
-            return refuse(self, SettleRefusal::Civilians);
+            return refuse(self, LaunchRefusal::Civilians);
         }
         self.wood -= SETTLER_WOOD_COST;
         self.stone -= SETTLER_STONE_COST;
@@ -2965,12 +3118,13 @@ impl Game {
         let facing = path
             .first()
             .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
-        self.settlers.push(SettlerShip {
+        self.transports.push(Transport {
             pos: start,
             path,
             path_cursor: 0,
             anchor,
             civilians: crew,
+            knights: 0,
             bob: 0.0,
             facing,
         });
@@ -2979,6 +3133,91 @@ impl Game {
         // landing (drawn from `anchor`) marks the destination until it docks.
         self.push_alert(AlertKind::SettlersSailed, start);
         true
+    }
+
+    /// Order a troop landing on the shore around the clicked tile: find the
+    /// coast, a harbor launch with a sea route there, and a party of knights to
+    /// board, then debit the cost and set sail. Unlike settling, troops may
+    /// land right by an enemy village; that's rather the point. Refusals say
+    /// why with a toast at the click, like a settle order's.
+    fn order_troops(&mut self, t: Tile) -> bool {
+        let refuse = |game: &mut Game, why: LaunchRefusal| {
+            game.push_alert(AlertKind::LaunchRefused(why), tile_center(t));
+            false
+        };
+        if self.wood < TROOP_WOOD_COST
+            || self.stone < TROOP_STONE_COST
+            || self.money < TROOP_GOLD_COST
+        {
+            return refuse(self, LaunchRefusal::Stockpile);
+        }
+        // Only standing knights ship out: levies are militia serving on credit,
+        // owed their pay at home, not an expeditionary force.
+        let standing = self
+            .entities
+            .iter()
+            .filter(|e| e.faction == Faction::Player && e.job == Job::Knight && !e.levy)
+            .count();
+        if standing < TROOP_KNIGHTS {
+            return refuse(self, LaunchRefusal::Knights);
+        }
+        let Some(anchor) = find_land_anchor(&mut self.world, t, SETTLE_ANCHOR_RADIUS) else {
+            return refuse(self, LaunchRefusal::NoShore);
+        };
+        let Some((port, path)) = self.plan_settler_route(anchor) else {
+            return refuse(self, LaunchRefusal::NoRoute);
+        };
+        let party = self.board_knights(tile_center(port));
+        if party == 0 {
+            return refuse(self, LaunchRefusal::Knights);
+        }
+        self.wood -= TROOP_WOOD_COST;
+        self.stone -= TROOP_STONE_COST;
+        self.money -= TROOP_GOLD_COST;
+        let start = tile_center(port);
+        let facing = path
+            .first()
+            .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
+        self.transports.push(Transport {
+            pos: start,
+            path,
+            path_cursor: 0,
+            anchor,
+            civilians: 0,
+            knights: party,
+            bob: 0.0,
+            facing,
+        });
+        self.push_alert(AlertKind::TroopsSailed, start);
+        true
+    }
+
+    /// Board `TROOP_KNIGHTS` of the player's standing knights (never levies)
+    /// onto a troop ship launching at `port`, removing them from the realm; the
+    /// ones nearest the harbor answer the call. Returns how many boarded. The
+    /// caller has already checked enough are standing.
+    fn board_knights(&mut self, port: Vec2) -> u32 {
+        let mut aboard: Vec<usize> = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.faction == Faction::Player && e.job == Job::Knight && !e.levy)
+            .map(|(i, _)| i)
+            .collect();
+        aboard.sort_by(|&a, &b| {
+            self.entities[a]
+                .pos
+                .distance_squared(port)
+                .total_cmp(&self.entities[b].pos.distance_squared(port))
+        });
+        aboard.truncate(TROOP_KNIGHTS);
+        // Remove from the highest index down so the earlier ones stay valid.
+        aboard.sort_unstable_by(|a, b| b.cmp(a));
+        let party = aboard.len() as u32;
+        for i in aboard {
+            self.entities.swap_remove(i);
+        }
+        party
     }
 
     /// A launch spot for a settler ship: open water within `SHIP_NEAR_RADIUS`
@@ -4844,7 +5083,7 @@ fn open_sea(world: &World, x: i32, y: i32) -> bool {
 /// of `from`, if any. What a pirate hunts and shells.
 fn nearest_player_vessel(
     ships: &[Ship],
-    settlers: &[SettlerShip],
+    transports: &[Transport],
     warships: &[Warship],
     from: Vec2,
     max: f32,
@@ -4858,7 +5097,7 @@ fn nearest_player_vessel(
             pos = Some(s.pos);
         }
     }
-    for s in settlers {
+    for s in transports {
         let d = (s.pos - from).length();
         if d < best {
             best = d;
@@ -5027,9 +5266,10 @@ const MAGIC: &[u8; 4] = b"KGDM";
 /// version listed in `from_bytes` loadable: new sections go at the tail of the
 /// blob and default to empty when a save predates them, so upgrading the game
 /// never strands a player's world.
-const VERSION: u8 = 14;
+const VERSION: u8 = 15;
 /// Oldest save version `from_bytes` still accepts. Version 13 is the last
-/// format before settler ships; it simply has no settler section to read.
+/// format before transports (it has no transport section to read), and v14's
+/// transports carried only settlers (no per-ship knight count).
 const MIN_VERSION: u8 = 13;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
@@ -5288,15 +5528,16 @@ impl Game {
             }
         }
 
-        // Settler ships, appended at the tail (new in v14): a v13 save is
-        // simply this file without the section.
-        wu32(&mut b, self.settlers.len() as u32);
-        for s in &self.settlers {
+        // Transports, appended at the tail (new in v14): a v13 save is simply
+        // this file without the section. v15 adds the knights aboard.
+        wu32(&mut b, self.transports.len() as u32);
+        for s in &self.transports {
             wf32(&mut b, s.pos.x);
             wf32(&mut b, s.pos.y);
             wi32(&mut b, s.anchor.0);
             wi32(&mut b, s.anchor.1);
             wu32(&mut b, s.civilians);
+            wu32(&mut b, s.knights);
             wf32(&mut b, s.bob);
             wu32(&mut b, s.path_cursor as u32);
             wu32(&mut b, s.path.len() as u32);
@@ -5553,15 +5794,17 @@ impl Game {
             chunks.push(((cx, cy), chunk));
         }
 
-        // Settler ships live at the tail of the blob; a save from before v14
-        // predates them and simply has none to load.
-        let mut settlers = Vec::new();
+        // Transports live at the tail of the blob; a save from before v14
+        // predates them and simply has none to load, and a v14 ship carried
+        // only settlers, so its knight count defaults to zero.
+        let mut transports = Vec::new();
         if version >= 14 {
             let count = r.u32()? as usize;
             for _ in 0..count {
                 let pos = Vec2::new(r.f32()?, r.f32()?);
                 let anchor = (r.i32()?, r.i32()?);
                 let civilians = r.u32()?;
+                let knights = if version >= 15 { r.u32()? } else { 0 };
                 let bob = r.f32()?;
                 let path_cursor = r.u32()? as usize;
                 let plen = r.u32()? as usize;
@@ -5573,12 +5816,13 @@ impl Game {
                 let facing = path
                     .get(path_cursor)
                     .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - pos));
-                settlers.push(SettlerShip {
+                transports.push(Transport {
                     pos,
                     path,
                     path_cursor,
                     anchor,
                     civilians,
+                    knights,
                     bob,
                     facing,
                 });
@@ -5632,7 +5876,7 @@ impl Game {
             ships,
             auto_trade,
             trade_timer: 0.0,
-            settlers,
+            transports,
             warships,
             pirates: Vec::new(),
             cannonballs: Vec::new(),
@@ -5852,7 +6096,7 @@ mod tests {
             assert!(
                 game.alerts()
                     .iter()
-                    .any(|a| a.kind == AlertKind::SettleRefused(SettleRefusal::Civilians)),
+                    .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::Civilians)),
                 "seed {seed}: the refusal should say why",
             );
 
@@ -5869,7 +6113,7 @@ mod tests {
                 game.try_build(tile_center(shore)),
                 "seed {seed}: expedition refused",
             );
-            assert_eq!(game.settlers().len(), 1);
+            assert_eq!(game.transports().len(), 1);
             assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
             assert!(
                 game.alerts()
@@ -5887,11 +6131,14 @@ mod tests {
             game.entities.clear();
             let sim = (port.0 - 6, port.1 - 6, port.0 + 6, port.1 + 6);
             let mut steps = 0;
-            while !game.settlers().is_empty() && steps < 20_000 {
+            while !game.transports().is_empty() && steps < 20_000 {
                 game.update(0.1, sim);
                 steps += 1;
             }
-            assert!(game.settlers().is_empty(), "seed {seed}: ship never landed");
+            assert!(
+                game.transports().is_empty(),
+                "seed {seed}: ship never landed"
+            );
             assert_eq!(
                 game.player_house_tiles.len(),
                 houses0 + COLONY_HOUSES,
@@ -5922,44 +6169,312 @@ mod tests {
     }
 
     #[test]
-    fn settler_ships_survive_a_save() {
+    fn transports_survive_a_save() {
         let mut game = Game::new(3);
-        game.settlers.push(SettlerShip {
+        game.transports.push(Transport {
             pos: Vec2::new(12.5, -3.5),
             path: vec![(13, -4), (14, -4), (15, -5)],
             path_cursor: 1,
             anchor: (18, -6),
             civilians: SETTLER_CIVILIANS as u32,
+            knights: 0,
             bob: 1.25,
+            facing: Dir::Right,
+        });
+        game.transports.push(Transport {
+            pos: Vec2::new(10.5, -2.5),
+            path: vec![(11, -3), (12, -3)],
+            path_cursor: 0,
+            anchor: (16, -8),
+            civilians: 0,
+            knights: TROOP_KNIGHTS as u32,
+            bob: 0.5,
             facing: Dir::Right,
         });
         let bytes = game.to_bytes(CAM);
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
-        assert_eq!(loaded.settlers().len(), 1);
-        let (a, b) = (&game.settlers[0], &loaded.settlers[0]);
-        assert_eq!(a.pos, b.pos);
-        assert_eq!(a.anchor, b.anchor);
-        assert_eq!(a.civilians, b.civilians);
-        assert_eq!(a.path, b.path);
-        assert_eq!(a.path_cursor, b.path_cursor);
+        assert_eq!(loaded.transports().len(), 2);
+        for (a, b) in game.transports.iter().zip(loaded.transports()) {
+            assert_eq!(a.pos, b.pos);
+            assert_eq!(a.anchor, b.anchor);
+            assert_eq!(a.civilians, b.civilians);
+            assert_eq!(a.knights, b.knights);
+            assert_eq!(a.path, b.path);
+            assert_eq!(a.path_cursor, b.path_cursor);
+        }
     }
 
     #[test]
-    fn loads_a_v13_save_without_a_settler_section() {
-        // A v13 file is exactly a v14 file minus the settler section: the
-        // section sits at the tail, so strip the empty count and relabel the
-        // version byte. Loading it must still work, with no settlers at sea.
+    fn loads_a_v13_save_without_a_transport_section() {
+        // A v13 file is exactly a current file minus the transport section:
+        // the section sits at the tail, so strip the empty count and relabel
+        // the version byte. Loading it must still work, with nothing at sea.
         let game = Game::new(3);
         let mut bytes = game.to_bytes(CAM);
         assert_eq!(&bytes[bytes.len() - 4..], &[0, 0, 0, 0]);
         bytes.truncate(bytes.len() - 4);
         bytes[4] = 13;
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v13 save no longer loads");
-        assert!(loaded.settlers().is_empty());
+        assert!(loaded.transports().is_empty());
         assert_eq!(loaded.money, game.money);
         assert_eq!(
             loaded.player_house_tiles.len(),
             game.player_house_tiles.len()
+        );
+    }
+
+    #[test]
+    fn loads_a_v14_save_whose_settlers_carry_no_knights() {
+        // v14 transport records predate the knight count. Hand-roll one onto a
+        // save and relabel the version: it must load as a pure settler ship.
+        let game = Game::new(3);
+        let mut bytes = game.to_bytes(CAM);
+        bytes.truncate(bytes.len() - 4); // drop the empty transport section
+        bytes[4] = 14;
+        wu32(&mut bytes, 1);
+        wf32(&mut bytes, 12.5); // pos
+        wf32(&mut bytes, -3.5);
+        wi32(&mut bytes, 18); // anchor
+        wi32(&mut bytes, -6);
+        wu32(&mut bytes, 3); // civilians (no knight count in v14)
+        wf32(&mut bytes, 1.25); // bob
+        wu32(&mut bytes, 0); // path cursor
+        wu32(&mut bytes, 2); // path
+        wi32(&mut bytes, 13);
+        wi32(&mut bytes, -4);
+        wi32(&mut bytes, 14);
+        wi32(&mut bytes, -4);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v14 save no longer loads");
+        assert_eq!(loaded.transports().len(), 1);
+        assert_eq!(loaded.transports()[0].civilians, 3);
+        assert_eq!(loaded.transports()[0].knights, 0);
+        assert_eq!(loaded.transports()[0].anchor, (18, -6));
+    }
+
+    #[test]
+    fn troops_land_on_a_far_shore() {
+        for seed in 0..16 {
+            let mut game = Game::new(seed);
+            let Some(port) = find_player_port(&game) else {
+                continue;
+            };
+            let home = game.home_continent.clone().unwrap();
+            let mut coasts =
+                reachable_overseas_coasts(&mut game.world, port, &home, SHIP_PATH_BUDGET);
+            coasts.sort_by_key(|&(x, y)| (x - port.0).abs() + (y - port.1).abs());
+            let Some(shore) = coasts.first().copied() else {
+                continue;
+            };
+            game.enemy_found_timer = f32::INFINITY;
+            game.ally_found_timer = f32::INFINITY;
+            game.wood = TROOP_WOOD_COST;
+            game.stone = TROOP_STONE_COST;
+            game.money = TROOP_GOLD_COST;
+            game.build_mode = BuildMode::LandTroops;
+
+            // A fresh realm has too few standing knights for a landing party,
+            // so the order is refused with nothing spent, and says why.
+            assert!(!game.try_build(tile_center(shore)), "seed {seed}");
+            assert_eq!(
+                (game.wood, game.stone, game.money),
+                (TROOP_WOOD_COST, TROOP_STONE_COST, TROOP_GOLD_COST),
+            );
+            assert!(
+                game.alerts()
+                    .iter()
+                    .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::Knights)),
+                "seed {seed}: the refusal should say why",
+            );
+
+            // Muster a party and sail. Levies must not count toward it.
+            let (hx, hy) = game.player_house_tiles[0];
+            let spot = adjacent_walkable(&game.world, hx, hy).expect("no walkable tile by home");
+            for _ in 0..TROOP_KNIGHTS {
+                game.entities
+                    .push(Entity::new(Faction::Player, Job::Knight, spot));
+            }
+            assert!(
+                game.try_build(tile_center(shore)),
+                "seed {seed}: landing refused",
+            );
+            assert_eq!(game.transports().len(), 1);
+            assert_eq!(game.transports()[0].knights, TROOP_KNIGHTS as u32);
+            assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
+            assert!(
+                game.alerts()
+                    .iter()
+                    .any(|a| a.kind == AlertKind::TroopsSailed),
+                "seed {seed}: no departure alert",
+            );
+
+            // Strip the land war so the voyage is all that runs, then sail.
+            game.entities.clear();
+            let houses0 = game.player_house_tiles.len();
+            let sim = (port.0 - 6, port.1 - 6, port.0 + 6, port.1 + 6);
+            let mut steps = 0;
+            while !game.transports().is_empty() && steps < 20_000 {
+                game.update(0.1, sim);
+                steps += 1;
+            }
+            assert!(
+                game.transports().is_empty(),
+                "seed {seed}: ship never landed"
+            );
+            let knights_ashore = game
+                .entities
+                .iter()
+                .filter(|e| e.faction == Faction::Player && e.job == Job::Knight)
+                .count();
+            assert_eq!(
+                knights_ashore, TROOP_KNIGHTS,
+                "seed {seed}: the party should go ashore",
+            );
+            assert_eq!(
+                game.player_house_tiles.len(),
+                houses0,
+                "seed {seed}: a troop landing must not found a colony",
+            );
+            assert!(
+                game.alerts()
+                    .iter()
+                    .any(|a| a.kind == AlertKind::TroopsLanded),
+                "seed {seed}: no landing alert",
+            );
+            return;
+        }
+        panic!("no test seed had a reachable overseas shore");
+    }
+
+    #[test]
+    fn knights_settle_a_captured_village() {
+        let mut game = Game::new(3);
+        game.entities.clear();
+
+        // Plant an enemy village on quiet ground away from home, then stand
+        // four knights in it with its defenders gone: it flips to the player,
+        // and with no enemy anywhere near, all but one knight settles down.
+        let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
+        let before = game.world.enemy_house_tiles.len();
+        game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
+        let houses: Vec<Tile> = game.world.enemy_house_tiles[before..].to_vec();
+        assert!(!houses.is_empty(), "camp failed to plant");
+        for k in 0..4 {
+            let (hx, hy) = houses[k % houses.len()];
+            let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot by the camp");
+            game.entities
+                .push(Entity::new(Faction::Player, Job::Knight, spot));
+        }
+        game.resolve_captures();
+        for &(x, y) in &houses {
+            assert!(game.world.is_house(x, y), "a captured house didn't convert");
+        }
+        assert!(
+            game.player_house_tiles.iter().any(|t| houses.contains(t)),
+            "captured houses never joined the player's",
+        );
+        assert_eq!(game.civilian_count(Faction::Player), 3);
+        assert_eq!(
+            game.entities
+                .iter()
+                .filter(|e| e.job == Job::Knight)
+                .count(),
+            1,
+            "quiet ground keeps a single garrison",
+        );
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::KnightsSettled),
+            "no settling alert",
+        );
+    }
+
+    #[test]
+    fn contested_ground_keeps_more_knights_armed() {
+        let mut game = Game::new(3);
+        game.entities.clear();
+
+        let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
+        let before = game.world.enemy_house_tiles.len();
+        game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
+        let houses: Vec<Tile> = game.world.enemy_house_tiles[before..].to_vec();
+        assert!(!houses.is_empty(), "camp failed to plant");
+        for k in 0..4 {
+            let (hx, hy) = houses[k % houses.len()];
+            let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot by the camp");
+            game.entities
+                .push(Entity::new(Faction::Player, Job::Knight, spot));
+        }
+        // An enemy prowling just outside the village (but out of capture
+        // range) keeps the ground contested, so only half stand down.
+        let lurker = (anchor.0 + 12, anchor.1);
+        game.world
+            .ensure_region(lurker.0 - 2, lurker.1 - 2, lurker.0 + 2, lurker.1 + 2);
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Knight, lurker));
+
+        game.resolve_captures();
+        assert_eq!(game.civilian_count(Faction::Player), 2);
+        assert_eq!(
+            game.entities
+                .iter()
+                .filter(|e| e.faction == Faction::Player && e.job == Job::Knight)
+                .count(),
+            2,
+            "contested ground keeps half the knights under arms",
+        );
+    }
+
+    #[test]
+    fn a_landing_party_marches_on_the_nearest_village() {
+        let mut game = Game::new(3);
+        game.entities.clear();
+        let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
+        let troops = |anchor| Transport {
+            pos: tile_center(anchor),
+            path: Vec::new(),
+            path_cursor: 0,
+            anchor,
+            civilians: 0,
+            knights: TROOP_KNIGHTS as u32,
+            bob: 0.0,
+            facing: Dir::Right,
+        };
+
+        // Going ashore raises an automatic rally on the nearest enemy village,
+        // so the party invades instead of holding the beach.
+        game.land_transport(troops(anchor));
+        let rally = game.rally_point.expect("the landing gave no march order");
+        assert!(
+            game.rally_response.is_some(),
+            "the march must be a self-lifting auto rally, not a player flag",
+        );
+        let from = tile_center(anchor);
+        let expected = game
+            .world
+            .enemy_house_tiles
+            .iter()
+            .map(|&h| tile_center(h))
+            .min_by(|a, b| {
+                a.distance_squared(from)
+                    .total_cmp(&b.distance_squared(from))
+            })
+            .expect("the world starts with enemy villages");
+        assert_eq!(
+            rally, expected,
+            "the march should head for the nearest village"
+        );
+        assert!(expected.distance(from) <= TROOP_MARCH_RANGE);
+
+        // A flag the player planted themselves is never overridden.
+        let own = tile_center((0, 0));
+        game.rally_point = Some(own);
+        game.rally_response = None;
+        game.land_transport(troops(anchor));
+        assert_eq!(
+            game.rally_point,
+            Some(own),
+            "a landing stole the player's flag"
         );
     }
 

@@ -236,6 +236,35 @@ your harbor and rallies the fleet to the wreck (see
 
 See **[Units & Combat](units.md#the-navy)**.
 
+## :lucide-swords: Troop ship
+
+| | |
+| --- | --- |
+| **Cost** | 25 wood, 5 stone, 20 gold, and 4 standing knights who board the ship |
+| **Where** | Click the far shore to land on; the ship launches from your harbor on its own |
+
+The military transport, for **[invading overseas](gameplay.md#invading-overseas)**.
+It launches like a [settler ship](#settler-ship): pick **Troop ship** in the
+HUD's **Navy** section, **left-click a distant shore**, and if the stockpile
+covers the cost and a sea route reaches the landing, the **4 standing knights
+nearest the harbor board** and set sail. **Levies never ship out**; they're
+militia owed their pay at home. A banner marks the landing, an alert announces
+the departure, and any refusal says why with a toast at the click.
+
+Unlike settling, a troop landing may be **right by an enemy village**; that's
+the point. The knights go ashore at the banner and **march on the nearest
+enemy village in range on their own** (never overriding a rally flag you
+planted yourself); from there their ordinary AI takes over: they fight
+whoever's there, press on to the huts and walls, and capture the village the
+moment it stands undefended with them inside. Once it's taken, **some of them
+settle it as civilians** (see
+**[After the battle](gameplay.md#after-the-battle)**).
+
+!!! warning "The party sails with the hull"
+    A troop ship is as unarmored as a cargo ship: pirates sink it with a
+    **single hit**, knights and all, and the sinking's alert offers the usual
+    one-click **Summon warship**. Clear the lanes or escort the crossing.
+
 ## :lucide-flag: Rally
 
 Not a building, but it lives in the same list. See

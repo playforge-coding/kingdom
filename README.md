@@ -83,6 +83,13 @@ both natively and in the browser (via WebGL) using **Trunk**.
   home), sail over, and **found a new village** with its first two houses on
   landing. The colony grows like any other village, its coast works as a
   harbor, and pirates can sink the expedition, crew and all.
+- **Invasions.** Take held shores with a **troop ship**: left-click a far coast,
+  even right by an enemy village, and **4 standing knights board and land
+  there** ready to fight (levies stay home). On landing they **march on the
+  nearest enemy village** in range on their own. Capture works as usual, and once a
+  captured village's ground is quiet, **most of the knights in it lay down
+  their arms and settle it as civilians** (half, while enemies still prowl
+  nearby), so conquest feeds the economy instead of just the map.
 - **Pirates.** Rare **pirate ships** roam the open ocean, hunt your ships, and
   fire **cannonballs**; a hit **sinks a cargo ship and its cargo**. They keep to
   the deep sea, never enter rivers or lakes, and hold a **standoff** to shell

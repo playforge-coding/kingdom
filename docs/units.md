@@ -49,6 +49,15 @@ Knights are your military. They:
   structure, or your rally flag crosses water, knights lay the bridges
   themselves as they go: each tile costs **3 wood** but **no gold**, since
   they're already paid for serving.
+- **Ship out overseas.** Where no bridge can reach, a
+  [troop ship](building.md#troop-ship) carries a party of standing knights to a
+  far shore (levies stay home). On landing they march on the nearest enemy
+  village within range by themselves; ashore, they fight exactly as they do at
+  home.
+- **Settle what they conquer.** When a village is captured, some of the knights
+  standing in it lay down their arms and become civilians; on quiet ground all
+  but a single garrison do (see
+  [After the battle](gameplay.md#after-the-battle)).
 - Follow the **rally flag** when you set one.
 
 Lean on the **:lucide-swords: Military priority** to raise more of them when you're under
@@ -101,14 +110,14 @@ rather than a faction you fight on land. They:
   lanes cross.
 - **Hunt your vessels.** A pirate that spots one of your
   [cargo ships](building.md#ship-goods), [settler ships](building.md#settler-ship),
-  or [warships](building.md#warship-the-navy)
+  [troop ships](building.md#troop-ship), or [warships](building.md#warship-the-navy)
   gives chase and, once in range, opens fire with **cannonballs**. It holds a
   short **standoff** and shells from there rather than piling onto the hull.
 - **Sink cargo on a hit.** A cannonball that strikes a cargo ship **sinks it,
-  cargo and all**. The goods are lost at sea and no gold is paid. A settler
-  ship fares the same, and worse: its **crew is lost with it**, counted among
-  your casualties. Warships are armored and instead lose **hull** with each
-  hit, sinking only when it runs out.
+  cargo and all**. The goods are lost at sea and no gold is paid. Settler and
+  troop ships fare the same, and worse: **everyone aboard is lost with the
+  hull**, counted among your casualties. Warships are armored and instead lose
+  **hull** with each hit, sinking only when it runs out.
 
 They're uncommon, but a laden ship is a tempting target. Losing a stone-heavy
 hold to pirates stings, so time your shipments or send a warship escort.
