@@ -127,6 +127,12 @@ pub struct Entity {
 
     path: Vec<Tile>,
     path_cursor: usize,
+    /// For a knight: the current route was planned through trees, rocks or
+    /// open water it means to clear as it comes to them. A route planned over
+    /// clear ground never is, so anything that springs up on it afterward (a
+    /// sapling maturing, say) is walked around rather than hacked down.
+    /// Transient, like the route itself.
+    breaching: bool,
     target_node: Option<Tile>,
     harvest_timer: f32,
     repath: f32,
@@ -179,6 +185,7 @@ impl Entity {
             facing: Dir::Down,
             path: Vec::new(),
             path_cursor: 0,
+            breaching: false,
             target_node: None,
             harvest_timer: 0.0,
             repath: 0.0,
@@ -214,6 +221,9 @@ impl Entity {
     fn set_path(&mut self, p: Vec<Tile>) {
         self.path = p;
         self.path_cursor = 0;
+        // A fresh route is assumed clear until its planner says otherwise
+        // (see `plan_march`).
+        self.breaching = false;
     }
     /// May this unit plan a route now? Freely once its replan clock has lapsed,
     /// or immediately on finishing a path — unless a failure backoff (a clock
@@ -491,10 +501,28 @@ const KNIGHT_DEMOLISH_TIME: f32 = 5.0;
 /// way to its target. The span costs wood but no gold: knights are already
 /// paid for serving.
 const KNIGHT_BRIDGE_TIME: f32 = 2.5;
+/// What a knight's route planner charges, in tiles of walking, for a step onto
+/// a tree or rock it would have to hack through first: the step itself plus
+/// however far it could have walked in the time the hacking takes. Pricing
+/// obstacles this way is what makes a knight go around one whenever the detour
+/// is quicker, and only cut through when it genuinely isn't.
+const KNIGHT_DEMOLISH_STEP_COST: u32 = 1 + (KNIGHT_DEMOLISH_TIME * KNIGHT_SPEED) as u32;
+/// Likewise for a step onto open water the knight would have to bridge first.
+const KNIGHT_BRIDGE_STEP_COST: u32 = 1 + (KNIGHT_BRIDGE_TIME * KNIGHT_SPEED) as u32;
+/// Search budget (tiles expanded) for a knight's route. One weighted search
+/// replaces the three plain ones a knight used to run in turn (over clear
+/// ground, then through trees, then across water), so it gets their combined
+/// budget.
+const KNIGHT_PATH_BUDGET: usize = 3 * PATH_BUDGET;
 const COMBAT_RANGE: f32 = 0.9;
 /// How close a knight must get to the rally flag to count as "arrived" (which
 /// then lifts the flag for the whole group).
 const RALLY_ARRIVE_RADIUS: f32 = 2.5;
+/// The most steps a tile whose center lies within `RALLY_ARRIVE_RADIUS` of the
+/// flag can be from the flag's own tile (the offsets (2, 1) and (1, 2) are the
+/// farthest that still fit). Lets a knight's route search steer by the flag
+/// without ever overestimating the distance left.
+const RALLY_ARRIVE_MANHATTAN: u32 = 3;
 /// An auto-raised rally (lost village, raided hut) only calls knights within
 /// this range of the flag, so one brushfire doesn't drag the whole realm's
 /// army across the map. A flag the player plants calls everyone.
@@ -5071,29 +5099,26 @@ fn soldier_behavior(
     }
 
     // A rally flag overrides combat: knights break off whatever they're doing and
-    // rush the flag, punching through trees/rocks if that's the only way in. The
-    // flag is lifted the instant the group arrives (see `clear_reached_rally`).
+    // rush the flag, cutting through trees/rocks (or bridging water) only where
+    // that's quicker than any way around. The flag is lifted the instant the
+    // group arrives (see `clear_reached_rally`).
     if let Some(r) = rally {
         if e.may_replan() {
             e.repath = REPLAN_TICK;
+            // Any tile close enough to count as arriving will do. The flag
+            // itself may well sit on a tree or in the water, and there's no
+            // sense clearing that just to stand on the exact spot.
+            let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
+            let goal = |x: i32, y: i32| tile_center((x, y)).distance_squared(r) <= r2;
+            // Steer by the flag: a tile within the arrive radius is at most
+            // `RALLY_ARRIVE_MANHATTAN` steps from the flag's own tile, so this
+            // never overestimates and the search stays cheap over open ground.
             let rt = (r.x.floor() as i32, r.y.floor() as i32);
-            let goal = |x: i32, y: i32| (x, y) == rt;
-            if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
-                world.walkable_for(owner, x, y)
-            }) {
-                e.set_path(p);
-            } else if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
-                world.walkable_for_siege(owner, x, y)
-            }) {
-                e.set_path(p);
-            } else if bridge_ok
-                && let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
-                    amphibious(world, owner, x, y)
-                })
-            {
-                // Only water bars the way: take the crossing and bridge it.
-                e.set_path(p);
-            } else {
+            let steer = |x: i32, y: i32| {
+                let d = ((x - rt.0).abs() + (y - rt.1).abs()) as u32;
+                d.saturating_sub(RALLY_ARRIVE_MANHATTAN)
+            };
+            if !plan_march(world, e, owner, bridge_ok, goal, steer) {
                 // The flag is unreachable from here; don't re-exhaust the
                 // search budget every replan tick while it stands.
                 e.set_path(Vec::new());
@@ -5129,33 +5154,12 @@ fn soldier_behavior(
                 || adjacent_enemy_wall(world, owner, (x, y)).is_some()
                 || adjacent_enemy_hut(world, owner, (x, y)).is_some()
         };
-        // Engage the nearest reachable foe or enemy structure. Prefer a clear
-        // route; only smash through trees/rocks when there's genuinely no clear
-        // way in.
-        let engaged = (!foes.is_empty() || siege) && {
-            if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
-                world.walkable_for(owner, x, y)
-            }) {
-                e.set_path(p);
-                true
-            } else if let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
-                world.walkable_for_siege(owner, x, y)
-            }) {
-                e.set_path(p);
-                true
-            } else if bridge_ok
-                && let Some(p) = pathfind::bfs(e.tile(), PATH_BUDGET, goal, |x, y| {
-                    amphibious(world, owner, x, y)
-                })
-            {
-                // No way in by land at all: route across the water and lay
-                // bridges as we come to it.
-                e.set_path(p);
-                true
-            } else {
-                false
-            }
-        };
+        // Engage the quickest-reached foe or enemy structure, counting any
+        // hacking or bridging on the way in with the walking, so an obstacle is
+        // only cut through when going around would take longer. Many targets
+        // may be in play, so there's nothing to steer by.
+        let engaged =
+            (!foes.is_empty() || siege) && plan_march(world, e, owner, bridge_ok, goal, |_, _| 0);
         if !engaged {
             // Nothing reachable to fight or raze: drop any stale path so we idle
             // rather than grinding down trees along a dead route.
@@ -5179,19 +5183,72 @@ fn soldier_behavior(
     advance_or_hack(world, e, bridge_ok, dt)
 }
 
-/// Can a knight pass `(x, y)` given it may also bridge open water? Everything
-/// siege-walkable plus bare water; what a knight's last-resort route search
-/// treats as passable.
-fn amphibious(world: &World, owner: u8, x: i32, y: i32) -> bool {
-    world.walkable_for_siege(owner, x, y) || world.is_open_water(x, y)
+/// What a knight's route planner charges for stepping onto `(x, y)`, in tiles
+/// of walking: one for clear ground, the hacking time for a tree or rock, the
+/// bridging time for open water when the knight may lay bridges (`bridge_ok`),
+/// and `None` for what it can't pass at all (buildings, caves, huts, enemy
+/// walls, water it can't bridge, ungenerated terrain).
+fn knight_step_cost(world: &World, owner: u8, bridge_ok: bool, x: i32, y: i32) -> Option<u32> {
+    if world.walkable_for(owner, x, y) {
+        Some(1)
+    } else if world.walkable_for_siege(owner, x, y) {
+        Some(KNIGHT_DEMOLISH_STEP_COST)
+    } else if bridge_ok && world.is_open_water(x, y) {
+        Some(KNIGHT_BRIDGE_STEP_COST)
+    } else {
+        None
+    }
+}
+
+/// Route a knight to the quickest-reached tile satisfying `goal`, with the time
+/// it would spend hacking through trees and rocks (and, when `bridge_ok`,
+/// laying bridge tiles over open water) priced in alongside the walking (see
+/// `knight_step_cost`). The knight therefore goes around an obstacle whenever
+/// that's quicker and only cuts through when it isn't. The goal is reached by
+/// standing on it, so a goal tile blocked by a tree costs the hacking too.
+/// `steer` is an admissible estimate of the remaining cost (zero when there's
+/// nothing to steer by). Sets the route on `e`, noting whether it runs through
+/// anything the knight will have to clear; returns false when no goal is
+/// reachable within the search budget.
+fn plan_march(
+    world: &World,
+    e: &mut Entity,
+    owner: u8,
+    bridge_ok: bool,
+    goal: impl Fn(i32, i32) -> bool,
+    steer: impl Fn(i32, i32) -> u32,
+) -> bool {
+    let Some(p) = pathfind::cheapest(
+        e.tile(),
+        KNIGHT_PATH_BUDGET,
+        goal,
+        |x, y| knight_step_cost(world, owner, bridge_ok, x, y),
+        steer,
+    ) else {
+        return false;
+    };
+    let breaching = p.iter().any(|&(x, y)| !world.walkable_for(owner, x, y));
+    e.set_path(p);
+    e.breaching = breaching;
+    true
 }
 
 /// Advance a knight along its path: if the next step is a tree/rock, start
-/// hacking it down; if it's open water (an amphibious route), start laying a
-/// bridge tile over it; otherwise walk the step.
+/// hacking it down; if it's open water (a route planned across it), start
+/// laying a bridge tile over it; otherwise walk the step. Only a route planned
+/// through such obstacles (see `plan_march`) is cleared, though: on a route
+/// planned over clear ground, something that has sprung up since (a sapling
+/// that matured, say) is walked around instead, by planning afresh.
 fn advance_or_hack(world: &World, e: &mut Entity, bridge_ok: bool, dt: f32) -> Option<StepEvent> {
     if !e.path_done() {
         let (wx, wy) = e.path[e.path_cursor];
+        let blocked = world.node(wx, wy).is_some() || world.is_open_water(wx, wy);
+        if blocked && !e.breaching {
+            e.set_path(Vec::new());
+            e.repath = 0.0;
+            set_anim(e, Anim::Idle, dt);
+            return None;
+        }
         if world.node(wx, wy).is_some() {
             e.target_node = Some((wx, wy));
             e.harvest_timer = KNIGHT_DEMOLISH_TIME;
@@ -6586,6 +6643,7 @@ impl Game {
                 facing,
                 path: Vec::new(),
                 path_cursor: 0,
+                breaching: false,
                 target_node: None,
                 harvest_timer: 0.0,
                 repath: 0.0,
@@ -8332,6 +8390,141 @@ mod tests {
             })
         });
         assert!(bridged, "a broke realm must still get its knight bridges");
+    }
+
+    /// A flat, treeless lane from the origin out to x = 16 (forced land near
+    /// the start), with a knight at the origin and enough civilians at home
+    /// that it isn't recalled to farm. Returns the knight's index.
+    fn knight_on_a_lane(game: &mut Game) -> usize {
+        game.entities.clear();
+        game.world.ensure_region(-6, -10, 20, 10);
+        for y in -6..=6 {
+            for x in -2..=16 {
+                game.world.clear_node(x, y);
+            }
+        }
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Knight, (0, 0)));
+        let (hx, hy) = game.player_houses()[0];
+        for _ in 0..4 {
+            let t = adjacent_walkable(&game.world, hx, hy).expect("room by the house");
+            game.entities
+                .push(Entity::new(Faction::Player, Job::Civilian, t));
+        }
+        0
+    }
+
+    /// Does the knight stand on a tile next to `t`?
+    fn knight_beside(game: &Game, k: usize, t: Tile) -> bool {
+        adjacent(game.entities[k].tile(), t)
+    }
+
+    #[test]
+    fn knights_walk_around_a_tree_rather_than_cut_through_it() {
+        let mut game = Game::new(1);
+        let k = knight_on_a_lane(&mut game);
+        // An enemy hut down the lane with a single tree on the straight line
+        // to it. The tree is the nearest tile beside the hut, but the knight
+        // can stand on any of the other three by walking two tiles further.
+        let hut = (10, 0);
+        game.world
+            .set_hut(hut.0, hut.1, owner_of(Faction::Enemy), HUT_MAX_HP);
+        game.hut_tiles.push(hut);
+        game.world.set_node(9, 0, Resource::Wood, 5);
+
+        let sim = (-6, -10, 20, 10);
+        let mut arrived = false;
+        for _ in 0..400 {
+            game.update(0.1, sim);
+            assert!(
+                game.world.node(9, 0).is_some(),
+                "the knight cut down a tree it could have walked around"
+            );
+            if knight_beside(&game, k, hut) {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "the knight never reached the hut");
+    }
+
+    #[test]
+    fn knights_reach_a_flag_from_the_shore_rather_than_bridge_to_it() {
+        let mut game = Game::new(1);
+        let k = knight_on_a_lane(&mut game);
+        game.wood = 50;
+        // A small pond with the rally flag planted in the middle of it. The
+        // flag counts as reached from its bank, so there's nothing to bridge.
+        for y in -1..=1 {
+            for x in 9..=11 {
+                game.world.carve_water(x, y);
+            }
+        }
+        game.build_mode = BuildMode::Rally;
+        assert!(game.try_build(tile_center((10, 0))));
+
+        let sim = (-6, -10, 20, 10);
+        let mut arrived = false;
+        for _ in 0..400 {
+            game.update(0.1, sim);
+            if game.rally_point.is_none() {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "the knight never reached the flag");
+        let bridged = (-1..=1).any(|y| (9..=11).any(|x| game.world.is_bridge(x, y)));
+        assert!(
+            !bridged,
+            "the knight bridged water it could reach the flag without"
+        );
+        assert!(
+            game.world
+                .walkable(game.entities[k].tile().0, game.entities[k].tile().1),
+            "the knight should be standing on the bank"
+        );
+    }
+
+    #[test]
+    fn a_tree_sprouting_on_a_clear_route_is_walked_around() {
+        let mut game = Game::new(1);
+        let k = knight_on_a_lane(&mut game);
+        let hut = (14, 0);
+        game.world
+            .set_hut(hut.0, hut.1, owner_of(Faction::Enemy), HUT_MAX_HP);
+        game.hut_tiles.push(hut);
+
+        let sim = (-6, -10, 20, 10);
+        // Let the knight set off, then drop a tree on the very next tile of
+        // its route, as a sapling maturing there would.
+        let mut sprouted = None;
+        for _ in 0..20 {
+            game.update(0.1, sim);
+            let e = &game.entities[k];
+            if !e.path_done() {
+                let next = e.path[e.path_cursor];
+                if next != e.tile() && game.world.is_open_grass(next.0, next.1) {
+                    game.world.set_node(next.0, next.1, Resource::Wood, 5);
+                    sprouted = Some(next);
+                    break;
+                }
+            }
+        }
+        let tree = sprouted.expect("the knight never set off down the lane");
+
+        let mut arrived = false;
+        for _ in 0..400 {
+            game.update(0.1, sim);
+            assert!(
+                game.world.node(tree.0, tree.1).is_some(),
+                "the knight hacked down a tree that sprang up on a clear route"
+            );
+            if knight_beside(&game, k, hut) {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "the knight never reached the hut");
     }
 
     #[test]

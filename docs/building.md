@@ -65,9 +65,10 @@ one); the builder then works outward as the tiles are finished. Builders are
 allowed past their usual home leash to reach a bridge site.
 
 !!! note "Knights bridge for themselves"
-    Your **knights** also lay bridges on their own: when the only way to a foe,
-    an enemy structure, or your rally flag is across water, they span it tile by
-    tile as they march. Each tile draws the usual **3 wood** from the stockpile
+    Your **knights** also lay bridges on their own: when crossing water is the
+    quickest way to a foe, an enemy structure, or your rally flag (counting the
+    time each span takes to lay), they bridge it tile by tile as they march.
+    Each tile draws the usual **3 wood** from the stockpile
     but **no gold**, since knights are already paid for serving. The tiles they
     lay join your bridge network like any you ordered yourself. With no wood in
     the stockpile they simply can't cross.

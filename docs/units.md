@@ -7,7 +7,10 @@ comments: true
 You don't move units directly. Each one follows its own AI according to its
 role; you influence them through [priorities, buildings, and the rally flag](controls.md).
 All units navigate the tile grid with **BFS pathfinding**, routing around water,
-buildings, walls, and resource nodes, or across bridges.
+buildings, walls, and resource nodes, or across bridges. Knights, who can also
+cut through trees and rocks and lay bridges, plan with a **weighted search**
+instead, so that clearing an obstacle is weighed against walking around it (see
+[Knights](#knights)).
 
 ## Civilians
 
@@ -45,10 +48,18 @@ Knights are your military. They:
   foe left to chase, knights march on the nearest enemy **huts and walls** and
   hack them down rather than idling at home.
 - **Rush to defend** an occupied hut or a village that comes under attack.
-- **Bridge their own way across water.** When the only route to a foe, an enemy
-  structure, or your rally flag crosses water, knights lay the bridges
-  themselves as they go: each tile costs **3 wood** but **no gold**, since
-  they're already paid for serving.
+- **Go around before cutting through.** A knight can hack down a tree or rock
+  in its way, but it takes a while and yields nothing, so its route planner
+  prices every obstacle at the distance it could have walked in that time and
+  only cuts through when that's genuinely quicker than any way around. A route
+  planned over clear ground is never hacked at: if a sapling matures on it, the
+  knight plans afresh and walks around.
+- **Bridge their own way across water.** When bridging to a foe, an enemy
+  structure, or your rally flag is quicker than any way around (or there is no
+  way around at all), knights lay the bridges themselves as they go: each tile
+  costs **3 wood** but **no gold**, since they're already paid for serving.
+  Bridging is priced like hacking, by the time it takes, so a flag planted just
+  off the shore is reached from the bank, not bridged to.
 - **Ship out overseas.** Where no bridge can reach, a
   [troop ship](building.md#troop-ship) carries a party of standing knights to a
   far shore (levies stay home). On landing they march on the nearest enemy
