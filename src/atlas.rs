@@ -205,6 +205,12 @@ pub fn build() -> Atlas {
     ));
     let cargo_ship = load(include_bytes!("../assets/textures/entities/cargo_ship.png"));
     let warship = load(include_bytes!("../assets/textures/entities/warship.png"));
+    let enemy_warship = load(include_bytes!(
+        "../assets/textures/entities/enemy_warship.png"
+    ));
+    let ally_warship = load(include_bytes!(
+        "../assets/textures/entities/ally_warship.png"
+    ));
     let pirate_ship = load(include_bytes!(
         "../assets/textures/entities/pirate_ship.png"
     ));
@@ -240,6 +246,11 @@ pub fn build() -> Atlas {
         // Warship: 4 columns x 1 row of 32x32 frames, facing left, up, down,
         // right (same column order as the other ships).
         Source::sheet("warship", warship, 4, 1),
+        // The enemy's and the allies' hulls, same layout: enemy warships and
+        // raid ships wear the red one, allied escorts and the mercenaries'
+        // ships the green one.
+        Source::sheet("enemy_warship", enemy_warship, 4, 1),
+        Source::sheet("ally_warship", ally_warship, 4, 1),
         // Pirate ship: 4 columns x 1 row of 32x32 frames, facing left, up,
         // down, right (in that column order).
         Source::sheet("pirate_ship", pirate_ship, 4, 1),
@@ -305,5 +316,33 @@ fn pack(mut sources: Vec<Source>) -> Atlas {
         rgba: atlas.into_raw(),
         rects,
         sheets,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_hull_the_renderer_draws_is_packed() {
+        // The renderer picks a ship's sheet by its owner, so each faction's
+        // hull must be in the atlas or the first enemy raid would panic
+        // mid-frame rather than here.
+        let atlas = build();
+        for sheet in [
+            "cargo_ship",
+            "warship",
+            "enemy_warship",
+            "ally_warship",
+            "pirate_ship",
+        ] {
+            for col in 0..4 {
+                let uv = atlas.frame_uv(sheet, col, 0);
+                assert!(
+                    uv[2] > uv[0] && uv[3] > uv[1],
+                    "{sheet} frame {col} is empty"
+                );
+            }
+        }
     }
 }

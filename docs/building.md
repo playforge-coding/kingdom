@@ -238,14 +238,18 @@ Once afloat, a warship acts entirely on its own:
 - **Hunts pirates.** It seeks out the nearest pirate, closes to firing range,
   and **shells it with cannonballs** until the raider sinks. A warship out-guns
   and out-lasts a lone pirate, so a small navy keeps your shipping lanes clear.
+- **Hunts enemy ships.** An enemy troop ship or warship in sight gets the
+  same treatment; see **[The enemy navy](units.md#the-enemy-navy)**.
 - **Bombards enemies ashore.** It also fires on enemy units on land, standing
   **off in the water** to shell the coast. It never beaches itself, so it can
   only reach foes near the shoreline.
 - **Keeps its distance.** Like pirates, a warship holds a standoff off its
   target rather than ramming it.
 
-Warships have a **hull bar** and can be **sunk by pirate fire**, so escort a
-valuable convoy with more than one.
+Warships have a **hull bar** and can be **sunk by pirate or enemy fire**, so
+escort a valuable convoy with more than one. The Navy section also offers to
+**[hire an allied escort](gameplay.md#hiring-an-escort)** for gold: an allied
+warship that crosses to your harbor and sails with the navy.
 
 You can also pull the navy somewhere yourself with the **navy rally flag**
 (see **[Units & Combat](units.md#rallying-your-warships)**), and a sunk cargo

@@ -99,7 +99,7 @@ left-click modes on the water:
 | ---- | ---- | ----- |
 | **:lucide-ship: Ship goods** | the wood + stone you load | Sails to an allied coast for gold; launches by your village |
 | **:lucide-globe: Settler ship** | 30 wood, 20 stone, 50 gold, 3 civilians | Click a far shore; the crew sails over and founds a new village there |
-| **:lucide-anchor: Warship** | 20 wood, 10 stone, 60 gold | Patrols, hunts pirates, shells the enemy coast; launches by your village |
+| **:lucide-anchor: Warship** | 20 wood, 10 stone, 60 gold | Patrols, hunts pirates and enemy ships, shells the enemy coast; launches by your village |
 | **:lucide-swords: Troop ship** | 25 wood, 5 stone, 20 gold, 4 knights | Click a far shore; the party lands there ready to fight (levies stay home) |
 | **:lucide-flag: Rally warships** | Free | Click open water and every warship sails there; the flag lifts when one arrives |
 
@@ -109,7 +109,12 @@ covers the configured load in full, sailing from a different one of your
 coastal villages each time (see
 **[Autonomous trade](building.md#autonomous-trade)**). A
 **:lucide-x: Clear navy rally** button appears in the Navy section while the
-navy's flag is planted.
+navy's flag is planted. The Navy section also holds the **:lucide-anchor: Hire
+allied escort** button (60 gold), which brings an allied warship over to sail
+with your navy (see **[Hiring an escort](gameplay.md#hiring-an-escort)**),
+counts the escorts sailing with the fleet, and, while the enemy has ships out,
+shows in red how many **enemy troop ships and warships** are at sea (see
+**[The enemy navy](units.md#the-enemy-navy)**).
 
 ### Buttons
 
@@ -129,11 +134,13 @@ kingdom:
 
 - **Minimap:** your villages and everything around them. Villages show as dots
   in their faction's color (bigger for more houses), cargo ships as white
-  specks, settler ships, troop ships, and warships blue, pirates black, the
-  knights' rally flag as a yellow ring, and the navy's rally flag and each
-  expedition's landing as blue ones. The
-  white box is what's on screen. Land that hasn't been explored yet is dark.
-  **Click or drag** on the minimap to move the camera there.
+  specks, transports and warships in their owner's color (your settler and
+  troop ships and warships blue, a hired company or escort green, an enemy
+  raid and its escort red), pirates black, the knights' rally flag as a yellow
+  ring, the navy's rally flag as a blue one, and each voyage's landing as a
+  ring in its owner's color, so a red ring is where an enemy raid will come
+  ashore. The white box is what's on screen. Land that hasn't been explored
+  yet is dark. **Click or drag** on the minimap to move the camera there.
 - **:lucide-map: Overview (M):** toggles the [overview](#the-overview).
 - **Village count:** how many villages you, the enemy, and the allies hold.
 - **Your villages:** one row per village, with where it is relative to the
@@ -154,15 +161,21 @@ saying what happened and where:
 - a village has **fallen** (your knights rally to retake it)
 - you **captured** a village
 - knights **settled** a captured village, laying down their arms as civilians
-- pirates **sank** a cargo ship, a settler or troop ship (everyone aboard lost
-  with it), or a warship
+- hostile guns (a pirate's or an enemy warship's) **sank** a cargo ship, a
+  settler or troop ship (everyone aboard lost with it), a warship of yours, or
+  a hired allied escort
 - your settlers or a landing party **set sail** (the ship launches from your
   harbor, which is usually off screen when you click the far shore)
-- a settle or troop-landing order was **refused**, saying why: no shore there,
-  too close to a standing village (settling only), no sea route, or the cost or
-  crew not covered
+- a settle, troop-landing, or hiring order was **refused**, saying why: no
+  shore there, too close to a standing village (settling only), no sea route,
+  the cost or crew not covered, or (escorts) the allies have none left to spare
 - your settlers **landed** and founded a new village, or your knights went
   **ashore** on a far coast
+- an **enemy fleet set sail** for one of your coasts (raised at the landing it's
+  bound for), **enemy raiders came ashore** by one of your villages, or an
+  **enemy ship went down**
+- an allied **escort set sail** to join your navy, or **sailed home** once the
+  sea was quiet
 - the draft stood down and your levies were **paid**, or some **deserted**
   because you couldn't pay them
 
@@ -171,11 +184,17 @@ Alerts fade after a few seconds. An ongoing raid only raises one alert, and the
 same spot won't alert again until it has been quiet for a while.
 
 Some alerts also carry a **one-click action button**, shown only on that kind
-of alert and only while you can afford to take it. Right now that's the
-sunk-ship alerts (cargo, settler, and troop alike): their **:lucide-anchor:
-Summon warship** button appears when the stockpile covers a warship's cost (20
-wood, 10 stone, 60 gold), lays one down in your harbor, and **rallies the whole
-navy to the wreck**. Taking the action dismisses the toast.
+of alert and only while you can actually take it:
+
+- The sunk-ship alerts (cargo, settler, and troop alike) carry
+  **:lucide-anchor: Summon warship**, shown when the stockpile covers a
+  warship's cost (20 wood, 10 stone, 60 gold). It lays one down in your harbor
+  and **rallies the whole navy to the wreck**.
+- The enemy-fleet alert carries **:lucide-flag: Rally navy**, shown while you
+  have a warship or hired escort afloat. It's free and **plants the navy rally
+  flag at the enemy's landing**, so the fleet sails to meet the raid.
+
+Taking the action dismisses the toast.
 
 ## The overview
 

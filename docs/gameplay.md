@@ -52,13 +52,17 @@ Three factions share the world:
 
 - **You** (blue): the settlement you grow and command.
 - **The enemy** (red): hostile to everyone. Their villages raid you *and* the
-  allies, and you capture ground by clearing their villages of defenders.
+  allies, and you capture ground by clearing their villages of defenders. Once
+  a village of theirs grows large, it **raids by sea** too, landing knights by
+  your weakest coastal village with warships as escort (see
+  **[The enemy navy](units.md#the-enemy-navy)**).
 - **The allies** (green): a friendly faction on coasts **across the sea**. They
   are your **trade partners**: cargo ships sail to their shores to sell goods for
   gold, and now and then bring **[immigrants](#immigration)** home with them.
   Allied knights **attack the enemy** on their own, which quietly takes pressure
   off you, but they only join your battles when you
-  **[hire them](#hiring-mercenaries)**, and you and the allies never fight.
+  **[hire them](#hiring-mercenaries)**, and they hire out
+  **[warships](#hiring-an-escort)** too. You and the allies never fight.
   Allied units standing in one of your villages **hold it** against capture
   just as your own would. Allied villages can't be captured by anyone, so they
   make dependable, permanent trade destinations.
@@ -185,7 +189,10 @@ A few things to mind:
   [warship](building.md#warship-the-navy) or clear the lanes first.
 - A fresh colony starts **undefended**. Knights spawn there like anywhere else
   once there's gold and population headroom, but until then an enemy wandering
-  in can [take it](#capturing-villages).
+  in can [take it](#capturing-villages), and a colony is far from any enemy
+  that walks. The enemy's **[sea raids](units.md#the-enemy-navy)** go for your
+  least-defended village, though, so an empty colony is exactly where a raid
+  lands.
 - Settling is for **new ground**: the landing must be well away from every
   existing enemy and allied village, and far enough from your own that the two
   wouldn't crowd each other. Landing **at** one of your own villages is the
@@ -255,6 +262,27 @@ Two rules keep this a *joint* invasion rather than an outsourced one:
 A refused hire costs nothing and says why: no flag of yours standing, too
 little gold, no allied village with knights to spare, no beach near the flag,
 or no sea route to it.
+
+## Hiring an escort
+
+The allies hire out their warships as well. The HUD's Navy section offers
+**Hire allied escort** for 60 gold, paid up front. An allied warship, in the
+allies' green hull, casts off from the **allied port nearest your home
+harbor** and crosses to it, with an alert for the departure; from then on it
+sails as one of **[your navy](units.md#the-navy)**: it hunts pirates and enemy
+ships, shells enemies ashore, patrols the deep sea when idle, and **answers
+your navy rally flag** just as your own warships do. The Navy section counts
+escorts sailing with the fleet, and at most **two** are out at once.
+
+Once no navy flag stands and no pirate or enemy has been in sight of any
+escort for a while, their work is done and they **sail home**, with an alert
+to say so. An escort still crossing over never turns back early. An escort
+has a warship's armored hull, but pirate and enemy guns can still sink it,
+and an alert tells you if one goes down.
+
+A refused hire costs nothing and says why: too little gold, the escort cap
+already afloat, no open water by your houses to cross to, or no sea route
+joining an allied port to your harbor.
 
 ## Immigration
 

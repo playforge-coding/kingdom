@@ -90,20 +90,31 @@ both natively and in the browser (via WebGL) using **Trunk**.
   captured village's ground is quiet, **most of the knights in it lay down
   their arms and settle it as civilians** (half, while enemies still prowl
   nearby), so conquest feeds the economy instead of just the map.
-- **Pirates.** Rare **pirate ships** roam the open ocean, hunt your ships, and
-  fire **cannonballs**; a hit **sinks a cargo ship and its cargo**. They keep to
-  the deep sea, never enter rivers or lakes, and hold a **standoff** to shell
-  their quarry instead of piling onto it. A sinking raises an alert as usual,
-  and that alert carries a one-click **Summon warship** button (shown only when
-  you can afford one) that lays a fresh warship down in your harbor and rallies
-  the whole navy to the wreck.
+- **Pirates.** Rare **pirate ships** roam the open ocean, hunt any ship under
+  any flag, and fire **cannonballs**; a hit **sinks a cargo ship and its
+  cargo**. They keep to the deep sea, never enter rivers or lakes, and hold a
+  **standoff** to shell their quarry instead of piling onto it. A sinking
+  raises an alert as usual, and that alert carries a one-click **Summon
+  warship** button (shown only when you can afford one) that lays a fresh
+  warship down in your harbor and rallies the whole navy to the wreck.
 - **Navy.** Build a **warship** (wood + stone + gold) on the water by your
-  village and it fights on its own: it **hunts pirates** and **bombards enemies
-  ashore with cannonballs**, holding **off in the water** so it never beaches.
-  Warships have a hull bar and can be sunk by pirate fire, so escort convoys with
-  a few. Plant a **navy rally flag** (left-click open water in rally-warships
-  mode) and every warship drops its hunt and sails there, guns still hot; the
-  flag lifts once one arrives, just like the knights' flag.
+  village and it fights on its own: it **hunts pirates and enemy ships** and
+  **bombards enemies ashore with cannonballs**, holding **off in the water** so
+  it never beaches. Warships have a hull bar and can be sunk by pirate or
+  enemy fire, so escort convoys with a few. Plant a **navy rally flag**
+  (left-click open water in rally-warships mode) and every warship drops its
+  hunt and sails there, guns still hot; the flag lifts once one arrives, just
+  like the knights' flag. The allies **hire out warships** too: an allied
+  escort crosses to your harbor and sails with the navy, flag and all, until
+  the sea has been quiet a while.
+- **The enemy navy.** An enemy village grown to 7 houses sends **sea raids**:
+  a red-hulled troop ship of 4 knights bound for the coast by your
+  **least-defended village**, with a **warship escort** once the village hits
+  9 houses. The raid is announced at its landing the moment it casts off
+  (with a one-click **Rally navy** button), the landing wears a red banner,
+  and the Navy section counts the enemy fleet at sea. Ashore, the raiders are
+  ordinary enemy knights; the escort shells your coast and hunts your ships
+  until its sortie runs out, and sinks to a straight duel with one of yours.
 - **Building.** Left-click places a **construction order**: the cost (builder's
   pay included) is set aside, a ghost marks the site, and a civilian walks over
   and builds it over a few real seconds. Clicking a pending site cancels and

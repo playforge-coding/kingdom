@@ -29,18 +29,60 @@ const SETTLER_TINT: [f32; 4] = [0.72, 0.82, 1.0, 1.0];
 /// unmistakably the military run rather than the colonists'.
 const TROOP_TINT: [f32; 4] = [0.45, 0.6, 1.0, 1.0];
 
-/// The allied green that marks a hired company's ship: the allies' own color,
-/// since the mercenaries aboard remain their knights.
+/// The allied green that marks a hired company's landing banner: the allies'
+/// own color, since the mercenaries aboard remain their knights.
 const MERC_TINT: [f32; 4] = [0.6, 1.0, 0.65, 1.0];
+/// The enemy red that marks a sea raid's landing banner, so the coast it's
+/// bound for reads as a threat at a glance.
+const RAID_TINT: [f32; 4] = [1.0, 0.5, 0.45, 1.0];
 
-/// The hull and banner tint for a transport, by its owner and mission.
+/// The sprite sheet a transport's hull is drawn from. The player's missions
+/// sail the cargo hull in a tint (see `transport_tint`); an allied company
+/// and an enemy raid sail their own faction's hull, drawn as is.
+fn transport_sheet(t: &crate::game::Transport) -> &'static str {
+    match t.faction {
+        crate::game::Faction::Player => "cargo_ship",
+        crate::game::Faction::Enemy => "enemy_warship",
+        crate::game::Faction::Ally => "ally_warship",
+    }
+}
+
+/// The hull tint for a transport: a blue wash on the player's cargo hull
+/// (mild for settlers, deeper for troops), none on a faction's own hull.
 fn transport_tint(t: &crate::game::Transport) -> [f32; 4] {
-    if t.faction == crate::game::Faction::Ally {
-        MERC_TINT
-    } else if t.knights > 0 {
-        TROOP_TINT
-    } else {
-        SETTLER_TINT
+    match t.faction {
+        crate::game::Faction::Player if t.knights > 0 => TROOP_TINT,
+        crate::game::Faction::Player => SETTLER_TINT,
+        crate::game::Faction::Enemy | crate::game::Faction::Ally => WHITE,
+    }
+}
+
+/// The tint of the banner planted on a transport's landing: the mission's
+/// blue for the player's, the allies' green for a hired company, the enemy's
+/// red for a raid.
+fn banner_tint(t: &crate::game::Transport) -> [f32; 4] {
+    match t.faction {
+        crate::game::Faction::Player => transport_tint(t),
+        crate::game::Faction::Enemy => RAID_TINT,
+        crate::game::Faction::Ally => MERC_TINT,
+    }
+}
+
+/// The sprite sheet a warship of `faction` is drawn from.
+fn warship_sheet(faction: crate::game::Faction) -> &'static str {
+    match faction {
+        crate::game::Faction::Player => "warship",
+        crate::game::Faction::Enemy => "enemy_warship",
+        crate::game::Faction::Ally => "ally_warship",
+    }
+}
+
+/// The fill of a warship's hull bar, in its faction's color.
+fn hull_bar_tint(faction: crate::game::Faction) -> [f32; 4] {
+    match faction {
+        crate::game::Faction::Player => [0.3, 0.55, 1.0, 0.95],
+        crate::game::Faction::Enemy => [0.9, 0.25, 0.2, 0.95],
+        crate::game::Faction::Ally => [0.35, 0.85, 0.4, 0.95],
     }
 }
 
@@ -440,9 +482,9 @@ impl State {
             out.push(quad([s.pos.x - 1.0, s.pos.y - 1.0], [2.0, 2.0], uv));
         }
 
-        // Transports: the cargo hull flying the player's colors, drawn over
-        // the same 2x2-tile footprint. Settler ships wear a mild blue wash,
-        // troop ships a deeper one.
+        // Transports, drawn over the same 2x2-tile footprint: the player's
+        // sail the cargo hull in a blue wash (mild for settlers, deeper for
+        // troops), an allied company and an enemy raid their own hull.
         for s in game.transports() {
             let col = match s.facing {
                 Dir::Left => 0,
@@ -450,7 +492,7 @@ impl State {
                 Dir::Down => 2,
                 Dir::Right => 3,
             };
-            let uv = self.atlas.frame_uv("cargo_ship", col, 0);
+            let uv = self.atlas.frame_uv(transport_sheet(s), col, 0);
             out.push(tinted(
                 [s.pos.x - 1.0, s.pos.y - 1.0],
                 [2.0, 2.0],
@@ -459,9 +501,10 @@ impl State {
             ));
         }
 
-        // Warships (the navy): a 32x32 directional sprite (columns face left,
-        // up, down, right), drawn over a 2x2-tile footprint, with an HP bar when
-        // the hull is damaged.
+        // Warships of every flag: a 32x32 directional sprite (columns face
+        // left, up, down, right) from the owner's sheet, drawn over a 2x2-tile
+        // footprint, with an HP bar in the owner's color when the hull is
+        // damaged.
         for w in game.warships() {
             let col = match w.facing {
                 Dir::Left => 0,
@@ -469,7 +512,7 @@ impl State {
                 Dir::Down => 2,
                 Dir::Right => 3,
             };
-            let uv = self.atlas.frame_uv("warship", col, 0);
+            let uv = self.atlas.frame_uv(warship_sheet(w.faction), col, 0);
             out.push(quad([w.pos.x - 1.0, w.pos.y - 1.0], [2.0, 2.0], uv));
             let ratio = w.hp_ratio();
             if ratio < 1.0 {
@@ -481,7 +524,7 @@ impl State {
                     [bx, by],
                     [bw * ratio, bh],
                     white,
-                    [0.3, 0.55, 1.0, 0.95],
+                    hull_bar_tint(w.faction),
                 ));
             }
         }
@@ -577,10 +620,11 @@ impl State {
             out.push(tinted([r.x - 0.5, r.y - 0.5], [1.0, 1.0], rally, tint));
         }
 
-        // Each expedition plants a banner on its landing the moment it sets
-        // sail, so the click that sent it gets an answer on the spot and the
-        // destination stays marked until the ship arrives, in its mission's
-        // tint.
+        // Each voyage plants a banner on its landing the moment it sets sail,
+        // so the click that sent it gets an answer on the spot and the
+        // destination stays marked until the ship arrives, in its owner's
+        // tint. An enemy raid's red banner is the warning of where it will
+        // come ashore.
         for s in game.transports() {
             let rally = self.atlas.uv("rally");
             let (ax, ay) = s.anchor;
@@ -588,7 +632,7 @@ impl State {
                 [ax as f32, ay as f32],
                 [1.0, 1.0],
                 rally,
-                transport_tint(s),
+                banner_tint(s),
             ));
         }
 
@@ -767,14 +811,16 @@ impl State {
             vessel(s.pos, "cargo_ship", s.facing);
         }
         for w in game.warships() {
-            vessel(w.pos, "warship", w.facing);
+            vessel(w.pos, warship_sheet(w.faction), w.facing);
         }
         for p in game.pirates() {
             vessel(p.pos, "pirate_ship", p.facing);
         }
-        // Settler ships keep their blue tint out here too.
+        // Transports keep their hull and tint out here too.
         for s in game.transports() {
-            let uv = self.atlas.frame_uv("cargo_ship", facing_col(s.facing), 0);
+            let uv = self
+                .atlas
+                .frame_uv(transport_sheet(s), facing_col(s.facing), 0);
             out.push(Instance {
                 pos: [s.pos.x - ship * 0.5, s.pos.y - ship * 0.5],
                 size: [ship, ship],
@@ -808,8 +854,9 @@ impl State {
             });
         }
 
-        // So does each settler expedition's landing banner, which matters most
-        // at this zoom: the whole voyage fits on screen, ship and destination.
+        // So does each voyage's landing banner, which matters most at this
+        // zoom: the whole crossing fits on screen, ship and destination, and
+        // an enemy raid's red banner shows which coast it's bound for.
         for s in game.transports() {
             let size = 1.5 * kf;
             let uv = self.atlas.uv("rally");
@@ -819,7 +866,7 @@ impl State {
                 size: [size, size],
                 uv_min: [uv[0], uv[1]],
                 uv_max: [uv[2], uv[3]],
-                color: transport_tint(s),
+                color: banner_tint(s),
             });
         }
 

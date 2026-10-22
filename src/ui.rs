@@ -12,12 +12,12 @@ use winit::window::Window;
 use crate::atlas::MapColors;
 use crate::game::{
     AlertKind, AlertResponse, BRIDGE_WOOD_COST, BUILD_NEAR_RADIUS, BUILDER_WAGE, BuildMode,
-    Faction, Game, GatherPriority, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
-    HUT_GOLD_COST, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, LaunchRefusal, MINE_GOLD_COST, MINE_STONE_COST,
-    Priority, SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST,
-    SETTLER_WOOD_COST, STONE_PRICE, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST,
-    TROOP_WOOD_COST, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST,
-    WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
+    ESCORT_HIRE_COST, Faction, Game, GatherPriority, HOUSE_GOLD_COST, HOUSE_STONE_COST,
+    HOUSE_WOOD_COST, HUT_GOLD_COST, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, LaunchRefusal, MAX_ESCORTS,
+    MINE_GOLD_COST, MINE_STONE_COST, Priority, SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED,
+    SETTLER_GOLD_COST, SETTLER_STONE_COST, SETTLER_WOOD_COST, STONE_PRICE, TROOP_GOLD_COST,
+    TROOP_KNIGHTS, TROOP_STONE_COST, TROOP_WOOD_COST, WALL_GOLD_COST, WALL_STONE_COST,
+    WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -541,7 +541,47 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                     ),
                 ),
             );
-            ui.small("Launch on open water by your village; it hunts pirates and shells enemies ashore.");
+            ui.small("Launch on open water by your village; it hunts pirates and enemy ships and shells enemies ashore.");
+            // Hired help afloat: an allied warship that sails with the navy.
+            if ui
+                .button((
+                    icon(ui, icons::ANCHOR),
+                    format!("Hire allied escort ({ESCORT_HIRE_COST} gold)"),
+                ))
+                .on_hover_text(format!(
+                    "An allied warship sails from the nearest allied port to your harbor and \
+                     fights alongside your navy, answering the navy rally flag, until the sea \
+                     has been quiet a while. At most {MAX_ESCORTS} at once."
+                ))
+                .clicked()
+            {
+                game.hire_escort();
+            }
+            let escorts = game.escorts();
+            if escorts > 0 {
+                icon_label(
+                    ui,
+                    icons::ANCHOR,
+                    format!("{} sailing with the navy", plural(escorts, "allied escort", "allied escorts")),
+                );
+            }
+            // The enemy's fleet, when one is out: raids bound for your coasts
+            // and the warships escorting them.
+            let raids = game.enemy_raids_at_sea();
+            let enemy_warships = game.warship_count(Faction::Enemy);
+            if raids > 0 || enemy_warships > 0 {
+                ui.horizontal(|ui| {
+                    ui.add(icon(ui, icons::TRIANGLE_ALERT).tint(ALARM));
+                    ui.label(
+                        RichText::new(format!(
+                            "Enemy fleet at sea: {}, {}",
+                            plural(raids, "troop ship", "troop ships"),
+                            plural(enemy_warships, "warship", "warships")
+                        ))
+                        .color(ALARM),
+                    );
+                });
+            }
             ui.radio_value(
                 &mut game.build_mode,
                 BuildMode::LandTroops,
@@ -620,6 +660,8 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                 ui.small("Rally: knights drop combat and rush the flag; it clears on arrival.");
                 ui.small("Navy rally: warships rush their own flag the same way, guns still hot.");
                 ui.small("Right-click clears both rally flags.");
+                ui.small("Big enemy villages send sea raids at your weakest coastal village, with warships as escort.");
+                ui.small("Hired allied escorts sail with your navy and follow the navy flag, then go home when it's quiet.");
                 ui.small("Some alerts offer a one-click action, like summoning a warship on a sinking.");
                 ui.small("Pan with WASD or the arrow keys; zoom with Q and E.");
                 ui.small("Press M to jump to the overview map and back.");
@@ -783,17 +825,15 @@ fn minimap_ui(
         painter.circle_filled(to_screen(s.pos), 1.5, Color32::WHITE);
     }
     for s in game.transports() {
-        painter.circle_filled(to_screen(s.pos), 1.5, color32(colors.player));
-        // The expedition's landing, so you can see where a colony is headed.
+        let color = faction_color32(colors, s.faction);
+        painter.circle_filled(to_screen(s.pos), 1.5, color);
+        // The voyage's landing, so you can see where a colony is headed, or
+        // which coast an enemy raid is bound for.
         let landing = Vec2::new(s.anchor.0 as f32 + 0.5, s.anchor.1 as f32 + 0.5);
-        painter.circle_stroke(
-            to_screen(landing),
-            3.0,
-            Stroke::new(1.5, color32(colors.player)),
-        );
+        painter.circle_stroke(to_screen(landing), 3.0, Stroke::new(1.5, color));
     }
     for w in game.warships() {
-        painter.circle_filled(to_screen(w.pos), 1.8, color32(colors.player));
+        painter.circle_filled(to_screen(w.pos), 1.8, faction_color32(colors, w.faction));
     }
     for p in game.pirates() {
         painter.circle_filled(to_screen(p.pos), 1.8, Color32::BLACK);
@@ -1001,7 +1041,7 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                     "You captured a village",
                                 ),
                                 AlertKind::CargoSunk => {
-                                    (icons::SHIP, ALARM, "Pirates sank a cargo ship")
+                                    (icons::SHIP, ALARM, "A cargo ship was sunk, its cargo lost")
                                 }
                                 AlertKind::SettlersSailed => (
                                     icons::GLOBE,
@@ -1041,21 +1081,52 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                         LaunchRefusal::Mercenaries => {
                                             "Can't hire: no allied village has knights to spare"
                                         }
+                                        LaunchRefusal::Escorts => {
+                                            "Can't hire: the allies have no more escorts to spare"
+                                        }
                                     },
                                 ),
                                 AlertKind::SettlersSunk => (
                                     icons::SHIP,
                                     ALARM,
-                                    "Pirates sank a settler ship, all souls lost",
+                                    "A settler ship was sunk, all souls lost",
                                 ),
                                 AlertKind::TroopsSunk => (
                                     icons::SWORDS,
                                     ALARM,
-                                    "Pirates sank a troop ship, the knights lost at sea",
+                                    "A troop ship was sunk, the knights lost at sea",
                                 ),
                                 AlertKind::WarshipSunk => {
-                                    (icons::ANCHOR, ALARM, "Pirates sank a warship")
+                                    (icons::ANCHOR, ALARM, "One of your warships was sunk")
                                 }
+                                AlertKind::EnemyFleetSailed => (
+                                    icons::TRIANGLE_ALERT,
+                                    ALARM,
+                                    "An enemy fleet set sail for this coast",
+                                ),
+                                AlertKind::EnemyTroopsLanded => (
+                                    icons::SWORDS,
+                                    ALARM,
+                                    "Enemy raiders came ashore by your village",
+                                ),
+                                AlertKind::EnemyShipSunk => (
+                                    icons::ANCHOR,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "An enemy ship went down",
+                                ),
+                                AlertKind::EscortSailed => (
+                                    icons::ANCHOR,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "An allied escort set sail to join your navy",
+                                ),
+                                AlertKind::EscortSunk => {
+                                    (icons::ANCHOR, ALARM, "The allied escort was sunk")
+                                }
+                                AlertKind::EscortLeft => (
+                                    icons::ANCHOR,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "The sea quiet, the allied escort sailed home",
+                                ),
                                 AlertKind::ColonyFounded => (
                                     icons::GLOBE,
                                     color32([0.3, 0.55, 1.0, 1.0]),
@@ -1138,6 +1209,13 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                              {WARSHIP_STONE_COST} stone, {WARSHIP_GOLD_COST} gold) and \
                                              rallies the navy to the spot"
                                         ),
+                                    ),
+                                    AlertResponse::RallyNavy => (
+                                        icons::FLAG,
+                                        "Rally navy",
+                                        "Plants the navy rally flag at the enemy's landing, so every \
+                                         warship and escort sails to meet the fleet"
+                                            .to_string(),
                                     ),
                                 };
                                 if ui

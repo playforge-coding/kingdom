@@ -40,7 +40,7 @@ impl Rng {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Faction {
     Player,
     Enemy,
@@ -318,14 +318,19 @@ const CANNONBALL_HIT_RADIUS: f32 = 0.8;
 /// land unit). Cargo ships are unarmed and sink from a single hit regardless.
 const CANNON_DAMAGE: f32 = 30.0;
 
-// The navy: player-built warships that patrol the coast, hunt pirates, and
-// bombard enemies ashore from the safety of the water.
+// The navy: warships that patrol the coast, hunt pirates, and bombard enemies
+// ashore from the safety of the water. The player builds theirs; the enemy
+// sends them as raid escorts and the allies hire them out (see the enemy navy
+// and allied escort constants below).
 /// A warship costs wood, stone, and a good deal of gold to lay down.
 pub const WARSHIP_WOOD_COST: u32 = 20;
 pub const WARSHIP_STONE_COST: u32 = 10;
 pub const WARSHIP_GOLD_COST: u32 = 60;
 /// Warship hull strength. Tougher than a pirate, so one wins a straight duel.
 const WARSHIP_MAX_HP: f32 = 130.0;
+/// An enemy warship's hull: weaker than the player's, so a straight duel goes
+/// to the navy and the enemy's fleet is a threat to answer, not a wall.
+const ENEMY_WARSHIP_MAX_HP: f32 = 100.0;
 /// Warship cruising speed (tiles/second).
 const WARSHIP_SPEED: f32 = 2.8;
 /// A warship engages any hostile (pirate or enemy ashore) within this range.
@@ -353,6 +358,41 @@ const NAVY_RALLY_REPLAN: f32 = 6.0;
 const PATROL_SCAN: i32 = 48;
 /// How far an idle warship roams for its next waypoint once out on the open sea.
 const PATROL_WANDER: i32 = 20;
+
+// The enemy navy: a coastal enemy village grown large enough sends sea raids
+// against the player's weakest coastal village, a troop ship with an escort
+// of warships when the village is bigger still. It's how the enemy contests
+// colonies and the sea lanes, which are otherwise beyond its reach.
+/// Seconds between the enemy's checks for launching a sea raid.
+const ENEMY_RAID_INTERVAL: f32 = 100.0;
+/// An enemy village must have grown to this many houses before it raids by
+/// sea, so the early game stays a land war.
+const ENEMY_RAID_MIN_HOUSES: usize = 7;
+/// Knights an enemy sea raid carries. They go down with the hull if it sinks.
+pub const ENEMY_RAID_KNIGHTS: usize = 4;
+/// Knights an enemy village keeps home when it sends a raid.
+const ENEMY_RAID_GARRISON: usize = 2;
+/// Enemy troop ships at sea at once, at most.
+const MAX_ENEMY_RAIDS: usize = 1;
+/// An enemy village of this many houses escorts its raid with a warship.
+const ENEMY_NAVY_MIN_HOUSES: usize = 9;
+/// Enemy warships afloat at once, at most.
+const MAX_ENEMY_WARSHIPS: usize = 2;
+/// Seconds an enemy warship stays out before it withdraws for home, so a
+/// bombardment is a storm to weather (or sink) rather than a permanent siege.
+const ENEMY_SORTIE: f32 = 300.0;
+
+// Allied escorts: the allies hire out their warships too. One sails from the
+// allied port nearest the player's home harbor, joins the navy (hunting,
+// patrolling, and answering the navy rally flag like the player's own), and
+// sails home once the sea has been quiet a while.
+/// Gold an allied escort costs to hire.
+pub const ESCORT_HIRE_COST: u32 = 60;
+/// Allied escorts afloat at once, at most.
+pub const MAX_ESCORTS: usize = 2;
+/// Seconds without a navy flag standing or a hostile in sight of any escort
+/// before the escorts count their work done and sail home.
+const ESCORT_STAND_DOWN: f32 = 45.0;
 /// Water tiles a ship's route search may explore before giving up. Generous, as
 /// allied coasts can be far across open ocean; the search runs once, on launch.
 /// Sized to comfortably reach the nearest overseas ally (a disc of ~200-tile
@@ -883,11 +923,15 @@ impl Pirate {
     }
 }
 
-/// A player-built warship for the navy. It cruises the water, hunts pirates, and
-/// bombards enemies ashore from a standoff, never leaving the sea. Persistent
-/// (saved) like the cargo fleet.
+/// A warship. It cruises the water, hunts pirates and hostile hulls, and
+/// bombards foes ashore from a standoff, never leaving the sea. The player's
+/// make up the navy; an enemy one escorts a sea raid and bombards the coast
+/// until its sortie runs out; an allied one is a hired escort that sails with
+/// the navy. Persistent (saved) like the cargo fleet.
 pub struct Warship {
     pub pos: Vec2,
+    /// Whose guns these are. Public so the renderer can pick the hull sprite.
+    pub faction: Faction,
     /// Heading, driving both movement and the directional sprite frame.
     pub facing: Dir,
     /// Smoothed water route the ship is following: straight line-of-sight legs
@@ -905,27 +949,76 @@ pub struct Warship {
     reload: f32,
     /// Seconds afloat, for the sprite's gentle bob.
     pub bob: f32,
-    /// Hull strength; the warship sinks when pirate fire drives it to zero.
+    /// Hull strength; the warship sinks when hostile fire drives it to zero.
     hp: f32,
+    /// Standing orders: a spot to sail for before anything else, the way the
+    /// navy rally flag works for the player's ships. An enemy escort carries
+    /// its raid's landing here and an allied escort the player's harbor; it
+    /// lifts on arrival. The player's ships use the shared flag instead.
+    goal: Option<Vec2>,
+    /// Seconds at sea. An enemy warship withdraws at `ENEMY_SORTIE`.
+    sortie: f32,
 }
 
 impl Warship {
+    /// A fresh hull for `faction` at `pos`, holding station with full hull.
+    fn new(faction: Faction, pos: Vec2) -> Self {
+        Warship {
+            pos,
+            faction,
+            facing: Dir::Down,
+            path: Vec::new(),
+            path_cursor: 0,
+            plan_pos: Vec2::ZERO,
+            repath: 0.0,
+            reload: WARSHIP_RELOAD,
+            bob: 0.0,
+            hp: warship_max_hp(faction),
+            goal: None,
+            sortie: 0.0,
+        }
+    }
+
     /// Remaining hull as a 0-1 fraction, for the HP bar.
     pub fn hp_ratio(&self) -> f32 {
-        (self.hp / WARSHIP_MAX_HP).clamp(0.0, 1.0)
+        (self.hp / warship_max_hp(self.faction)).clamp(0.0, 1.0)
     }
 }
 
-/// A cannonball in flight. `from_pirate` decides who it can hurt: a pirate's
-/// shot sinks player vessels, a warship's shot harms pirates and land enemies.
+/// Full hull strength of a warship of `faction`.
+fn warship_max_hp(faction: Faction) -> f32 {
+    match faction {
+        Faction::Enemy => ENEMY_WARSHIP_MAX_HP,
+        Faction::Player | Faction::Ally => WARSHIP_MAX_HP,
+    }
+}
+
+/// Who fired a cannonball, which decides what it can hurt. A pirate's shot
+/// harms any hull afloat; a faction's shot harms pirates, hostile hulls, and
+/// hostile units ashore.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gunner {
+    Pirate,
+    Navy(Faction),
+}
+
+impl Gunner {
+    /// Would this gunner's shot harm something owned by `faction`?
+    fn harms(self, faction: Faction) -> bool {
+        match self {
+            Gunner::Pirate => true,
+            Gunner::Navy(g) => hostile(g, faction),
+        }
+    }
+}
+
+/// A cannonball in flight. Its `gunner` decides who it can hurt.
 pub struct Cannonball {
     pub pos: Vec2,
     vel: Vec2,
     /// Seconds before it splashes down harmlessly.
     life: f32,
-    /// True if fired by a pirate (targets the player's ships), false if fired
-    /// by a warship (targets pirates and enemies ashore).
-    from_pirate: bool,
+    gunner: Gunner,
 }
 
 /// How far past a village's capture radius a hostile unit counts as a threat,
@@ -978,11 +1071,27 @@ pub enum AlertKind {
     /// A settle or troop-landing order couldn't go through, and this is why.
     /// Raised at the click, so a click that does nothing is never a mystery.
     LaunchRefused(LaunchRefusal),
-    /// Pirates sank a settler ship; the crew is lost with it.
+    /// Hostile guns sank a settler ship; the crew is lost with it.
     SettlersSunk,
-    /// Pirates sank a troop ship; the knights are lost with it.
+    /// Hostile guns sank a troop ship (yours or a hired company's); the
+    /// knights are lost with it.
     TroopsSunk,
+    /// Hostile guns sank one of your warships.
     WarshipSunk,
+    /// An enemy troop ship cast off for one of your coasts, with an escort
+    /// when the enemy could spare one. Raised at the landing it's bound for.
+    EnemyFleetSailed,
+    /// An enemy landing party came ashore by one of your villages.
+    EnemyTroopsLanded,
+    /// An enemy ship (troop ship or warship) went down, to your navy's guns
+    /// or a pirate's.
+    EnemyShipSunk,
+    /// A hired allied warship cast off to join your navy.
+    EscortSailed,
+    /// Hostile guns sank a hired allied warship.
+    EscortSunk,
+    /// The sea quiet, the hired allied warships sailed home.
+    EscortLeft,
     /// Settlers landed and founded a new village on a far shore.
     ColonyFounded,
     /// Settlers landed by one of your standing villages and joined it as
@@ -1033,6 +1142,8 @@ pub enum LaunchRefusal {
     NoRally,
     /// Hiring only: no allied village has enough knights to spare a company.
     Mercenaries,
+    /// Escort hiring only: the allowed number of escorts is already afloat.
+    Escorts,
 }
 
 #[derive(Clone, Copy)]
@@ -1055,11 +1166,14 @@ impl Alert {
 /// from `AlertKind::response` and handle the new variant in
 /// `Game::can_respond` (which gates the button) and `Game::respond_to_alert`
 /// (which carries it out).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AlertResponse {
     /// Lay down a warship in the home harbor at the usual cost and rally the
     /// whole navy to where the alert happened.
     SummonWarship,
+    /// Plant the navy rally flag where the alert happened, so the fleet
+    /// converges on an enemy fleet's landing. Free; needs a warship afloat.
+    RallyNavy,
 }
 
 impl AlertKind {
@@ -1069,6 +1183,7 @@ impl AlertKind {
             AlertKind::CargoSunk | AlertKind::SettlersSunk | AlertKind::TroopsSunk => {
                 Some(AlertResponse::SummonWarship)
             }
+            AlertKind::EnemyFleetSailed => Some(AlertResponse::RallyNavy),
             _ => None,
         }
     }
@@ -1198,6 +1313,13 @@ pub struct Game {
     /// Seconds the hired mercenaries have gone without a flag to answer or an
     /// enemy near them; they sail home at `MERC_STAND_DOWN`. Transient.
     merc_quiet: f32,
+    /// Seconds the hired allied warships have gone without a navy flag to
+    /// answer or a hostile in sight; they sail home at `ESCORT_STAND_DOWN`.
+    /// Transient.
+    escort_quiet: f32,
+    /// Countdown to the enemy's next sea-raid check (see `enemy_sea_raid`).
+    /// Transient.
+    enemy_raid_timer: f32,
     /// Clocks and counters for founding ever-farther new villages (see the
     /// `*_FOUND_INTERVAL` constants). The counts drive the frontier radius, so
     /// each new settlement reaches farther out than the last.
@@ -1418,6 +1540,8 @@ impl Game {
             enemy_bud_timer: ENEMY_BUD_INTERVAL,
             ally_bud_timer: ALLY_BUD_INTERVAL,
             merc_quiet: 0.0,
+            escort_quiet: 0.0,
+            enemy_raid_timer: ENEMY_RAID_INTERVAL,
             enemy_found_timer: ENEMY_FOUND_INTERVAL,
             ally_found_timer: ALLY_FOUND_INTERVAL,
             enemy_villages_founded: ENEMY_VILLAGES as u32,
@@ -1544,6 +1668,8 @@ impl Game {
         self.run_draft(dt);
         self.stand_down_levies(dt);
         self.stand_down_mercenaries(dt);
+        self.stand_down_escorts(dt);
+        self.enemy_sea_raid(dt);
         self.grow_saplings(dt);
 
         // Decide who is stepped this frame, and by how much. Everyone near the
@@ -1974,6 +2100,19 @@ impl Game {
     fn land_transport(&mut self, s: Transport) {
         let (ax, ay) = s.anchor;
         self.world.ensure_region(ax - 8, ay - 8, ax + 8, ay + 8);
+        // An enemy raid goes ashore as ordinary enemy knights, whose own
+        // instincts (hunt the player's units, take an undefended village) do
+        // the rest (see `enemy_sea_raid`).
+        if s.faction == Faction::Enemy {
+            for _ in 0..s.knights {
+                let spot = adjacent_walkable(&self.world, ax, ay).unwrap_or(s.anchor);
+                self.entities
+                    .push(Entity::new(Faction::Enemy, Job::Knight, spot));
+            }
+            log::info!("{} enemy raiders came ashore at ({ax}, {ay})", s.knights);
+            self.push_alert(AlertKind::EnemyTroopsLanded, tile_center(s.anchor));
+            return;
+        }
         // An allied company goes ashore as mercenaries: allied knights who
         // answer the player's flag from here on (see `hire_mercenaries`).
         if s.faction == Faction::Ally {
@@ -2093,9 +2232,25 @@ impl Game {
         &self.transports
     }
 
-    /// The player's warships, for rendering.
+    /// Every warship afloat, all factions, for rendering.
     pub fn warships(&self) -> &[Warship] {
         &self.warships
+    }
+
+    /// How many warships `faction` has afloat.
+    pub fn warship_count(&self, faction: Faction) -> usize {
+        self.warships
+            .iter()
+            .filter(|w| w.faction == faction)
+            .count()
+    }
+
+    /// Enemy troop ships at sea, each bound for one of your coasts.
+    pub fn enemy_raids_at_sea(&self) -> usize {
+        self.transports
+            .iter()
+            .filter(|t| t.faction == Faction::Enemy)
+            .count()
     }
 
     /// Pirate ships prowling the ocean, for rendering.
@@ -2108,9 +2263,9 @@ impl Game {
         &self.cannonballs
     }
 
-    /// Spawn (rarely) and sail the pirates: they hunt any cargo ship they can
-    /// see, keep to the open ocean, shell ships in range, and fly cannonballs
-    /// that sink a hull on contact.
+    /// Spawn (rarely) and sail the pirates: they hunt any hull they can see,
+    /// whoever's flag it flies, keep to the open ocean, shell ships in range,
+    /// and fly cannonballs that sink a hull on contact.
     fn update_pirates(&mut self, dt: f32) {
         self.pirate_spawn_timer -= dt;
         if self.pirate_spawn_timer <= 0.0 {
@@ -2127,14 +2282,15 @@ impl Game {
             // default-water of ungenerated chunks.
             self.world.ensure_region(px - 4, py - 4, px + 4, py + 4);
 
-            // Steer toward the nearest player vessel in sight (a cargo ship or
-            // a warship), else wander.
-            let target = nearest_player_vessel(
+            // Steer toward the nearest vessel in sight (any faction's cargo
+            // ship, transport, or warship), else wander.
+            let target = nearest_vessel(
                 &self.ships,
                 &self.transports,
                 &self.warships,
                 pp,
                 PIRATE_DETECT_RANGE,
+                Gunner::Pirate,
             );
             if let Some(t) = target {
                 // Close to a standoff, then hold: this is what stops a raider
@@ -2174,19 +2330,20 @@ impl Game {
             self.pirates[i].reload -= dt;
             if self.pirates[i].reload <= 0.0 {
                 let pp = self.pirates[i].pos;
-                if let Some(t) = nearest_player_vessel(
+                if let Some(t) = nearest_vessel(
                     &self.ships,
                     &self.transports,
                     &self.warships,
                     pp,
                     PIRATE_FIRE_RANGE,
+                    Gunner::Pirate,
                 ) {
                     let dir = (t - pp).normalize_or_zero();
                     self.cannonballs.push(Cannonball {
                         pos: pp,
                         vel: dir * CANNONBALL_SPEED,
                         life: CANNONBALL_LIFE,
-                        from_pirate: true,
+                        gunner: Gunner::Pirate,
                     });
                     self.pirates[i].reload = PIRATE_RELOAD;
                 }
@@ -2194,9 +2351,10 @@ impl Game {
         }
     }
 
-    /// Fly every cannonball a step and resolve hits. A pirate's shot sinks a
-    /// cargo ship outright or wears a warship down; a warship's shot wears a
-    /// pirate down or cuts down an enemy ashore.
+    /// Fly every cannonball a step and resolve hits. A shell sinks an unarmored
+    /// hull (cargo ship or transport) outright, wears an armed one (a warship
+    /// or a pirate) down, and cuts down a unit ashore; who it can hurt at all
+    /// is down to its gunner (see `Gunner::harms`).
     fn update_cannonballs(&mut self, dt: f32) {
         let r2 = CANNONBALL_HIT_RADIUS * CANNONBALL_HIT_RADIUS;
         let mut ci = 0;
@@ -2206,11 +2364,7 @@ impl Game {
             self.cannonballs[ci].pos += step;
             let bp = self.cannonballs[ci].pos;
 
-            let struck = if self.cannonballs[ci].from_pirate {
-                self.resolve_pirate_shot(bp, r2)
-            } else {
-                self.resolve_navy_shot(bp, r2)
-            };
+            let struck = self.resolve_shot(bp, r2, self.cannonballs[ci].gunner);
 
             if struck || self.cannonballs[ci].life <= 0.0 {
                 self.cannonballs.swap_remove(ci);
@@ -2220,33 +2374,40 @@ impl Game {
         }
     }
 
-    /// A pirate shell landing at `bp`: sinks a cargo ship outright, or chips a
-    /// warship's hull (sinking it at zero). Returns whether it struck something.
-    fn resolve_pirate_shot(&mut self, bp: Vec2, r2: f32) -> bool {
-        if let Some(si) = self
-            .ships
-            .iter()
-            .position(|s| (s.pos - bp).length_squared() < r2)
+    /// A shell from `gunner` landing at `bp`. Checks every hull and unit it
+    /// could harm, unarmored hulls first (they sink from one hit), and returns
+    /// whether it struck something.
+    fn resolve_shot(&mut self, bp: Vec2, r2: f32, gunner: Gunner) -> bool {
+        // Cargo ships are the player's and unarmed: one hit sinks hull and
+        // cargo together.
+        if gunner.harms(Faction::Player)
+            && let Some(si) = self
+                .ships
+                .iter()
+                .position(|s| (s.pos - bp).length_squared() < r2)
         {
-            log::info!("a cargo ship was sunk by pirates, its cargo lost at sea!");
+            log::info!("a cargo ship was sunk, its cargo lost at sea!");
             self.push_alert(AlertKind::CargoSunk, self.ships[si].pos);
             self.ships.swap_remove(si);
             return true;
         }
         // Transports are as unarmored as cargo ships: one hit sinks them, crew
-        // and all. The lost souls count toward the realm's casualties.
+        // and all. The player's lost souls count toward the realm's
+        // casualties; an enemy raid going down is good news.
         if let Some(si) = self
             .transports
             .iter()
-            .position(|s| (s.pos - bp).length_squared() < r2)
+            .position(|s| gunner.harms(s.faction) && (s.pos - bp).length_squared() < r2)
         {
             let s = self.transports.swap_remove(si);
-            let kind = if s.civilians > 0 {
+            let kind = if s.faction == Faction::Enemy {
+                AlertKind::EnemyShipSunk
+            } else if s.civilians > 0 {
                 AlertKind::SettlersSunk
             } else {
                 AlertKind::TroopsSunk
             };
-            log::info!("a transport was sunk by pirates, all souls lost at sea!");
+            log::info!("a transport was sunk, all souls lost at sea!");
             self.push_alert(kind, s.pos);
             if s.faction == Faction::Player {
                 self.units_lost += s.civilians + s.knights;
@@ -2256,22 +2417,26 @@ impl Game {
         if let Some(wi) = self
             .warships
             .iter()
-            .position(|w| (w.pos - bp).length_squared() < r2)
+            .position(|w| gunner.harms(w.faction) && (w.pos - bp).length_squared() < r2)
         {
             self.warships[wi].hp -= CANNON_DAMAGE;
             if self.warships[wi].hp <= 0.0 {
-                log::info!("a warship was sunk by pirates!");
-                self.push_alert(AlertKind::WarshipSunk, self.warships[wi].pos);
-                self.warships.swap_remove(wi);
+                let w = self.warships.swap_remove(wi);
+                let kind = match w.faction {
+                    Faction::Player => AlertKind::WarshipSunk,
+                    Faction::Enemy => AlertKind::EnemyShipSunk,
+                    Faction::Ally => AlertKind::EscortSunk,
+                };
+                log::info!("a warship was sunk!");
+                self.push_alert(kind, w.pos);
             }
             return true;
         }
-        false
-    }
-
-    /// A naval shell landing at `bp`: wears down a pirate (sinking it at zero),
-    /// or cuts down an enemy unit ashore. Returns whether it struck something.
-    fn resolve_navy_shot(&mut self, bp: Vec2, r2: f32) -> bool {
+        // Only a navy shells pirates (pirates don't fire on each other) or
+        // the shore.
+        let Gunner::Navy(g) = gunner else {
+            return false;
+        };
         if let Some(pi) = self
             .pirates
             .iter()
@@ -2279,7 +2444,7 @@ impl Game {
         {
             self.pirates[pi].hp -= CANNON_DAMAGE;
             if self.pirates[pi].hp <= 0.0 {
-                log::info!("the navy sank a pirate ship!");
+                log::info!("a pirate ship was sunk by naval fire!");
                 self.pirates.swap_remove(pi);
             }
             return true;
@@ -2287,12 +2452,16 @@ impl Game {
         if let Some(ei) = self
             .entities
             .iter()
-            .position(|e| e.faction == Faction::Enemy && e.pos.distance_squared(bp) < r2)
+            .position(|e| hostile(g, e.faction) && e.pos.distance_squared(bp) < r2)
         {
             self.entities[ei].hp -= CANNON_DAMAGE;
             if self.entities[ei].hp <= 0.0 {
-                self.entities.swap_remove(ei);
-                self.enemies_defeated += 1;
+                let e = self.entities.swap_remove(ei);
+                match e.faction {
+                    Faction::Enemy => self.enemies_defeated += 1,
+                    Faction::Player => self.units_lost += 1,
+                    Faction::Ally => {}
+                }
             }
             return true;
         }
@@ -2325,45 +2494,90 @@ impl Game {
         }
     }
 
-    /// Sail the navy. Each warship hunts the nearest hostile (a pirate or an
-    /// enemy ashore), closes to a standoff, and shells it, all without ever
-    /// leaving the water. With nothing to fight it makes for the open ocean and
-    /// patrols the deep sea.
+    /// The nearest thing a warship of `faction` at `from` would fire on within
+    /// detection range: a pirate, a hostile hull (warship, transport, or the
+    /// player's cargo ships), or a hostile unit ashore (the ship shells the
+    /// shore from the water).
+    fn navy_target(&self, faction: Faction, from: Vec2) -> Option<Vec2> {
+        let gunner = Gunner::Navy(faction);
+        let mut best = WARSHIP_DETECT_RANGE;
+        let mut target = nearest_vessel(
+            &self.ships,
+            &self.transports,
+            &self.warships,
+            from,
+            best,
+            gunner,
+        );
+        if let Some(t) = target {
+            best = (t - from).length();
+        }
+        for p in &self.pirates {
+            let d = (p.pos - from).length();
+            if d < best {
+                best = d;
+                target = Some(p.pos);
+            }
+        }
+        for e in &self.entities {
+            if !hostile(faction, e.faction) {
+                continue;
+            }
+            let d = (e.pos - from).length();
+            if d < best {
+                best = d;
+                target = Some(e.pos);
+            }
+        }
+        target
+    }
+
+    /// Sail every warship afloat, whichever flag it flies. Each hunts the
+    /// nearest hostile in sight (a pirate, a hostile hull, or a foe ashore),
+    /// closes to a standoff, and shells it, all without ever leaving the
+    /// water. Standing orders come first: the player's ships and the hired
+    /// escorts make for the navy rally flag while one stands, and a ship with
+    /// a `goal` of its own (an escort crossing to the player's harbor, an
+    /// enemy ship bound for its raid's landing) sails there before anything
+    /// else. With nothing to do, the player's and the allies' ships make for
+    /// the open ocean and patrol the deep sea, while an enemy ship holds its
+    /// station off the coast it came to bombard and withdraws once its sortie
+    /// is up.
     fn update_navy(&mut self, dt: f32) {
         // Set once a warship reaches the navy rally flag, lifting it for the
         // whole fleet after the loop (mirrors the knights' flag).
         let mut rally_arrived = false;
-        for i in 0..self.warships.len() {
+        let mut i = 0;
+        while i < self.warships.len() {
+            let faction = self.warships[i].faction;
             self.warships[i].bob += dt;
             self.warships[i].reload -= dt;
             self.warships[i].repath -= dt;
+            self.warships[i].sortie += dt;
+            // An enemy sortie ends with the ship sailing for home, which is
+            // simply off the map.
+            if faction == Faction::Enemy && self.warships[i].sortie >= ENEMY_SORTIE {
+                log::info!("an enemy warship withdrew, its sortie over");
+                self.warships.swap_remove(i);
+                continue;
+            }
             let wp = self.warships[i].pos;
             let wt = (wp.x.floor() as i32, wp.y.floor() as i32);
             // Keep the surrounding sea real so tile reads (and BFS) are accurate.
             self.world
                 .ensure_region(wt.0 - 8, wt.1 - 8, wt.0 + 8, wt.1 + 8);
 
-            // Nearest hostile in detection range: pirate first, then any enemy
-            // land unit (the warship shells the shore from the water).
-            let mut target: Option<Vec2> = None;
-            let mut best = WARSHIP_DETECT_RANGE;
-            for p in &self.pirates {
-                let d = (p.pos - wp).length();
-                if d < best {
-                    best = d;
-                    target = Some(p.pos);
-                }
-            }
-            for e in &self.entities {
-                if e.faction != Faction::Enemy {
-                    continue;
-                }
-                let d = (e.pos - wp).length();
-                if d < best {
-                    best = d;
-                    target = Some(e.pos);
-                }
-            }
+            let target = self.navy_target(faction, wp);
+
+            // Standing orders, if any: the shared navy flag for the player's
+            // ships and the escorts (an escort still crossing over answers
+            // its own goal when no flag stands), the ship's own goal for the
+            // enemy's.
+            let orders = match faction {
+                Faction::Player => self.navy_rally,
+                Faction::Ally => self.navy_rally.or(self.warships[i].goal),
+                Faction::Enemy => self.warships[i].goal,
+            };
 
             // Decide the route. Crucially this is real water pathfinding, not
             // greedy steering: the ship BFS-routes *around* the coastline to a
@@ -2371,16 +2585,22 @@ impl Game {
             // target across an inlet no longer sends it circling the shore, and
             // it commits to a heading instead of twitching every frame.
             let holding = self.warships[i].path_cursor >= self.warships[i].path.len();
-            if let Some(r) = self.navy_rally {
-                // A rally flag overrides the hunt: make for the flag (the guns
-                // stay hot on the way; see the firing block below). Close
-                // enough counts as arrived, which lifts the flag after the loop.
+            if let Some(r) = orders {
+                // Orders override the hunt: make for the spot (the guns stay
+                // hot on the way; see the firing block below). Close enough
+                // counts as arrived: the shared flag then lifts for the whole
+                // fleet after the loop, a ship's own goal for that ship alone.
                 if (r - wp).length() <= NAVY_RALLY_ARRIVE {
-                    rally_arrived = true;
+                    if faction != Faction::Enemy && self.navy_rally == Some(r) {
+                        rally_arrived = true;
+                    }
+                    if self.warships[i].goal == Some(r) {
+                        self.warships[i].goal = None;
+                    }
                     self.warships[i].path.clear();
                     self.warships[i].path_cursor = 0;
                 } else {
-                    // Plan toward a fresh flag at once; after that the flag
+                    // Plan toward fresh orders at once; after that the spot
                     // never moves, so only retry on the long stuck-timeout.
                     let new_flag = (r - self.warships[i].plan_pos).length() > 0.5;
                     if new_flag || (holding && self.warships[i].repath <= 0.0) {
@@ -2423,6 +2643,11 @@ impl Game {
                         self.warships[i].path_cursor = 0;
                     }
                 }
+            } else if faction == Faction::Enemy {
+                // No quarry: an enemy ship holds the station it sailed to and
+                // waits for something to come within reach of its guns.
+                self.warships[i].path.clear();
+                self.warships[i].path_cursor = 0;
             } else if holding || self.warships[i].repath <= 0.0 {
                 // No quarry: make for the open ocean, then wander it. Commit to
                 // one waypoint and only pick a new one on arrival (or the long
@@ -2448,11 +2673,12 @@ impl Game {
                         pos: wp,
                         vel: dir * CANNONBALL_SPEED,
                         life: CANNONBALL_LIFE,
-                        from_pirate: false,
+                        gunner: Gunner::Navy(faction),
                     });
                     self.warships[i].reload = WARSHIP_RELOAD;
                 }
             }
+            i += 1;
         }
         if rally_arrived {
             self.navy_rally = None;
@@ -2863,6 +3089,9 @@ impl Game {
                     && self.stone >= WARSHIP_STONE_COST
                     && self.money >= WARSHIP_GOLD_COST
             }
+            // Rallying needs a ship to answer: the player's own or a hired
+            // escort, both of which follow the flag.
+            AlertResponse::RallyNavy => self.warships.iter().any(|w| w.faction != Faction::Enemy),
         }
     }
 
@@ -2880,6 +3109,10 @@ impl Game {
         }
         let done = match response {
             AlertResponse::SummonWarship => self.summon_warship(alert.pos),
+            AlertResponse::RallyNavy => {
+                self.navy_rally = Some(alert.pos);
+                true
+            }
         };
         if done {
             self.alerts.remove(i);
@@ -3906,17 +4139,8 @@ impl Game {
         self.wood -= WARSHIP_WOOD_COST;
         self.stone -= WARSHIP_STONE_COST;
         self.money -= WARSHIP_GOLD_COST;
-        self.warships.push(Warship {
-            pos: tile_center(spot),
-            facing: Dir::Down,
-            path: Vec::new(),
-            path_cursor: 0,
-            plan_pos: Vec2::ZERO,
-            repath: 0.0,
-            reload: WARSHIP_RELOAD,
-            bob: 0.0,
-            hp: WARSHIP_MAX_HP,
-        });
+        self.warships
+            .push(Warship::new(Faction::Player, tile_center(spot)));
     }
 
     /// While the autonomous-trade switch is on, keep the harbor busy: on each
@@ -4375,6 +4599,228 @@ impl Game {
             log::info!("the hired company sailed home");
             self.push_alert(AlertKind::MercenariesLeft, pos);
         }
+    }
+
+    /// Hired allied warships currently afloat.
+    pub fn escorts(&self) -> usize {
+        self.warship_count(Faction::Ally)
+    }
+
+    /// Hire an allied warship to sail with the navy. It launches from the
+    /// allied port nearest the player's home harbor, crosses to that harbor,
+    /// and from then on behaves as one of the player's own: hunting pirates
+    /// and enemy hulls, shelling foes ashore, patrolling the deep sea, and
+    /// answering the navy rally flag. It sails home once the sea has been
+    /// quiet a while (see `stand_down_escorts`). Gold is paid up front.
+    /// Refused, with nothing spent and a toast saying why, when the treasury
+    /// is short, the escort cap is reached, the home harbor has no water, or
+    /// no sea route joins an allied port to it.
+    pub fn hire_escort(&mut self) -> bool {
+        let at = self.start_center();
+        let refuse = |game: &mut Game, why: LaunchRefusal| {
+            game.push_alert(AlertKind::LaunchRefused(why), at);
+            false
+        };
+        if self.money < ESCORT_HIRE_COST {
+            return refuse(self, LaunchRefusal::Stockpile);
+        }
+        if self.escorts() >= MAX_ESCORTS {
+            return refuse(self, LaunchRefusal::Escorts);
+        }
+        let Some(harbor) = self.harbor_water() else {
+            return refuse(self, LaunchRefusal::NoShore);
+        };
+        // Every allied port goes into one search, so the escort leaves from
+        // whichever truly connects, and the nearest one at that.
+        let houses = self.world.ally_house_tiles.clone();
+        let docks = self.docks_near(&houses);
+        let Some((port, path)) = plan_voyage(&mut self.world, &docks, harbor) else {
+            return refuse(self, LaunchRefusal::NoRoute);
+        };
+        self.money -= ESCORT_HIRE_COST;
+        let start = tile_center(port);
+        let mut w = Warship::new(Faction::Ally, start);
+        w.path = smooth_water_path(&self.world, port, &path);
+        w.goal = Some(tile_center(harbor));
+        w.plan_pos = tile_center(harbor);
+        w.repath = NAVY_RALLY_REPLAN;
+        self.warships.push(w);
+        self.escort_quiet = 0.0;
+        log::info!("hired an allied escort for {ESCORT_HIRE_COST} gold");
+        self.push_alert(AlertKind::EscortSailed, start);
+        true
+    }
+
+    /// Once no navy flag stands and no hostile has been in sight of any
+    /// escort for `ESCORT_STAND_DOWN` seconds, the hired warships count their
+    /// work done and sail home: they leave the map, and an alert says so. An
+    /// escort still crossing over is never sent home.
+    fn stand_down_escorts(&mut self, dt: f32) {
+        let escorts: Vec<usize> = self
+            .warships
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.faction == Faction::Ally)
+            .map(|(i, _)| i)
+            .collect();
+        if escorts.is_empty() {
+            return;
+        }
+        let engaged = self.navy_rally.is_some()
+            || escorts.iter().any(|&i| {
+                let w = &self.warships[i];
+                w.goal.is_some() || self.navy_target(Faction::Ally, w.pos).is_some()
+            });
+        if engaged {
+            self.escort_quiet = 0.0;
+            return;
+        }
+        self.escort_quiet += dt;
+        if self.escort_quiet < ESCORT_STAND_DOWN {
+            return;
+        }
+        self.escort_quiet = 0.0;
+        let at = self.warships[escorts[0]].pos;
+        self.warships.retain(|w| w.faction != Faction::Ally);
+        log::info!("the allied escort sailed home");
+        self.push_alert(AlertKind::EscortLeft, at);
+    }
+
+    /// The enemy's sea raids. On each check, an enemy village grown to
+    /// `ENEMY_RAID_MIN_HOUSES` houses with knights to spare beyond its
+    /// garrison loads `ENEMY_RAID_KNIGHTS` onto a troop ship bound for the
+    /// coast by the player's least-defended village (the enemy picks the soft
+    /// target); a village of `ENEMY_NAVY_MIN_HOUSES` houses sends a warship
+    /// along as escort, which bombards that coast until its sortie is up.
+    /// The raid is announced at its landing the moment it casts off, so the
+    /// player has the crossing to answer it. Nothing happens while a raid is
+    /// already at sea, while the enemy has no village big enough, or when no
+    /// sea route joins the raider's port to the target's shore.
+    fn enemy_sea_raid(&mut self, dt: f32) {
+        self.enemy_raid_timer -= dt;
+        if self.enemy_raid_timer > 0.0 {
+            return;
+        }
+        self.enemy_raid_timer = ENEMY_RAID_INTERVAL;
+        if self.enemy_raids_at_sea() >= MAX_ENEMY_RAIDS {
+            return;
+        }
+        // The soft target: the player's village with the fewest defenders,
+        // ties broken at random.
+        let mut targets: Vec<usize> = Vec::new();
+        let mut fewest = usize::MAX;
+        for (i, v) in self.villages.iter().enumerate() {
+            if v.faction != Faction::Player {
+                continue;
+            }
+            if v.knights < fewest {
+                fewest = v.knights;
+                targets.clear();
+            }
+            if v.knights == fewest {
+                targets.push(i);
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        let target = targets[self.rng.range(0, targets.len() as i32) as usize];
+        let center = self.villages[target].center;
+        let center_tile = (center.x.floor() as i32, center.y.floor() as i32);
+        // A random enemy village big enough to raid, with the knights to
+        // spare: random, so a village whose port has no route to the target
+        // doesn't stall the enemy's whole navy.
+        let attr2 = VILLAGE_ATTRIBUTION_RADIUS * VILLAGE_ATTRIBUTION_RADIUS;
+        let mut raiders: Vec<(usize, Vec<usize>)> = Vec::new();
+        for (vi, v) in self.villages.iter().enumerate() {
+            if v.faction != Faction::Enemy || v.houses < ENEMY_RAID_MIN_HOUSES {
+                continue;
+            }
+            let knights: Vec<usize> = self
+                .entities
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    e.faction == Faction::Enemy
+                        && e.job == Job::Knight
+                        && e.found_at.is_none()
+                        && e.pos.distance_squared(v.center) <= attr2
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if knights.len() >= ENEMY_RAID_KNIGHTS + ENEMY_RAID_GARRISON {
+                raiders.push((vi, knights));
+            }
+        }
+        if raiders.is_empty() {
+            return;
+        }
+        let (vi, mut knights) =
+            raiders.swap_remove(self.rng.range(0, raiders.len() as i32) as usize);
+        let Some(anchor) =
+            find_ocean_coast_anchor(&mut self.world, center_tile, MERC_LANDING_SEARCH)
+        else {
+            return;
+        };
+        let (min, max) = (self.villages[vi].min, self.villages[vi].max);
+        let houses: Vec<Tile> = self
+            .world
+            .enemy_house_tiles
+            .iter()
+            .copied()
+            .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
+            .collect();
+        let docks = self.docks_near(&houses);
+        let Some((port, path)) = plan_voyage(&mut self.world, &docks, anchor) else {
+            return;
+        };
+        // The knights nearest the quay board. Remove from the highest index
+        // down so the earlier ones stay valid.
+        let start = tile_center(port);
+        knights.sort_by(|&a, &b| {
+            self.entities[a]
+                .pos
+                .distance_squared(start)
+                .total_cmp(&self.entities[b].pos.distance_squared(start))
+        });
+        knights.truncate(ENEMY_RAID_KNIGHTS);
+        knights.sort_unstable_by(|a, b| b.cmp(a));
+        for i in knights {
+            self.entities.swap_remove(i);
+        }
+        let facing = path
+            .first()
+            .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
+        // A big enough village sends a warship along, on the same route, to
+        // bombard the landing and whatever comes to meet the raid.
+        let escorted = self.villages[vi].houses >= ENEMY_NAVY_MIN_HOUSES
+            && self.warship_count(Faction::Enemy) < MAX_ENEMY_WARSHIPS;
+        if escorted {
+            let mut w = Warship::new(Faction::Enemy, start);
+            w.path = smooth_water_path(&self.world, port, &path);
+            w.goal = Some(tile_center(anchor));
+            w.plan_pos = tile_center(anchor);
+            w.repath = NAVY_RALLY_REPLAN;
+            self.warships.push(w);
+        }
+        self.transports.push(Transport {
+            pos: start,
+            faction: Faction::Enemy,
+            path,
+            path_cursor: 0,
+            anchor,
+            civilians: 0,
+            knights: ENEMY_RAID_KNIGHTS as u32,
+            bob: 0.0,
+            facing,
+        });
+        log::info!(
+            "an enemy raid of {ENEMY_RAID_KNIGHTS} set sail for ({}, {}){}",
+            anchor.0,
+            anchor.1,
+            if escorted { " with an escort" } else { "" }
+        );
+        self.push_alert(AlertKind::EnemyFleetSailed, tile_center(anchor));
     }
 
     /// Lift the rally flag; knights resume defending on their own.
@@ -6075,32 +6521,36 @@ fn open_sea(world: &World, x: i32, y: i32) -> bool {
     water >= OPEN_SEA_NEIGHBORS
 }
 
-/// Position of the nearest player vessel (cargo ship or warship) within `max`
-/// of `from`, if any. What a pirate hunts and shells.
-fn nearest_player_vessel(
+/// Position of the nearest vessel (cargo ship, transport, or warship) within
+/// `max` of `from` that `gunner` would fire on, if any. Cargo ships are the
+/// player's; the rest fly their own faction's flag.
+fn nearest_vessel(
     ships: &[Ship],
     transports: &[Transport],
     warships: &[Warship],
     from: Vec2,
     max: f32,
+    gunner: Gunner,
 ) -> Option<Vec2> {
     let mut best = max;
     let mut pos = None;
-    for s in ships {
+    if gunner.harms(Faction::Player) {
+        for s in ships {
+            let d = (s.pos - from).length();
+            if d < best {
+                best = d;
+                pos = Some(s.pos);
+            }
+        }
+    }
+    for s in transports.iter().filter(|s| gunner.harms(s.faction)) {
         let d = (s.pos - from).length();
         if d < best {
             best = d;
             pos = Some(s.pos);
         }
     }
-    for s in transports {
-        let d = (s.pos - from).length();
-        if d < best {
-            best = d;
-            pos = Some(s.pos);
-        }
-    }
-    for w in warships {
+    for w in warships.iter().filter(|w| gunner.harms(w.faction)) {
         let d = (w.pos - from).length();
         if d < best {
             best = d;
@@ -6262,12 +6712,14 @@ const MAGIC: &[u8; 4] = b"KGDM";
 /// version listed in `from_bytes` loadable: new sections go at the tail of the
 /// blob and default to empty when a save predates them, so upgrading the game
 /// never strands a player's world.
-const VERSION: u8 = 17;
+const VERSION: u8 = 18;
 /// Oldest save version `from_bytes` still accepts. Version 13 is the last
 /// format before transports (it has no transport section to read), v14's
 /// transports carried only settlers (no per-ship knight count), v15 predates
-/// the per-unit birth-faction (origin) tail section, and v16 predates the
-/// unit-flag and transport-owner tail sections.
+/// the per-unit birth-faction (origin) tail section, v16 predates the
+/// unit-flag and transport-owner tail sections, and v17 predates the warship
+/// owner, orders, and sortie tail section (every warship then was the
+/// player's).
 const MIN_VERSION: u8 = 13;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
@@ -6564,6 +7016,28 @@ impl Game {
         for s in &self.transports {
             wu8(&mut b, faction_u8(s.faction));
         }
+
+        // v18 tail section: each warship's owner, standing orders (a flag
+        // byte, then the spot), and time at sea, so an enemy sortie or an
+        // allied escort survives a save. Older saves lack it and every
+        // warship defaults to the player's, with no orders and a fresh clock.
+        wu32(&mut b, self.warships.len() as u32);
+        for w in &self.warships {
+            wu8(&mut b, faction_u8(w.faction));
+            match w.goal {
+                Some(g) => {
+                    wu8(&mut b, 1);
+                    wf32(&mut b, g.x);
+                    wf32(&mut b, g.y);
+                }
+                None => {
+                    wu8(&mut b, 0);
+                    wf32(&mut b, 0.0);
+                    wf32(&mut b, 0.0);
+                }
+            }
+            wf32(&mut b, w.sortie);
+        }
         b
     }
 
@@ -6699,17 +7173,11 @@ impl Game {
         for _ in 0..wcount {
             let pos = Vec2::new(r.f32()?, r.f32()?);
             let hp = r.f32()?;
-            warships.push(Warship {
-                pos,
-                facing: Dir::Down,
-                path: Vec::new(),
-                path_cursor: 0,
-                plan_pos: Vec2::ZERO,
-                repath: 0.0,
-                reload: WARSHIP_RELOAD,
-                bob: 0.0,
-                hp,
-            });
+            // Owner, orders, and sortie come from the v18 tail section below;
+            // until then every warship is the player's.
+            let mut w = Warship::new(Faction::Player, pos);
+            w.hp = hp;
+            warships.push(w);
         }
 
         let auto_build = r.u8()? != 0;
@@ -6883,6 +7351,27 @@ impl Game {
             }
         }
 
+        // Warship owners, orders, and sorties (v18 tail section); older
+        // saves keep the player-owned, orderless defaults set above. The hull
+        // is re-capped to its owner's strength, so an enemy ship never loads
+        // with more hull than it can have.
+        if version >= 18 {
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let faction = faction_of(r.u8()?);
+                let has_goal = r.u8()? != 0;
+                let goal = Vec2::new(r.f32()?, r.f32()?);
+                let sortie = r.f32()?;
+                if let Some(w) = warships.get_mut(i) {
+                    w.faction = faction;
+                    w.hp = w.hp.min(warship_max_hp(faction));
+                    w.goal = has_goal.then_some(goal);
+                    w.plan_pos = goal;
+                    w.sortie = sortie;
+                }
+            }
+        }
+
         // Rebuild the player-tile lists (houses, mines, huts) by scanning chunks.
         let mut player_house_tiles = Vec::new();
         let mut cave_tiles = Vec::new();
@@ -6966,6 +7455,8 @@ impl Game {
             enemy_bud_timer: ENEMY_BUD_INTERVAL,
             ally_bud_timer: ALLY_BUD_INTERVAL,
             merc_quiet: 0.0,
+            escort_quiet: 0.0,
+            enemy_raid_timer: ENEMY_RAID_INTERVAL,
             enemy_found_timer: ENEMY_FOUND_INTERVAL,
             ally_found_timer: ALLY_FOUND_INTERVAL,
             enemy_villages_founded,
@@ -7297,9 +7788,10 @@ mod tests {
         // byte. Loading it must still work, with nothing at sea.
         let game = Game::new(3);
         let mut bytes = game.to_bytes(CAM);
-        // Strip the tail sections newer than v15: transport owners and unit
-        // flags (v17), then origins (v16).
+        // Strip the tail sections newer than v13: warship owners (v18),
+        // transport owners and unit flags (v17), then origins (v16).
         let n = game.entities.len();
+        bytes.truncate(bytes.len() - 4); // warship owners (none afloat)
         bytes.truncate(bytes.len() - 4); // transport owners (none at sea)
         bytes.truncate(bytes.len() - (4 + n)); // unit flags
         bytes.truncate(bytes.len() - (4 + n)); // origins
@@ -7321,9 +7813,10 @@ mod tests {
         // save and relabel the version: it must load as a pure settler ship.
         let game = Game::new(3);
         let mut bytes = game.to_bytes(CAM);
-        // Strip the tail sections newer than v15: transport owners and unit
-        // flags (v17), then origins (v16).
+        // Strip the tail sections newer than v14: warship owners (v18),
+        // transport owners and unit flags (v17), then origins (v16).
         let n = game.entities.len();
+        bytes.truncate(bytes.len() - 4); // warship owners (none afloat)
         bytes.truncate(bytes.len() - 4); // transport owners (none at sea)
         bytes.truncate(bytes.len() - (4 + n)); // unit flags
         bytes.truncate(bytes.len() - (4 + n)); // origins
@@ -8628,16 +9121,10 @@ mod tests {
     fn naval_cannon_fire_hits_the_right_targets() {
         let mut game = Game::new(1);
         let at = |x: f32, y: f32| Vec2::new(x, y);
-        let warship = |pos| Warship {
-            pos,
-            facing: Dir::Down,
-            path: Vec::new(),
-            path_cursor: 0,
-            plan_pos: Vec2::ZERO,
-            repath: 0.0,
-            reload: 0.0,
-            bob: 0.0,
-            hp: WARSHIP_MAX_HP,
+        let warship = |faction, pos| {
+            let mut w = Warship::new(faction, pos);
+            w.reload = 0.0;
+            w
         };
         let pirate = |pos| Pirate {
             pos,
@@ -8648,18 +9135,19 @@ mod tests {
             bob: 0.0,
             hp: PIRATE_MAX_HP,
         };
-        let ball = |pos, from_pirate| Cannonball {
+        let ball = |pos, gunner| Cannonball {
             pos,
             vel: Vec2::ZERO,
             life: 1.0,
-            from_pirate,
+            gunner,
         };
+        let navy = Gunner::Navy(Faction::Player);
 
-        game.warships.push(warship(at(0.5, 0.5)));
+        game.warships.push(warship(Faction::Player, at(0.5, 0.5)));
         game.pirates.push(pirate(at(20.5, 0.5)));
 
         // A pirate's shell wears down a warship (it doesn't sink in one hit).
-        game.cannonballs.push(ball(at(0.5, 0.5), true));
+        game.cannonballs.push(ball(at(0.5, 0.5), Gunner::Pirate));
         game.update_cannonballs(0.01);
         assert!(game.cannonballs.is_empty(), "shell should have struck");
         assert_eq!(game.warships.len(), 1);
@@ -8669,7 +9157,7 @@ mod tests {
         );
 
         // A navy shell wears down a pirate the same way.
-        game.cannonballs.push(ball(at(20.5, 0.5), false));
+        game.cannonballs.push(ball(at(20.5, 0.5), navy));
         game.update_cannonballs(0.01);
         assert!(game.cannonballs.is_empty());
         assert_eq!(game.pirates.len(), 1);
@@ -8680,15 +9168,15 @@ mod tests {
         game.entities
             .push(Entity::new(Faction::Enemy, Job::Civilian, (40, 0)));
         let before = game.entities.len();
-        game.cannonballs.push(ball(tile_center((40, 0)), false));
+        game.cannonballs.push(ball(tile_center((40, 0)), navy));
         game.update_cannonballs(0.01);
         assert_eq!(game.entities.len(), before - 1, "enemy should be slain");
         assert_eq!(game.enemies_defeated, defeated0 + 1);
 
         // Friendly fire is impossible: a pirate's shell passes harmlessly over
-        // another pirate (it hits only the player's vessels), so it flies on.
+        // another pirate (it hits only hulls under a flag), so it flies on.
         let hp_before = game.pirates[0].hp;
-        game.cannonballs.push(ball(at(20.5, 0.5), true));
+        game.cannonballs.push(ball(at(20.5, 0.5), Gunner::Pirate));
         game.update_cannonballs(0.01);
         assert_eq!(
             game.pirates[0].hp, hp_before,
@@ -8698,6 +9186,259 @@ mod tests {
             game.cannonballs.len(),
             1,
             "the shell struck nothing and flies on"
+        );
+        game.cannonballs.clear();
+
+        // An enemy warship's shell wears down the player's hull, and the
+        // player's shell an enemy hull; neither harms its own side, and an
+        // allied escort is as safe from the navy as the navy is from it.
+        game.warships.push(warship(Faction::Enemy, at(60.5, 0.5)));
+        game.warships.push(warship(Faction::Ally, at(80.5, 0.5)));
+        let hp0 = game.warships[0].hp;
+        game.cannonballs.push(ball(at(0.5, 0.5), navy));
+        game.update_cannonballs(0.01);
+        assert_eq!(game.warships[0].hp, hp0, "the navy never shells itself");
+        assert_eq!(game.cannonballs.len(), 1, "the shell flies on");
+        game.cannonballs.clear();
+        game.cannonballs
+            .push(ball(at(0.5, 0.5), Gunner::Navy(Faction::Enemy)));
+        game.update_cannonballs(0.01);
+        assert!(game.warships[0].hp < hp0, "enemy guns should harm the navy");
+        let enemy_hp0 = game.warships[1].hp;
+        game.cannonballs.push(ball(at(60.5, 0.5), navy));
+        game.update_cannonballs(0.01);
+        assert!(
+            game.warships[1].hp < enemy_hp0,
+            "the navy should harm an enemy hull"
+        );
+        let ally_hp0 = game.warships[2].hp;
+        game.cannonballs.push(ball(at(80.5, 0.5), navy));
+        game.update_cannonballs(0.01);
+        assert_eq!(
+            game.warships[2].hp, ally_hp0,
+            "the navy never shells an escort"
+        );
+        game.cannonballs.clear();
+        game.cannonballs
+            .push(ball(at(80.5, 0.5), Gunner::Navy(Faction::Enemy)));
+        game.update_cannonballs(0.01);
+        assert!(
+            game.warships[2].hp < ally_hp0,
+            "enemy guns should harm an escort"
+        );
+
+        // An enemy shell cuts down one of the player's units ashore and
+        // counts it among the realm's losses.
+        let lost0 = game.units_lost;
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Civilian, (100, 0)));
+        let before = game.entities.len();
+        game.cannonballs
+            .push(ball(tile_center((100, 0)), Gunner::Navy(Faction::Enemy)));
+        game.update_cannonballs(0.01);
+        assert_eq!(game.entities.len(), before - 1, "villager should be slain");
+        assert_eq!(game.units_lost, lost0 + 1);
+    }
+
+    #[test]
+    fn enemy_warships_are_sunk_with_an_alert_and_withdraw_after_a_sortie() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        game.pirates.clear();
+        game.warships.clear();
+        let at = |x: f32, y: f32| Vec2::new(x, y);
+
+        // Enough navy shells sink an enemy hull, raising the enemy-sunk alert.
+        let mut w = Warship::new(Faction::Enemy, at(0.5, 0.5));
+        w.hp = CANNON_DAMAGE;
+        game.warships.push(w);
+        game.cannonballs.push(Cannonball {
+            pos: at(0.5, 0.5),
+            vel: Vec2::ZERO,
+            life: 1.0,
+            gunner: Gunner::Navy(Faction::Player),
+        });
+        game.update_cannonballs(0.01);
+        assert!(game.warships.is_empty(), "the enemy hull should have sunk");
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::EnemyShipSunk),
+            "sinking an enemy ship should raise its alert"
+        );
+
+        // An enemy warship whose sortie is up leaves the map on its own.
+        let mut w = Warship::new(Faction::Enemy, at(0.5, 0.5));
+        w.sortie = ENEMY_SORTIE;
+        game.warships.push(w);
+        game.update_navy(0.1);
+        assert!(game.warships.is_empty(), "the sortie should have ended");
+    }
+
+    #[test]
+    fn warship_owners_and_orders_survive_a_save() {
+        let mut game = Game::new(1);
+        game.warships.clear();
+        let at = |x: f32, y: f32| Vec2::new(x, y);
+        game.warships
+            .push(Warship::new(Faction::Player, at(1.5, 1.5)));
+        let mut escort = Warship::new(Faction::Ally, at(2.5, 2.5));
+        escort.goal = Some(at(9.0, 9.0));
+        game.warships.push(escort);
+        let mut raider = Warship::new(Faction::Enemy, at(3.5, 3.5));
+        raider.sortie = 42.0;
+        raider.hp = 10.0;
+        game.warships.push(raider);
+
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+        assert_eq!(loaded.warships().len(), 3);
+        assert_eq!(loaded.warships()[0].faction, Faction::Player);
+        assert_eq!(loaded.warships()[0].goal, None);
+        assert_eq!(loaded.warships()[1].faction, Faction::Ally);
+        assert_eq!(loaded.warships()[1].goal, Some(at(9.0, 9.0)));
+        assert_eq!(loaded.warships()[2].faction, Faction::Enemy);
+        assert_eq!(loaded.warships()[2].sortie, 42.0);
+        assert_eq!(loaded.warships()[2].hp, 10.0);
+        assert_eq!(loaded.escorts(), 1);
+    }
+
+    #[test]
+    fn a_v17_save_loads_its_warships_as_the_players() {
+        let mut game = Game::new(1);
+        game.warships.clear();
+        game.warships
+            .push(Warship::new(Faction::Player, Vec2::new(1.5, 1.5)));
+        let mut bytes = game.to_bytes(CAM);
+        // Strip the v18 tail (count + one record) and stamp the old version.
+        let tail = 4 + (1 + 1 + 4 + 4 + 4);
+        bytes.truncate(bytes.len() - tail);
+        bytes[4] = 17;
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v17 save must load");
+        assert_eq!(loaded.warships().len(), 1);
+        assert_eq!(loaded.warships()[0].faction, Faction::Player);
+        assert_eq!(loaded.warships()[0].goal, None);
+        assert_eq!(loaded.warships()[0].sortie, 0.0);
+    }
+
+    #[test]
+    fn hired_escorts_join_the_navy_and_sail_home_when_quiet() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        game.pirates.clear();
+        game.warships.clear();
+        // Short of gold: refused, nothing afloat.
+        game.money = 0;
+        assert!(!game.hire_escort());
+        assert_eq!(game.escorts(), 0);
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| matches!(a.kind, AlertKind::LaunchRefused(LaunchRefusal::Stockpile))),
+            "a refused hire says why"
+        );
+
+        // An escort afloat with nothing in sight and no flag stands down
+        // once the sea has been quiet long enough, and says so.
+        let mut escort = Warship::new(Faction::Ally, Vec2::new(0.5, 0.5));
+        escort.goal = None;
+        game.warships.push(escort);
+        game.alerts.clear();
+        game.stand_down_escorts(ESCORT_STAND_DOWN + 1.0);
+        assert_eq!(game.escorts(), 0, "a quiet escort sails home");
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::EscortLeft),
+            "the escort's leaving raises an alert"
+        );
+
+        // One still crossing over (goal set) never stands down.
+        let mut escort = Warship::new(Faction::Ally, Vec2::new(0.5, 0.5));
+        escort.goal = Some(Vec2::new(50.0, 50.0));
+        game.warships.push(escort);
+        game.stand_down_escorts(ESCORT_STAND_DOWN + 1.0);
+        assert_eq!(game.escorts(), 1, "a crossing escort stays");
+
+        // Neither does one while the navy flag stands.
+        game.warships[0].goal = None;
+        game.navy_rally = Some(Vec2::new(5.0, 5.0));
+        game.stand_down_escorts(ESCORT_STAND_DOWN + 1.0);
+        assert_eq!(game.escorts(), 1, "a flagged escort stays");
+    }
+
+    #[test]
+    fn enemy_raiders_go_ashore_as_enemy_knights() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        let anchor = game
+            .player_houses()
+            .first()
+            .copied()
+            .expect("the capital has houses");
+        let before = game.entities.len();
+        game.land_transport(Transport {
+            pos: tile_center(anchor),
+            faction: Faction::Enemy,
+            path: Vec::new(),
+            path_cursor: 0,
+            anchor,
+            civilians: 0,
+            knights: ENEMY_RAID_KNIGHTS as u32,
+            bob: 0.0,
+            facing: Dir::Down,
+        });
+        let raiders = game
+            .entities
+            .iter()
+            .filter(|e| e.faction == Faction::Enemy && e.job == Job::Knight)
+            .count();
+        assert_eq!(raiders, ENEMY_RAID_KNIGHTS, "every raider should land");
+        assert_eq!(game.entities.len(), before + ENEMY_RAID_KNIGHTS);
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::EnemyTroopsLanded),
+            "a landing raises its alert"
+        );
+        assert!(
+            !game.player_houses().is_empty(),
+            "a raid never founds anything"
+        );
+    }
+
+    #[test]
+    fn an_enemy_fleet_alert_offers_to_rally_the_navy() {
+        let mut game = Game::new(1);
+        game.warships.clear();
+        let at = Vec2::new(12.0, 12.0);
+        game.push_alert(AlertKind::EnemyFleetSailed, at);
+        let i = game
+            .alerts()
+            .iter()
+            .position(|a| a.kind == AlertKind::EnemyFleetSailed)
+            .unwrap();
+        assert_eq!(
+            AlertKind::EnemyFleetSailed.response(),
+            Some(AlertResponse::RallyNavy)
+        );
+        // Nothing afloat to answer: the button is withheld and the click is
+        // a no-op.
+        assert!(!game.can_respond(AlertResponse::RallyNavy));
+        game.respond_to_alert(i);
+        assert_eq!(game.navy_rally, None);
+        // With a warship afloat the flag is planted and the toast dismissed.
+        game.warships
+            .push(Warship::new(Faction::Player, Vec2::new(0.5, 0.5)));
+        assert!(game.can_respond(AlertResponse::RallyNavy));
+        game.respond_to_alert(i);
+        assert_eq!(game.navy_rally, Some(at));
+        assert!(
+            !game
+                .alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::EnemyFleetSailed),
+            "a taken alert is dismissed"
         );
     }
 
@@ -8783,17 +9524,8 @@ mod tests {
             .push(Entity::new(Faction::Enemy, Job::Knight, (0, -15)));
         let enemy_hp0 = game.entities[0].hp;
 
-        game.warships.push(Warship {
-            pos: tile_center((0, 0)),
-            facing: Dir::Down,
-            path: Vec::new(),
-            path_cursor: 0,
-            plan_pos: Vec2::ZERO,
-            repath: 0.0,
-            reload: WARSHIP_RELOAD,
-            bob: 0.0,
-            hp: WARSHIP_MAX_HP,
-        });
+        game.warships
+            .push(Warship::new(Faction::Player, tile_center((0, 0))));
 
         // Sim window far away, so the enemy's own AI never runs. Only the navy
         // (which updates every frame) and the shells it fires move.
@@ -8847,17 +9579,8 @@ mod tests {
         assert!(!open_sea(&game.world, 0, 0), "channel isn't open sea");
         assert!(open_sea(&game.world, 17, 0), "basin center is open sea");
 
-        game.warships.push(Warship {
-            pos: tile_center((0, 0)),
-            facing: Dir::Down,
-            path: Vec::new(),
-            path_cursor: 0,
-            plan_pos: Vec2::ZERO,
-            repath: 0.0,
-            reload: WARSHIP_RELOAD,
-            bob: 0.0,
-            hp: WARSHIP_MAX_HP,
-        });
+        game.warships
+            .push(Warship::new(Faction::Player, tile_center((0, 0))));
 
         let sim = (500, 500, 510, 510);
         let mut reached = false;

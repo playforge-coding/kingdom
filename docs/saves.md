@@ -17,9 +17,13 @@ A save captures everything needed to reconstruct your session exactly:
 - **Every unit:** position, faction, role, and state.
 - **Cargo ships** currently at sea, with their load and payout, plus the
   **autonomous-trade switch** and the configured cargo load.
-- **Settler and troop ships** under sail, with everyone aboard and their
-  destination.
-- **Warships** afloat, with their remaining hull.
+- **Settler and troop ships** under sail, with everyone aboard, their
+  destination, and their owner (yours, a hired allied company's, or an enemy
+  raid's).
+- **Warships** afloat, with their owner (yours, a hired allied escort, or the
+  enemy's), their remaining hull, any standing orders (an escort's crossing
+  or an enemy ship's landing), and how long an enemy ship has been out on its
+  sortie.
 - **Construction orders** in progress, your **builder zones**, and the
   **autonomous-building switch**.
 - **All edited chunks:** buildings, bridges, and depleted resources.
@@ -45,7 +49,8 @@ The save is a custom binary format, not JSON or a standard container:
 The format is versioned so it can grow without stranding anyone: a newer build
 keeps loading the saves older supported versions wrote, filling in whatever
 they predate with sensible defaults (a save from before settler ships simply
-loads with none at sea). Only a save written by a *newer* build than the one
+loads with none at sea, and one from before the enemy and allied navies loads
+every warship as yours). Only a save written by a *newer* build than the one
 loading it, or one older than the loader still supports, is refused.
 
 ## Where it lives

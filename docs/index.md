@@ -38,10 +38,10 @@ runs both natively and in the browser (via WebGL) using **[Trunk](https://trunkr
 | **UI**          | egui overlay                                                     |
 | **World**       | Infinite seeded continents in 32x32-tile chunks, ringed by ocean |
 | **You control** | The whole settlement, while units act on their own AI            |
-| **Opponents**   | Enemy villages that keep founding more, ever farther out         |
-| **Allies**      | Overseas trade partners that fight the enemy, not you            |
+| **Opponents**   | Enemy villages that keep founding more, and raid by sea once big |
+| **Allies**      | Overseas trade partners that fight the enemy and hire out ships  |
 | **Expansion**   | Capture enemy villages, settle far shores, land knights overseas |
-| **Hazards**     | Rare pirate ships that shell your cargo shipments at sea         |
+| **Hazards**     | Rare pirate ships that shell any hull at sea, and enemy warships |
 | **Persistence** | Custom binary `.dat` blob (native file / web IndexedDB)          |
 | **Platforms**   | Native (Windows/macOS/Linux) and web (WebAssembly)               |
 
