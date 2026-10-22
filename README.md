@@ -144,6 +144,14 @@ both natively and in the browser (via WebGL) using **Trunk**.
     stockpile lasts.
 - Units navigate with grid **pathfinding** (BFS) and treat water, buildings and
   resource nodes as obstacles, routing around them or across bridges.
+- **Testing ground.** The menu's **Testing Ground** button opens an empty,
+  light gray grid instead of a world. Pick a faction and a unit type in its
+  panel and **left-click to place units**, or pick a brush and **paint water,
+  trees, rocks, bridges, houses, walls, huts, and mines** onto tiles
+  instantly, with no builder or cost. **Right-click removes** whoever stands
+  on a tile, or wipes an empty tile back to grass. Nothing spawns or grows
+  there on its own, the units run their ordinary AI, and the grid is never
+  saved.
 
 ## Controls
 
@@ -153,8 +161,8 @@ both natively and in the browser (via WebGL) using **Trunk**.
 | `E` or `=` (hold) | Zoom in |
 | `Q` or `-` (hold) | Zoom out (far out, the map becomes a flat overview) |
 | `M` | Jump to the overview and back |
-| Left-click | Perform the current build action / place a rally flag |
-| Right-click | Clear the rally flags (knights' and navy's) |
+| Left-click | Perform the current build action / place a rally flag (on the testing ground: place the chosen unit or paint the chosen tile) |
+| Right-click | Clear the rally flags (knights' and navy's) (on the testing ground: remove the units on the tile, or wipe an empty tile) |
 | `Esc` | Return to menu (from the menu: quit on native) |
 
 The **egui** panel in the top-left shows your stockpile, population, score, and

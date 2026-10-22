@@ -26,6 +26,11 @@ civilian walks over and builds the site over a few seconds, and clicking a
 pending site cancels and refunds it. See **[Building](building.md)** for what
 each mode does.
 
+On the **[testing ground](testing.md)** the mouse does something simpler:
+left-click places the unit picked in its panel, paints the chosen terrain or
+building onto the tile at once, or plants the rally flag, and right-click
+removes whoever stands on the tile (or wipes an empty tile back to grass).
+
 ## The HUD panel
 
 An **egui** window titled *Kingdom* sits in the top-left corner. It holds your

@@ -12,11 +12,11 @@ use winit::window::Window;
 use crate::atlas::MapColors;
 use crate::game::{
     AlertKind, AlertResponse, BOWMAN_GOLD_COST, BRIDGE_WOOD_COST, BUILD_NEAR_RADIUS, BUILDER_WAGE,
-    BuildMode, ESCORT_HIRE_COST, Faction, Game, GatherPriority, HORSEMAN_GOLD_COST,
-    HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST, KNIGHT_GOLD_COST,
+    Brush, BuildMode, ESCORT_HIRE_COST, Faction, Game, GatherPriority, HORSEMAN_GOLD_COST,
+    HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST, Job, KNIGHT_GOLD_COST,
     LEVY_GOLD_PAY, LaunchRefusal, MAX_ESCORTS, MINE_GOLD_COST, MINE_STONE_COST, Priority,
     SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST,
-    SETTLER_WOOD_COST, STONE_PRICE, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST,
+    SETTLER_WOOD_COST, STONE_PRICE, SandboxTool, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST,
     TROOP_WOOD_COST, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST,
     WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
 };
@@ -24,6 +24,8 @@ use crate::game::{
 /// An action the UI is requesting the app perform this frame.
 pub enum Action {
     CreateWorld(i32),
+    /// Open the testing ground: an empty gray grid to place units on.
+    CreateSandbox,
     Load,
     Resume,
     Save,
@@ -64,6 +66,7 @@ mod icons {
     pub const CROSSHAIR: ImageSource = include_image!("../assets/icons/crosshair.svg");
     pub const DICES: ImageSource = include_image!("../assets/icons/dices.svg");
     pub const FLAG: ImageSource = include_image!("../assets/icons/flag.svg");
+    pub const FLASK_CONICAL: ImageSource = include_image!("../assets/icons/flask-conical.svg");
     pub const FOLDER_OPEN: ImageSource = include_image!("../assets/icons/folder-open.svg");
     pub const GLOBE: ImageSource = include_image!("../assets/icons/globe.svg");
     pub const MAP: ImageSource = include_image!("../assets/icons/map.svg");
@@ -183,6 +186,13 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
         } => menu_ui(ui, menu, *has_save, *has_game),
         Scene::Game { game, view, colors } => {
             let ctx = ui.ctx().clone();
+            // The testing ground has no stockpile, orders, or realm to keep
+            // track of: its one panel is the unit picker.
+            if game.sandbox() {
+                let hud = sandbox_ui(&ctx, game, colors);
+                let alert = alerts_ui(&ctx, game, *view);
+                return hud.or(alert);
+            }
             let hud = game_ui(&ctx, game);
             let realm = realm_ui(&ctx, game, *view, colors, minimap);
             let alert = alerts_ui(&ctx, game, *view);
@@ -245,8 +255,159 @@ fn menu_ui(
 
             ui.add_space(16.0);
             ui.small("A set seed is reproducible; leave it blank for a random one.");
+
+            ui.add_space(24.0);
+            if ui
+                .button((icon(ui, icons::FLASK_CONICAL), "Testing Ground"))
+                .on_hover_text(
+                    "An empty gray grid with nobody on it. Click to place units of any \
+                     faction and type and watch how they behave. It is never saved.",
+                )
+                .clicked()
+            {
+                action = Some(Action::CreateSandbox);
+            }
         });
     });
+    action
+}
+
+/// The testing ground's panel: pick a faction and a unit type to place with
+/// left-click, a terrain or structure brush to paint instead, or the rally
+/// flag, and see who's on the grid.
+fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Option<Action> {
+    let mut action = None;
+    egui::Window::new("Testing Ground")
+        .default_pos([12.0, 12.0])
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.add(WidgetAtom::new((
+                icon(ui, icons::FLASK_CONICAL),
+                RichText::new("Place (left-click)").heading(),
+            )));
+            ui.small(
+                "Left-click a tile to put the chosen unit, terrain or building down; \
+                 everything stands at once. Right-click a tile to remove whoever stands \
+                 on it, or to wipe it back to grass. Units behave as they would in a \
+                 real game.",
+            );
+            ui.separator();
+
+            ui.label("Faction");
+            ui.horizontal(|ui| {
+                for (faction, name) in [
+                    (Faction::Player, "Yours"),
+                    (Faction::Enemy, "Enemy"),
+                    (Faction::Ally, "Allied"),
+                ] {
+                    let swatch = RichText::new(name).color(faction_color32(colors, faction));
+                    ui.selectable_value(&mut game.place_faction, faction, swatch);
+                }
+            });
+            ui.small("Units, houses, walls and huts belong to this faction.");
+            ui.separator();
+
+            ui.radio_value(
+                &mut game.sandbox_tool,
+                SandboxTool::PlaceUnit,
+                RichText::new("Place a unit").strong(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                for (job, name) in [
+                    (Job::Civilian, "Civilian"),
+                    (Job::Knight, "Knight"),
+                    (Job::Horseman, "Horseman"),
+                    (Job::Bowman, "Bowman"),
+                ] {
+                    if ui
+                        .selectable_value(&mut game.place_job, job, name)
+                        .clicked()
+                    {
+                        game.sandbox_tool = SandboxTool::PlaceUnit;
+                    }
+                }
+            });
+
+            ui.radio_value(
+                &mut game.sandbox_tool,
+                SandboxTool::PlaceTile,
+                RichText::new("Paint terrain or a building").strong(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                for (brush, name) in [
+                    (Brush::Grass, "Grass"),
+                    (Brush::Water, "Water"),
+                    (Brush::Tree, "Tree"),
+                    (Brush::Rock, "Rock"),
+                    (Brush::Bridge, "Bridge"),
+                    (Brush::House, "House"),
+                    (Brush::Wall, "Wall"),
+                    (Brush::Hut, "Hut"),
+                    (Brush::Mine, "Mine"),
+                ] {
+                    if ui
+                        .selectable_value(&mut game.place_brush, brush, name)
+                        .clicked()
+                    {
+                        game.sandbox_tool = SandboxTool::PlaceTile;
+                    }
+                }
+            });
+            ui.small(
+                "Painting replaces whatever the tile held. Grass is the eraser. Houses \
+                 raise no villagers here; place the people yourself.",
+            );
+
+            ui.radio_value(
+                &mut game.sandbox_tool,
+                SandboxTool::Rally,
+                (
+                    icon(ui, icons::FLAG),
+                    RichText::new("Rally your knights").strong(),
+                ),
+            );
+            if game.rally_point.is_some()
+                && ui.button((icon(ui, icons::X), "Clear rally")).clicked()
+            {
+                game.clear_rally();
+            }
+            ui.separator();
+
+            ui.heading("On the grid");
+            let (yours, enemy, allied) = game.faction_counts();
+            ui.label(
+                RichText::new(format!("Yours: {yours}"))
+                    .color(faction_color32(colors, Faction::Player)),
+            );
+            ui.label(
+                RichText::new(format!("Enemy: {enemy}"))
+                    .color(faction_color32(colors, Faction::Enemy)),
+            );
+            ui.label(
+                RichText::new(format!("Allied: {allied}"))
+                    .color(faction_color32(colors, Faction::Ally)),
+            );
+            ui.label(format!("Enemies defeated: {}", game.enemies_defeated));
+            ui.label(format!("Units lost: {}", game.units_lost));
+            ui.horizontal(|ui| {
+                if ui.button((icon(ui, icons::X), "Clear everyone")).clicked() {
+                    game.clear_units();
+                }
+                if ui
+                    .button((icon(ui, icons::X), "Clear the grid"))
+                    .on_hover_text("Wipes every painted tile back to grass; units stay")
+                    .clicked()
+                {
+                    game.clear_terrain();
+                }
+            });
+            ui.separator();
+
+            ui.small("The testing ground is never saved.");
+            if ui.button((icon(ui, icons::MENU), "Menu")).clicked() {
+                action = Some(Action::ToMenu);
+            }
+        });
     action
 }
 

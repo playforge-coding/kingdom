@@ -11,13 +11,13 @@ use fastnoise_lite::{DomainWarpType, FastNoiseLite, FractalType, NoiseType};
 pub const CHUNK: i32 = 32;
 const CHUNK_TILES: usize = (CHUNK * CHUNK) as usize;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tile {
     Water,
     Grass,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Resource {
     Wood,
     Stone,
@@ -121,6 +121,10 @@ pub struct World {
     pub enemy_house_tiles: Vec<(i32, i32)>,
     /// Global tiles occupied by allied houses, for spawning and sea trade.
     pub ally_house_tiles: Vec<(i32, i32)>,
+    /// A flat world: every chunk is bare, endless grass with no water, trees,
+    /// rocks or settlements, instead of terrain generated from the seed. This
+    /// is the testing ground's empty grid (see `Game::new_sandbox`).
+    flat: bool,
 }
 
 impl World {
@@ -130,7 +134,33 @@ impl World {
             chunks: HashMap::default(),
             enemy_house_tiles: Vec::new(),
             ally_house_tiles: Vec::new(),
+            flat: false,
         }
+    }
+
+    /// A flat, featureless world of endless open grass (see `flat`).
+    pub fn new_flat() -> Self {
+        World {
+            flat: true,
+            ..World::new(0)
+        }
+    }
+
+    /// Is this the flat testing-ground world rather than seeded terrain?
+    pub fn is_flat(&self) -> bool {
+        self.flat
+    }
+
+    /// Forget every chunk of a flat world, so the whole grid is bare grass
+    /// again on the next `ensure`. Does nothing to a seeded world, whose
+    /// chunks hold real edits.
+    pub fn wipe_flat(&mut self) {
+        if !self.flat {
+            return;
+        }
+        self.chunks.clear();
+        self.enemy_house_tiles.clear();
+        self.ally_house_tiles.clear();
     }
 
     /// Rebuild a world from a saved seed + explicit chunks (used on load).
@@ -207,7 +237,11 @@ impl World {
 
     pub fn ensure(&mut self, cx: i32, cy: i32) {
         if !self.chunks.contains_key(&(cx, cy)) {
-            let chunk = generate_chunk(self.seed, cx, cy);
+            let chunk = if self.flat {
+                Chunk::blank()
+            } else {
+                generate_chunk(self.seed, cx, cy)
+            };
             self.chunks.insert((cx, cy), chunk);
         }
     }
@@ -439,6 +473,26 @@ impl World {
         if let Some(c) = self.chunk_at_mut(x, y) {
             c.bridges[li(local_of(x), local_of(y))] = v;
         }
+    }
+
+    /// Reset a tile to bare, open grass, clearing water, nodes, bridges and
+    /// every structure of any faction from it. The testing ground's eraser.
+    pub fn clear_tile(&mut self, x: i32, y: i32) {
+        self.ensure(chunk_of(x), chunk_of(y));
+        if let Some(c) = self.chunk_at_mut(x, y) {
+            let i = li(local_of(x), local_of(y));
+            c.tiles[i] = Tile::Grass;
+            c.nodes[i] = None;
+            c.houses[i] = false;
+            c.enemy_houses[i] = false;
+            c.ally_houses[i] = false;
+            c.bridges[i] = false;
+            c.walls[i] = None;
+            c.caves[i] = false;
+            c.huts[i] = None;
+        }
+        self.enemy_house_tiles.retain(|&t| t != (x, y));
+        self.ally_house_tiles.retain(|&t| t != (x, y));
     }
 
     /// Turn a tile into open water, clearing whatever sat on it. Used to carve

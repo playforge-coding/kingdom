@@ -31,6 +31,10 @@ A save captures everything needed to reconstruct your session exactly:
 Rally flags (the knights' and the navy's) are deliberately transient: they
 direct a moment, not a realm, so a loaded game starts with none planted.
 
+The **[testing ground](testing.md)** is never saved. It has no **Save**
+button, so experimenting there can't overwrite your one save slot with an
+empty grid.
+
 Loading replays the seed to regenerate untouched terrain, then applies your
 saved edits on top, so even an "infinite" world round-trips from a small file.
 Loading also tidies up after older saves that stored unedited terrain: any

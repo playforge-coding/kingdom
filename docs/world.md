@@ -20,6 +20,10 @@ nobody is near is **dropped from memory** and regenerated from the seed the next
 time it's needed, identical down to the last tile. So however far you roam, the
 game only holds on to your edits plus the land around the action.
 
+The **[testing ground](testing.md)** uses the same chunk machinery with the
+generator switched off: every chunk it hands out is bare, open grass, so its
+gray grid is as endless as a real world and just as cheap to roam.
+
 ## Terrain
 
 Terrain comes from [FastNoise Lite](https://crates.io/crates/fastnoise-lite):

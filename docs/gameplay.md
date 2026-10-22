@@ -20,6 +20,10 @@ Everything starts at the main menu:
   is a valid seed too.
 - **:lucide-folder-open: Load Saved World:** restore your last save (enabled only when one exists).
 - **:lucide-play: Resume:** jump back into the session you left when you opened the menu.
+- **:lucide-flask-conical: Testing Ground:** open an empty gray grid instead of
+  a world, then click to place units of any faction and type, and paint water,
+  trees, walls, and houses around them in an instant, to see how they behave.
+  See **[Testing Ground](testing.md)**.
 
 See **[The World](world.md)** for how a seed becomes terrain.
 

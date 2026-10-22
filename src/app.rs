@@ -15,7 +15,9 @@ use winit::window::{Window, WindowId};
 
 use crate::atlas::{self, Atlas, MapColors};
 use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
-use crate::game::{AUTO_ZONE_RADIUS, Anim, CamState, Dir, Entity, Faction, Game, Job, SiteKind};
+use crate::game::{
+    AUTO_ZONE_RADIUS, Anim, CamState, Dir, Entity, Faction, Game, Job, SandboxTool, SiteKind,
+};
 use crate::gfx::{Instance, Renderer};
 use crate::save;
 use crate::ui::{Action, MenuState, Scene as UiScene, View};
@@ -35,6 +37,13 @@ const MERC_TINT: [f32; 4] = [0.6, 1.0, 0.65, 1.0];
 /// The enemy red that marks a sea raid's landing banner, so the coast it's
 /// bound for reads as a threat at a glance.
 const RAID_TINT: [f32; 4] = [1.0, 0.5, 0.45, 1.0];
+
+/// The testing ground's tiles: light gray squares on a slightly darker gray,
+/// which shows through the gap around each square as the grid's lines.
+const SANDBOX_TILE: [f32; 4] = [0.74, 0.74, 0.74, 1.0];
+const SANDBOX_LINE: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
+/// The gap left around each testing-ground tile, in tiles: the grid line.
+const SANDBOX_GAP: f32 = 0.04;
 
 /// The sprite sheet a transport's hull is drawn from. The player's missions
 /// sail the cargo hull in a tint (see `transport_tint`); an allied company
@@ -264,8 +273,23 @@ impl State {
             self.renderer.size.height as f32,
         );
         if let Some(game) = &mut self.game {
-            game.try_build(world);
+            if game.sandbox() {
+                game.sandbox_click(world);
+            } else {
+                game.try_build(world);
+            }
         }
+    }
+
+    /// The tile under the cursor, for the testing ground's placement cursor.
+    fn cursor_tile(&self) -> (i32, i32) {
+        let world = self.camera.screen_to_world(
+            self.input.cursor.0 as f32,
+            self.input.cursor.1 as f32,
+            self.renderer.size.width as f32,
+            self.renderer.size.height as f32,
+        );
+        (world.x.floor() as i32, world.y.floor() as i32)
     }
 
     /// Visible tile rectangle (inclusive) with a small margin.
@@ -291,6 +315,13 @@ impl State {
                 self.scene = Scene::Playing;
                 log::info!("created world with seed {seed}");
             }
+            Action::CreateSandbox => {
+                self.game = Some(Game::new_sandbox());
+                self.camera.center = Vec2::ZERO;
+                self.camera.view_height = DEFAULT_VIEW_HEIGHT;
+                self.scene = Scene::Playing;
+                log::info!("opened the testing ground");
+            }
             Action::Load => {
                 if let Some(bytes) = save::read() {
                     if let Some((game, cam)) = Game::from_bytes(&bytes) {
@@ -310,7 +341,11 @@ impl State {
                 }
             }
             Action::Save => {
-                if let Some(game) = &self.game {
+                // The testing ground is never saved: it would overwrite the
+                // one save slot with an empty grid.
+                if let Some(game) = &self.game
+                    && !game.sandbox()
+                {
                     save::write(game.to_bytes(self.cam_state()));
                 }
             }
@@ -375,14 +410,37 @@ impl State {
         };
         let quad = move |pos: [f32; 2], size: [f32; 2], uv: [f32; 4]| tinted(pos, size, uv, WHITE);
 
+        // The testing ground is a plain gray grid: one darker sheet under the
+        // whole view, and a lighter square inset on every grass tile so the
+        // sheet shows through the gaps as the grid's lines. Water painted on
+        // it keeps its real texture, as do the structures drawn below.
+        let sandbox = game.sandbox();
+        if sandbox {
+            out.push(tinted(
+                [minx as f32, miny as f32],
+                [(maxx - minx + 1) as f32, (maxy - miny + 1) as f32],
+                white,
+                SANDBOX_LINE,
+            ));
+        }
+
         for y in miny..=maxy {
             for x in minx..=maxx {
                 let p = [x as f32, y as f32];
-                let uv = match world.tile(x, y) {
-                    Tile::Water => water,
-                    Tile::Grass => grass,
-                };
-                out.push(quad(p, [1.0, 1.0], uv));
+                if sandbox && world.tile(x, y) == Tile::Grass {
+                    out.push(tinted(
+                        [x as f32 + SANDBOX_GAP, y as f32 + SANDBOX_GAP],
+                        [1.0 - 2.0 * SANDBOX_GAP, 1.0 - 2.0 * SANDBOX_GAP],
+                        white,
+                        SANDBOX_TILE,
+                    ));
+                } else {
+                    let uv = match world.tile(x, y) {
+                        Tile::Water => water,
+                        Tile::Grass => grass,
+                    };
+                    out.push(quad(p, [1.0, 1.0], uv));
+                }
 
                 if world.is_bridge(x, y) {
                     out.push(quad(p, [1.0, 1.0], bridge));
@@ -418,6 +476,26 @@ impl State {
                     out.push(quad(p, [1.0, 1.0], uv));
                 }
             }
+        }
+
+        // The testing ground's placement cursor: the tile under the pointer,
+        // washed in the color of the faction about to own what goes down
+        // there, or plain white for terrain that belongs to no one.
+        let owned = match game.sandbox_tool {
+            SandboxTool::PlaceUnit => Some(true),
+            SandboxTool::PlaceTile => Some(game.place_brush.owned()),
+            SandboxTool::Rally => None,
+        };
+        if sandbox && let Some(owned) = owned {
+            let (cx, cy) = self.cursor_tile();
+            let mut wash = match game.place_faction {
+                _ if !owned => WHITE,
+                Faction::Player => self.colors.player,
+                Faction::Enemy => self.colors.enemy,
+                Faction::Ally => self.colors.ally,
+            };
+            wash[3] = 0.45;
+            out.push(tinted([cx as f32, cy as f32], [1.0, 1.0], white, wash));
         }
 
         // Saplings: a young tree that scales up from a sprout as it matures.
@@ -725,7 +803,13 @@ impl State {
             for bx in (bx0..=maxx).step_by(k as usize) {
                 let (sx, sy) = (bx + k / 2, by + k / 2);
                 let color = if !world.is_generated(sx, sy) {
-                    c.unexplored
+                    // The testing ground is gray out to infinity, so nothing
+                    // on it is "unexplored".
+                    if game.sandbox() {
+                        SANDBOX_TILE
+                    } else {
+                        c.unexplored
+                    }
                 } else {
                     match world.tile(sx, sy) {
                         Tile::Water if world.is_bridge(sx, sy) => c.rock,
@@ -733,6 +817,7 @@ impl State {
                         Tile::Grass => match world.node(sx, sy).map(|n| n.kind) {
                             Some(Resource::Wood) => c.tree,
                             Some(Resource::Stone) => c.rock,
+                            None if game.sandbox() => SANDBOX_TILE,
                             None => c.grass,
                         },
                     }
@@ -1204,9 +1289,22 @@ impl ApplicationHandler<State> for App {
                 button: MouseButton::Right,
                 ..
             } if !ui_consumed => {
+                // On the testing ground a right-click clears the tile of
+                // whoever stands on it, or of whatever was painted there; in
+                // a real game it lifts the flags.
                 if let Some(game) = &mut state.game {
-                    game.clear_rally();
-                    game.clear_navy_rally();
+                    if game.sandbox() {
+                        let world = state.camera.screen_to_world(
+                            state.input.cursor.0 as f32,
+                            state.input.cursor.1 as f32,
+                            state.renderer.size.width as f32,
+                            state.renderer.size.height as f32,
+                        );
+                        game.sandbox_erase(world);
+                    } else {
+                        game.clear_rally();
+                        game.clear_navy_rally();
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {

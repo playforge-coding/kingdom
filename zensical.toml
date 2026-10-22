@@ -15,6 +15,7 @@ nav = [
   { "Units & Combat" = "units.md" },
   { "The World" = "world.md" },
   { "Saves & Files" = "saves.md" },
+  { "Testing Ground" = "testing.md" },
   { "Credits" = "credits.md" },
 ]
 
