@@ -271,8 +271,9 @@ It launches like a [settler ship](#settler-ship): pick **Troop ship** in the
 HUD's **Navy** section, **left-click a distant shore**, and if the stockpile
 covers the cost and a sea route reaches the landing, the **4 standing knights
 nearest the harbor board** and set sail. **Levies never ship out**; they're
-militia owed their pay at home. **Neither do [horsemen](units.md#horsemen)**;
-cavalry stays on the home continent. A banner marks the landing, an alert
+militia owed their pay at home. **Neither do [horsemen](units.md#horsemen) or
+[bowmen](units.md#bowmen)**; cavalry and archers stay on the home continent. A
+banner marks the landing, an alert
 announces the departure, and any refusal says why with a toast at the click.
 
 Unlike settling, a troop landing may be **right by an enemy village**; that's

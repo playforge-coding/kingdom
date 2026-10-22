@@ -210,6 +210,14 @@ pub fn build() -> Atlas {
     let ally_horseman = load(include_bytes!(
         "../assets/textures/entities/ally_horseman.png"
     ));
+    let bowman = load(include_bytes!("../assets/textures/entities/bowman.png"));
+    let enemy_bowman = load(include_bytes!(
+        "../assets/textures/entities/enemy_bowman.png"
+    ));
+    let ally_bowman = load(include_bytes!(
+        "../assets/textures/entities/ally_bowman.png"
+    ));
+    let arrow = load(include_bytes!("../assets/textures/entities/arrow.png"));
     let cargo_ship = load(include_bytes!("../assets/textures/entities/cargo_ship.png"));
     let warship = load(include_bytes!("../assets/textures/entities/warship.png"));
     let enemy_warship = load(include_bytes!(
@@ -252,6 +260,13 @@ pub fn build() -> Atlas {
         Source::sheet("horseman", horseman, 4, 12),
         Source::sheet("enemy_horseman", enemy_horseman, 4, 12),
         Source::sheet("ally_horseman", ally_horseman, 4, 12),
+        // Bowman sheets: 5 columns x 8 rows of 16x16 frames, four rows of
+        // walking then four of drawing the bow (down, up, left, right).
+        Source::sheet("bowman", bowman, 5, 8),
+        Source::sheet("enemy_bowman", enemy_bowman, 5, 8),
+        Source::sheet("ally_bowman", ally_bowman, 5, 8),
+        // Arrow: 1 column x 2 rows of 16x16 frames, pointing up then right.
+        Source::sheet("arrow", arrow, 1, 2),
         // Cargo ship: 4 columns x 1 row of 32x32 frames, facing left, up, down,
         // right (in that column order).
         Source::sheet("cargo_ship", cargo_ship, 4, 1),
@@ -373,6 +388,29 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn every_bowman_sheet_is_packed_with_all_eight_rows() {
+        // The renderer reads a bowman's frame by state block and facing, so
+        // each faction's sheet must be packed with its full 5x8 grid, and the
+        // arrow with both of its headings.
+        let atlas = build();
+        for sheet in ["bowman", "enemy_bowman", "ally_bowman"] {
+            for row in 0..8 {
+                for col in 0..5 {
+                    let uv = atlas.frame_uv(sheet, col, row);
+                    assert!(
+                        uv[2] > uv[0] && uv[3] > uv[1],
+                        "{sheet} frame ({col}, {row}) is empty"
+                    );
+                }
+            }
+        }
+        for row in 0..2 {
+            let uv = atlas.frame_uv("arrow", 0, row);
+            assert!(uv[2] > uv[0] && uv[3] > uv[1], "arrow frame {row} is empty");
         }
     }
 }

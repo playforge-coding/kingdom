@@ -108,7 +108,10 @@ starts pressing you.
 Under **Military**, some of those soldiers come mounted: whenever you have
 fewer than one horseman for every two knights and 50 gold to spare, the next
 soldier a house raises is a **[horseman](units.md#horsemen)**, fast cavalry
-that can leap the narrower streams.
+that can leap the narrower streams. Likewise, whenever you have fewer than one
+bowman for every two knights and 30 gold to spare (the cavalry comes first),
+the next is a **[bowman](units.md#bowmen)**, who shoots foes from five tiles
+away but is frail up close.
 
 ## Capturing villages
 

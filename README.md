@@ -49,6 +49,11 @@ both natively and in the browser (via WebGL) using **Trunk**.
   per two knights. They ride far faster than the foot, take more punishment,
   and **leap streams up to 2 tiles wide**, but never hack, bridge, or board a
   ship. Grown enemy and allied villages field them too.
+- **Bowmen** are your archers. Under Military, a house raises one in place of a
+  knight (30 gold) whenever you have fewer than one bowman per two knights,
+  once the cavalry is topped up. They **shoot foes 5 tiles away**, across water
+  or not, but are frail in melee and never hack, bridge, or board a ship.
+  Enemy and allied villages field them too.
 - **Three factions** (you = blue, enemy = red, allies = green). The **enemy** is
   hostile to everyone; their soldiers stream out to hunt you. The **allies** hold
   villages on coasts across the sea: they trade with you and attack the enemy on

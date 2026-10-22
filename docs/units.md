@@ -10,8 +10,9 @@ All units navigate the tile grid with **BFS pathfinding**, routing around water,
 buildings, walls, and resource nodes, or across bridges. Soldiers plan with a
 **weighted search** instead: knights, who can also cut through trees and rocks
 and lay bridges, weigh clearing an obstacle against walking around it (see
-[Knights](#knights)), and horsemen weigh leaping a stream against riding
-around it (see [Horsemen](#horsemen)).
+[Knights](#knights)), horsemen weigh leaping a stream against riding
+around it (see [Horsemen](#horsemen)), and bowmen, who clear nothing, simply
+walk around whatever is in the way (see [Bowmen](#bowmen)).
 
 ## Civilians
 
@@ -105,8 +106,8 @@ the same rally flag, but:
   and the allies' hired [mercenaries](gameplay.md#hiring-mercenaries) are foot
   soldiers too. Cavalry fights on the home continent.
 - **Keeps the saddle.** When a captured village is settled (see
-  [After the battle](gameplay.md#after-the-battle)), only the knights on foot
-  lay down their arms; horsemen stand the garrison first.
+  [After the battle](gameplay.md#after-the-battle)), only the soldiers on foot
+  (knights and bowmen) lay down their arms; horsemen stand the garrison first.
 
 The enemy and the allies field cavalry too, but only from villages that have
 grown to **7 or more houses**, the same size at which an enemy village starts
@@ -114,6 +115,50 @@ sending [sea raids](#the-enemy-navy). So a mature enemy camp sends riders that
 cross the streams your foot soldiers can't, and a tributary is no longer the
 moat it was. Cavalry counts as part of a village's garrison and defenders like
 any other soldier.
+
+## Bowmen
+
+Bowmen are your archers: foot soldiers who shoot rather than close. Under the
+**:lucide-swords: Military priority**, a house raises a bowman in place of a
+knight whenever you have **fewer than one bowman for every two knights** and
+the treasury holds the **30 gold** a bow costs. Cavalry is topped up first
+(see [Horsemen](#horsemen)), so an army raised under Military settles at about
+half knights, a quarter horsemen, and a quarter bowmen. Under Agriculture,
+houses raise knights only.
+
+A bowman answers the same rally flag as everyone else and marches on the
+enemy with the rest of the army, but:
+
+- **Shoots from 5 tiles away.** The nearest foe within bowshot takes an
+  **arrow every 1.5 seconds**, each one dealing **14 damage** when it lands.
+  A bowman advances only until a foe is within about three and a half tiles,
+  then stands and shoots, so a line of bowmen gets a couple of volleys off
+  before the blades meet. Arrows fly straight and strike the first hostile
+  unit they pass, so a shaft loosed at one foe may well hit another, and a
+  target that steps aside is missed.
+- **Shoots across water.** A foe on the far bank of a stream, or behind a
+  wall, is in bowshot like any other. Only units are ever hit: an arrow does
+  nothing to a hut, a wall, or a ship.
+- **Is frail up close.** A bowman has **40 hit points** to a knight's 60 and
+  no blade. Whatever reaches it keeps taking arrows at point-blank range but
+  is never fought back in melee, so a knight or a horseman that closes the
+  distance wins every time. Bowmen earn their keep behind the foot, not in
+  front of it.
+- **Never besieges.** With no foe in reach, a bowman doesn't hack at enemy
+  huts and walls the way knights do; it waits for whoever comes out.
+- **Goes around everything.** A bowman never hacks down a tree or rock, never
+  lays a bridge, and never leaps a stream: whatever it can't walk around, it
+  leaves to the knights to clear.
+- **Stays ashore.** Like cavalry, bowmen never board a
+  [troop ship](building.md#troop-ship).
+- **Settles like the foot.** When a captured village is settled (see
+  [After the battle](gameplay.md#after-the-battle)), bowmen lay down their
+  bows alongside the knights.
+
+The enemy and the allies raise bowmen too, from villages of any size, in the
+same one-per-two-knights proportion. An enemy camp's archers will pick at your
+knights across the stream that kept its foot at bay, and at civilians caught
+out in the open, so huts matter more once the arrows start flying.
 
 ## The draft
 
@@ -243,6 +288,9 @@ enemy's coastal villages keeps the sea quiet.
 
 - Fights happen at close range; opposing units in melee **both take damage** each
   tick.
+- [Bowmen](#bowmen) are the exception: they **shoot from range** and deal no
+  melee damage. An arrow hurts the first hostile unit it passes and nothing
+  else.
 - Wounded units show an **HP bar**; when HP hits zero the unit dies.
 - Kills are tallied on the HUD as **Enemies defeated**; your own deaths as
   **Units lost**.

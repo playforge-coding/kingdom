@@ -579,6 +579,25 @@ impl State {
             out.push(quad([b.pos.x - 0.2, b.pos.y - 0.2], [0.4, 0.4], cannonball));
         }
 
+        // Arrows in flight: the shaft drawn along its line of flight. The sheet
+        // holds one frame pointing down and one pointing left; the other two
+        // headings mirror those by swapping the UV corners.
+        for a in game.arrows() {
+            let mut uv = if a.vel.x.abs() >= a.vel.y.abs() {
+                self.atlas.frame_uv("arrow", 0, 1)
+            } else {
+                self.atlas.frame_uv("arrow", 0, 0)
+            };
+            if a.vel.x.abs() >= a.vel.y.abs() {
+                if a.vel.x > 0.0 {
+                    uv.swap(0, 2);
+                }
+            } else if a.vel.y < 0.0 {
+                uv.swap(1, 3);
+            }
+            out.push(quad([a.pos.x - 0.3, a.pos.y - 0.3], [0.6, 0.6], uv));
+        }
+
         // Builder zones: a translucent plot over each marked area, brighter
         // while the autonomous-building switch is on, with a small center mark.
         let zone_span = (AUTO_ZONE_RADIUS * 2 + 1) as f32;
@@ -967,14 +986,18 @@ impl State {
 /// tiles: places the hooves on the unit's tile with the rider rising above it.
 const HORSEMAN_DRAW_RISE: f32 = 1.4;
 
-/// Per-sheet animation layout for the foot sheets, 5x12 grids of 16x16
+/// Per-sheet animation layout for the foot sheets, 5-column grids of 16x16
 /// frames. Walk animations live on rows `walk_base..+4` and actions on
-/// `act_base..+4`, one row per facing in the order down, up, left, right.
+/// `act_base..+4`, one row per facing in the order down, up, then the two
+/// sides (see `sprite_frame` for which side comes first).
 struct AnimRows {
     walk_base: u32,
     walk_frames: u32,
     act_base: u32,
     act_frames: u32,
+    /// The action block's two side rows come in the opposite order to the
+    /// walk block's.
+    act_sides_flipped: bool,
 }
 
 // Farmer: walk rows 0-3, chop/mine rows 8-11 (3 frames).
@@ -983,6 +1006,7 @@ const FARMER_ROWS: AnimRows = AnimRows {
     walk_frames: 5,
     act_base: 8,
     act_frames: 3,
+    act_sides_flipped: false,
 };
 // Knight: walk rows 0-3, sword-swing rows 4-7 (4 frames).
 const KNIGHT_ROWS: AnimRows = AnimRows {
@@ -990,6 +1014,16 @@ const KNIGHT_ROWS: AnimRows = AnimRows {
     walk_frames: 5,
     act_base: 4,
     act_frames: 4,
+    act_sides_flipped: false,
+};
+// Bowman: walk rows 0-3, bow-draw rows 4-7 (3 frames), on an 8-row sheet.
+// The walk rows run in the knight's side order, the draw rows the other way.
+const BOWMAN_ROWS: AnimRows = AnimRows {
+    walk_base: 0,
+    walk_frames: 5,
+    act_base: 4,
+    act_frames: 3,
+    act_sides_flipped: true,
 };
 
 /// Frames per second every walk and action cycle runs at.
@@ -1002,36 +1036,42 @@ fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
         (Faction::Player, Job::Civilian) => "farmer",
         (Faction::Player, Job::Knight) => "knight",
         (Faction::Player, Job::Horseman) => "horseman",
+        (Faction::Player, Job::Bowman) => "bowman",
         (Faction::Enemy, Job::Civilian) => "enemy_farmer",
         (Faction::Enemy, Job::Knight) => "enemy_knight",
         (Faction::Enemy, Job::Horseman) => "enemy_horseman",
+        (Faction::Enemy, Job::Bowman) => "enemy_bowman",
         (Faction::Ally, Job::Civilian) => "ally_farmer",
         (Faction::Ally, Job::Knight) => "ally_knight",
         (Faction::Ally, Job::Horseman) => "ally_horseman",
+        (Faction::Ally, Job::Bowman) => "ally_bowman",
     };
     let rows = match e.job {
         Job::Civilian => FARMER_ROWS,
         Job::Knight => KNIGHT_ROWS,
+        Job::Bowman => BOWMAN_ROWS,
         Job::Horseman => {
             let (col, row) = horseman_frame(e);
             return (sheet, col, row);
         }
     };
 
-    // Row order within a state block: down, up, then the two side rows. The
-    // side art is mirrored from what the raw row order implies, so Right uses
-    // the third row and Left uses the fourth.
-    let dir_offset = match e.facing {
-        Dir::Down => 0,
-        Dir::Up => 1,
-        Dir::Right => 2,
-        Dir::Left => 3,
-    };
-
     let (base, frames) = match e.anim {
         Anim::Idle => (rows.walk_base, 1),
         Anim::Walk => (rows.walk_base, rows.walk_frames),
         Anim::Act => (rows.act_base, rows.act_frames),
+    };
+
+    // Row order within a state block: down, up, then the two side rows. The
+    // side art is mirrored from what the raw row order implies, so Right uses
+    // the third row and Left uses the fourth, except on a sheet whose action
+    // block has the sides the other way around.
+    let flipped = matches!(e.anim, Anim::Act) && rows.act_sides_flipped;
+    let dir_offset = match (e.facing, flipped) {
+        (Dir::Down, _) => 0,
+        (Dir::Up, _) => 1,
+        (Dir::Right, false) | (Dir::Left, true) => 2,
+        (Dir::Left, false) | (Dir::Right, true) => 3,
     };
     let row = base + dir_offset;
     let col = if frames <= 1 {

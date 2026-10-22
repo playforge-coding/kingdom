@@ -76,12 +76,17 @@ pub enum Job {
     /// narrow streams, but never hacks, bridges, or boards a ship (see
     /// `Mobility::Mounted`).
     Horseman,
+    /// A ranged soldier on foot: shoots arrows at foes within `BOW_RANGE`
+    /// instead of closing to melee, and holds off at `BOW_STANDOFF`. Lightly
+    /// armored, and never hacks, bridges, boards a ship, or breaks into a
+    /// structure (see `Mobility::Light`).
+    Bowman,
 }
 
 impl Job {
-    /// Knights and horsemen alike: anyone under arms.
+    /// Knights, horsemen and bowmen alike: anyone under arms.
     pub fn is_soldier(self) -> bool {
-        matches!(self, Job::Knight | Job::Horseman)
+        matches!(self, Job::Knight | Job::Horseman | Job::Bowman)
     }
 }
 
@@ -95,11 +100,15 @@ enum Mobility {
     /// A horseman: goes around every obstacle, but leaps straight over a
     /// stream up to `HORSEMAN_JUMP_REACH` tiles wide onto the far bank.
     Mounted,
+    /// A bowman: walks only clear ground and goes around everything else,
+    /// never hacking, bridging, or leaping.
+    Light,
 }
 
 fn mobility_of(job: Job, bridge_ok: bool) -> Mobility {
     match job {
         Job::Horseman => Mobility::Mounted,
+        Job::Bowman => Mobility::Light,
         Job::Knight | Job::Civilian => Mobility::Foot { bridge_ok },
     }
 }
@@ -204,12 +213,16 @@ pub struct Entity {
     pending: f32,
     /// A horseman mid-leap over a stream (see [`Jump`]). Transient.
     jump: Option<Jump>,
+    /// For a bowman: seconds until the bow is drawn again. Transient, so a
+    /// bowman loads with its bow ready.
+    reload: f32,
 }
 
 fn max_hp_for(faction: Faction, job: Job) -> f32 {
     match (faction, job) {
         (_, Job::Knight) => 60.0,
         (_, Job::Horseman) => 90.0,
+        (_, Job::Bowman) => 40.0,
         (Faction::Player, Job::Civilian) => 28.0,
         (Faction::Enemy, Job::Civilian) => 22.0,
         (Faction::Ally, Job::Civilian) => 24.0,
@@ -243,6 +256,7 @@ impl Entity {
             found_at: None,
             pending: 0.0,
             jump: None,
+            reload: 0.0,
         }
     }
 
@@ -324,6 +338,11 @@ pub const KNIGHT_GOLD_COST: u32 = 25;
 /// realm has fewer than one horseman for every two knights and the treasury
 /// can cover it; otherwise it raises a knight as usual.
 pub const HORSEMAN_GOLD_COST: u32 = 50;
+/// Gold a bowman costs to raise, bow and quiver included: a little over a
+/// knight. Under the Military priority a house raises one in place of a
+/// knight whenever the realm has fewer than one bowman for every two knights
+/// (cavalry is topped up first) and the treasury can cover it.
+pub const BOWMAN_GOLD_COST: u32 = 30;
 /// Enemy and allied villages only raise horsemen once they have grown to this
 /// many houses, the same size at which an enemy village starts sending sea
 /// raids, so the early game stays a contest of foot soldiers.
@@ -591,6 +610,8 @@ const CIVILIAN_SPEED: f32 = 2.4;
 const KNIGHT_SPEED: f32 = 2.9;
 /// A horse outpaces anyone on foot by a wide margin.
 const HORSEMAN_SPEED: f32 = 4.2;
+/// A bowman keeps a knight's pace: light kit, but no horse.
+const BOWMAN_SPEED: f32 = KNIGHT_SPEED;
 /// The widest stream, in water tiles, a horseman can leap in a straight line
 /// from one bank to the other. Rivers are carved 2-3 tiles across (see
 /// `world::RIVER_HALF_WIDTH_MAIN`), so this clears the tributaries and leaves
@@ -614,6 +635,7 @@ fn speed_of(job: Job) -> f32 {
         Job::Civilian => CIVILIAN_SPEED,
         Job::Knight => KNIGHT_SPEED,
         Job::Horseman => HORSEMAN_SPEED,
+        Job::Bowman => BOWMAN_SPEED,
     }
 }
 /// Seconds between route replans while a unit is on the move. A unit that just
@@ -665,6 +687,26 @@ const RALLY_ARRIVE_MANHATTAN: u32 = 3;
 /// army across the map. A flag the player plants calls everyone.
 const AUTO_RALLY_RADIUS: f32 = 64.0;
 const ATTACK_DPS: f32 = 16.0;
+/// How far a bowman shoots. Well past melee reach, so a line of bowmen gets
+/// a couple of volleys off before the foot arrives, and a stream a knight
+/// can't cross is no cover from them.
+const BOW_RANGE: f32 = 5.0;
+/// How close a bowman marches toward a foe before stopping to shoot: inside
+/// `BOW_RANGE` with a margin, so a foe that shifts a step is still in reach.
+const BOW_STANDOFF: f32 = 3.5;
+/// Seconds between a bowman's shots.
+const BOW_RELOAD: f32 = 1.5;
+/// Damage one arrow deals. Per second that comes to a good deal less than a
+/// knight's blade, so a bowman caught in melee loses to one; its edge is the
+/// shots it gets off before the blade arrives.
+const ARROW_DAMAGE: f32 = 14.0;
+/// Arrow flight speed (tiles/second). Kept at or under ten tiles a frame at
+/// the simulation's longest step so a shaft can't skip clean over a target.
+const ARROW_SPEED: f32 = 10.0;
+/// Seconds an arrow flies before it drops: a little past `BOW_RANGE`.
+const ARROW_LIFE: f32 = (BOW_RANGE + 1.0) / ARROW_SPEED;
+/// An arrow this close to a hostile unit strikes it.
+const ARROW_HIT_RADIUS: f32 = 0.6;
 /// Walls are tough, so breaking one takes several seconds of hacking.
 const WALL_MAX_HP: f32 = 220.0;
 const WALL_DPS: f32 = 18.0;
@@ -1118,6 +1160,18 @@ pub struct Cannonball {
     gunner: Gunner,
 }
 
+/// An arrow in flight, loosed by a bowman of `archer`'s faction. It strikes
+/// the first hostile unit it comes within `ARROW_HIT_RADIUS` of, and never
+/// harms a hull or a structure. Transient, like a cannonball: a save taken
+/// mid-flight simply drops it.
+pub struct Arrow {
+    pub pos: Vec2,
+    pub vel: Vec2,
+    /// Seconds before it drops to the ground.
+    life: f32,
+    archer: Faction,
+}
+
 /// How far past a village's capture radius a hostile unit counts as a threat,
 /// so the alarm sounds while there's still time to react.
 const THREAT_MARGIN: f32 = 4.0;
@@ -1348,6 +1402,8 @@ pub struct Game {
     pirates: Vec<Pirate>,
     /// Cannonballs in flight (transient, not saved).
     cannonballs: Vec<Cannonball>,
+    /// Arrows in flight (transient, not saved).
+    arrows: Vec<Arrow>,
     pirate_spawn_timer: f32,
     pub build_mode: BuildMode,
     pub priority: Priority,
@@ -1605,6 +1661,7 @@ impl Game {
             warships: Vec::new(),
             pirates: Vec::new(),
             cannonballs: Vec::new(),
+            arrows: Vec::new(),
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
             build_mode: BuildMode::House,
             priority: Priority::Agriculture,
@@ -1855,7 +1912,8 @@ impl Game {
         let bridge_ok = self.wood >= BRIDGE_WOOD_COST;
 
         // Combat: knights damage the nearest opponent in range, or hack at an
-        // adjacent enemy wall or hut if no opponent is close.
+        // adjacent enemy wall or hut if no opponent is close. Bowmen shoot
+        // instead (see below).
         let mut damage = vec![0f32; n];
         let mut acting = vec![false; n];
         let mut wall_damage: HashMap<Tile, f32> = HashMap::default();
@@ -1867,6 +1925,38 @@ impl Game {
                 continue;
             }
             let (pi, fi) = snap[i];
+            // A bowman stands and shoots: the nearest foe within bowshot takes
+            // an arrow each time the bow is drawn again. It never hacks at a
+            // wall or hut, and it has no blade for whoever reaches it.
+            if self.entities[i].job == Job::Bowman {
+                self.entities[i].reload -= adt;
+                let mut best: Option<Vec2> = None;
+                let mut bd = BOW_RANGE * BOW_RANGE;
+                grid.for_each_within(pi, BOW_RANGE, |j, pj| {
+                    if j == i || !hostile(fi, snap[j].1) {
+                        return;
+                    }
+                    let d = pi.distance_squared(pj);
+                    if d <= bd {
+                        bd = d;
+                        best = Some(pj);
+                    }
+                });
+                if let Some(target) = best {
+                    acting[i] = true;
+                    self.entities[i].facing = dir_from_vec(target - pi);
+                    if self.entities[i].reload <= 0.0 {
+                        self.entities[i].reload = BOW_RELOAD;
+                        self.arrows.push(Arrow {
+                            pos: pi,
+                            vel: (target - pi).normalize_or_zero() * ARROW_SPEED,
+                            life: ARROW_LIFE,
+                            archer: fi,
+                        });
+                    }
+                }
+                continue;
+            }
             let mut best: Option<usize> = None;
             let mut bd = COMBAT_RANGE * COMBAT_RANGE;
             grid.for_each_within(pi, COMBAT_RANGE, |j, pj| {
@@ -2108,9 +2198,11 @@ impl Game {
         self.update_transports(dt);
         self.update_pirates(dt);
         // Sail the navy after the pirates so warships react to this frame's
-        // pirate positions, then fly every cannonball both sides fired.
+        // pirate positions, then fly every cannonball both sides fired and
+        // every arrow the bowmen loosed.
         self.update_navy(dt);
         self.update_cannonballs(dt);
+        self.update_arrows(dt);
     }
 
     /// Sail cargo ships along their water route. A ship is always simulated (even
@@ -2359,6 +2451,48 @@ impl Game {
     /// Cannonballs in flight, for rendering.
     pub fn cannonballs(&self) -> &[Cannonball] {
         &self.cannonballs
+    }
+
+    /// Arrows in flight, for rendering.
+    pub fn arrows(&self) -> &[Arrow] {
+        &self.arrows
+    }
+
+    /// Fly every arrow a step and resolve hits: the first hostile unit within
+    /// `ARROW_HIT_RADIUS` of the shaft takes `ARROW_DAMAGE` (and dies, tallied
+    /// like any other casualty, if that empties its hit points), and an arrow
+    /// that strikes nothing drops at the end of its flight. Hulls and
+    /// structures are never touched.
+    fn update_arrows(&mut self, dt: f32) {
+        let r2 = ARROW_HIT_RADIUS * ARROW_HIT_RADIUS;
+        let mut ai = 0;
+        while ai < self.arrows.len() {
+            self.arrows[ai].life -= dt;
+            let step = self.arrows[ai].vel * dt;
+            self.arrows[ai].pos += step;
+            let ap = self.arrows[ai].pos;
+            let archer = self.arrows[ai].archer;
+            let struck = self
+                .entities
+                .iter()
+                .position(|e| hostile(archer, e.faction) && e.pos.distance_squared(ap) < r2);
+            if let Some(ei) = struck {
+                self.entities[ei].hp -= ARROW_DAMAGE;
+                if self.entities[ei].hp <= 0.0 {
+                    let e = self.entities.swap_remove(ei);
+                    match e.faction {
+                        Faction::Enemy => self.enemies_defeated += 1,
+                        Faction::Player => self.units_lost += 1,
+                        Faction::Ally => {}
+                    }
+                }
+            }
+            if struck.is_some() || self.arrows[ai].life <= 0.0 {
+                self.arrows.swap_remove(ai);
+            } else {
+                ai += 1;
+            }
+        }
     }
 
     /// Spawn (rarely) and sail the pirates: they hunt any hull they can see,
@@ -2937,11 +3071,12 @@ impl Game {
             return;
         }
         let keep = if contested { n - n / 2 } else { 1 };
-        // Only the knights on foot settle, and never more of them than the
-        // garrison leaves over: horsemen keep their saddles.
+        // Only the soldiers on foot (knights and bowmen) settle, and never
+        // more of them than the garrison leaves over: horsemen keep their
+        // saddles.
         let on_foot = inside
             .iter()
-            .filter(|&&i| self.entities[i].job == Job::Knight)
+            .filter(|&&i| self.entities[i].job != Job::Horseman)
             .count();
         let settling = (n - keep).min(on_foot);
         if settling == 0 {
@@ -3088,7 +3223,7 @@ impl Game {
                         .fold(f32::MAX, f32::min);
                     if e.faction == faction && d2 <= capture2 {
                         match e.job {
-                            Job::Knight | Job::Horseman => v.knights += 1,
+                            Job::Knight | Job::Horseman | Job::Bowman => v.knights += 1,
                             Job::Civilian => v.civilians += 1,
                         }
                     } else if hostile(e.faction, faction) && d2 <= threat2 {
@@ -3412,7 +3547,23 @@ impl Game {
     /// losses. Horsemen are never raised while the realm is short of knights
     /// to begin with.
     fn wants_horseman(&self, faction: Faction) -> bool {
-        let (mut knights, mut horsemen) = (0usize, 0usize);
+        let (knights, horsemen, _) = self.soldiers_of(faction);
+        horsemen * 2 < knights
+    }
+
+    /// Should the next soldier this faction raises carry a bow? Yes while it
+    /// fields fewer than one bowman for every two knights, by the same logic
+    /// as `wants_horseman`, so an army raised under Military settles at about
+    /// half knights, a quarter horsemen and a quarter bowmen.
+    fn wants_bowman(&self, faction: Faction) -> bool {
+        let (knights, _, bowmen) = self.soldiers_of(faction);
+        bowmen * 2 < knights
+    }
+
+    /// How many knights, horsemen and bowmen (in that order) this faction has
+    /// under arms, not counting hired mercenaries.
+    fn soldiers_of(&self, faction: Faction) -> (usize, usize, usize) {
+        let (mut knights, mut horsemen, mut bowmen) = (0usize, 0usize, 0usize);
         for e in &self.entities {
             if e.faction != faction || e.mercenary {
                 continue;
@@ -3420,10 +3571,11 @@ impl Game {
             match e.job {
                 Job::Knight => knights += 1,
                 Job::Horseman => horsemen += 1,
+                Job::Bowman => bowmen += 1,
                 Job::Civilian => {}
             }
         }
-        horsemen * 2 < knights
+        (knights, horsemen, bowmen)
     }
 
     fn handle_spawns(&mut self, dt: f32) {
@@ -3439,6 +3591,9 @@ impl Game {
                 } else if big && self.wants_horseman(Faction::Enemy) {
                     // A grown camp fields cavalry alongside its foot soldiers.
                     Job::Horseman
+                } else if self.wants_bowman(Faction::Enemy) {
+                    // Any camp fields bowmen among its foot.
+                    Job::Bowman
                 } else {
                     Job::Knight
                 };
@@ -3481,18 +3636,20 @@ impl Game {
                 }
                 // Under the Military priority, a realm light on cavalry
                 // raises a horseman in place of the knight when it can
-                // afford the horse.
-                if job == Job::Knight
-                    && self.priority == Priority::Military
-                    && self.money >= HORSEMAN_GOLD_COST
-                    && self.wants_horseman(Faction::Player)
-                {
-                    job = Job::Horseman;
+                // afford the horse, and one light on bowmen raises a bowman
+                // when it can afford the bow.
+                if job == Job::Knight && self.priority == Priority::Military {
+                    if self.money >= HORSEMAN_GOLD_COST && self.wants_horseman(Faction::Player) {
+                        job = Job::Horseman;
+                    } else if self.money >= BOWMAN_GOLD_COST && self.wants_bowman(Faction::Player) {
+                        job = Job::Bowman;
+                    }
                 }
                 // Soldiers must be paid for; an empty treasury raises a
                 // (free) civilian instead, so the village still grows.
                 let cost = match job {
                     Job::Horseman => HORSEMAN_GOLD_COST,
+                    Job::Bowman => BOWMAN_GOLD_COST,
                     Job::Knight => KNIGHT_GOLD_COST,
                     Job::Civilian => 0,
                 };
@@ -3519,6 +3676,8 @@ impl Game {
                     Job::Civilian
                 } else if big && self.wants_horseman(Faction::Ally) {
                     Job::Horseman
+                } else if self.wants_bowman(Faction::Ally) {
+                    Job::Bowman
                 } else {
                     Job::Knight
                 };
@@ -5142,13 +5301,13 @@ fn ai_step(
             let farm = farm.expect("player civilians need farm context");
             gather_behavior(world, e, owner, pref, home, farm, snap, grid, rng, dt)
         }
-        (_, Job::Knight | Job::Horseman) => {
+        (_, Job::Knight | Job::Horseman | Job::Bowman) => {
             if under_limit {
                 retreat_behavior(world, e, owner, home, dt)
             } else {
                 let mobility = mobility_of(e.job, bridge_ok);
                 soldier_behavior(
-                    world, e, owner, rng, snap, rally, huts, mobility, acting, dt,
+                    world, e, owner, rng, snap, grid, rally, huts, mobility, acting, dt,
                 )
             }
         }
@@ -5653,6 +5812,7 @@ fn soldier_behavior(
     owner: u8,
     rng: &mut Rng,
     snap: &[(Vec2, Faction)],
+    grid: &Grid,
     rally: Option<Vec2>,
     huts: &[Tile],
     mobility: Mobility,
@@ -5744,17 +5904,28 @@ fn soldier_behavior(
     // fixating on a straight-line-nearest foe that's stranded across water.
     // With no foe in the field, knights stay on the offensive: they march on
     // the enemy's own huts and walls, routing to a tile from which the combat
-    // step can start hacking the structure down.
+    // step can start hacking the structure down. A bowman instead makes for
+    // any tile within `BOW_STANDOFF` of a foe, from which the combat step can
+    // shoot, and never besieges a structure: arrows do nothing to timber.
+    let ranged = e.job == Job::Bowman;
+    let faction = e.faction;
     let foes: HashSet<Tile> = snap
         .iter()
-        .filter(|&&(_, f)| hostile(f, e.faction))
+        .filter(|&&(_, f)| hostile(f, faction))
         .map(|&(p, _)| (p.x.floor() as i32, p.y.floor() as i32))
         .collect();
-    let siege = any_hostile_hut(world, owner, huts);
+    let siege = !ranged && any_hostile_hut(world, owner, huts);
 
     if e.may_replan() {
         e.repath = REPLAN_TICK;
         let goal = |x: i32, y: i32| {
+            if ranged {
+                let mut in_bowshot = false;
+                grid.for_each_within(tile_center((x, y)), BOW_STANDOFF, |j, _| {
+                    in_bowshot |= hostile(snap[j].1, faction);
+                });
+                return in_bowshot;
+            }
             foes.contains(&(x, y))
                 || adjacent_enemy_wall(world, owner, (x, y)).is_some()
                 || adjacent_enemy_hut(world, owner, (x, y)).is_some()
@@ -5870,6 +6041,7 @@ fn march_step_cost(
     match mobility {
         Mobility::Foot { bridge_ok } => knight_step_cost(world, owner, bridge_ok, to.0, to.1),
         Mobility::Mounted => horseman_step_cost(world, owner, from, to),
+        Mobility::Light => world.walkable_for(owner, to.0, to.1).then_some(1),
     }
 }
 
@@ -6026,7 +6198,7 @@ fn advance_or_hack(
             return None;
         }
     }
-    let moved = follow_path(e, KNIGHT_SPEED, dt);
+    let moved = follow_path(e, speed_of(e.job), dt);
     set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
     None
 }
@@ -7084,12 +7256,14 @@ fn job_u8(j: Job) -> u8 {
         Job::Civilian => 0,
         Job::Knight => 1,
         Job::Horseman => 2,
+        Job::Bowman => 3,
     }
 }
 fn job_of(v: u8) -> Job {
     match v {
         1 => Job::Knight,
         2 => Job::Horseman,
+        3 => Job::Bowman,
         _ => Job::Civilian,
     }
 }
@@ -7443,6 +7617,7 @@ impl Game {
                 found_at: None,
                 pending: 0.0,
                 jump: None,
+                reload: 0.0,
             });
         }
 
@@ -7738,6 +7913,7 @@ impl Game {
             warships,
             pirates: Vec::new(),
             cannonballs: Vec::new(),
+            arrows: Vec::new(),
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
             build_mode,
             priority,
@@ -9355,6 +9531,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bowmen_survive_a_save() {
+        let mut game = Game::new(1);
+        let i = game
+            .entities
+            .iter()
+            .position(|e| e.faction == Faction::Player)
+            .expect("the player starts with units");
+        game.entities[i].job = Job::Bowman;
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+        assert_eq!(loaded.entities[i].job, Job::Bowman, "the job was lost");
+        assert_eq!(
+            loaded
+                .entities
+                .iter()
+                .filter(|e| e.job == Job::Bowman)
+                .count(),
+            1,
+            "the job leaked onto other units"
+        );
+        assert_eq!(
+            loaded.entities[i].reload, 0.0,
+            "a loaded bowman's bow must be ready"
+        );
+    }
+
     /// A fresh realm with a working core at home, every other unit cleared,
     /// and the houses surveyed so spawns can find them.
     fn realm_ready_to_grow(priority: Priority, money: u32) -> Game {
@@ -9372,9 +9575,9 @@ mod tests {
         game
     }
 
-    /// Fire the player's spawn until the realm is full, and tally the knights
-    /// and horsemen raised.
-    fn raise_until_full(game: &mut Game) -> (usize, usize) {
+    /// Fire the player's spawn until the realm is full, and tally the knights,
+    /// horsemen and bowmen raised.
+    fn raise_until_full(game: &mut Game) -> (usize, usize, usize) {
         for _ in 0..60 {
             if game.population() >= game.pop_cap() {
                 break;
@@ -9382,48 +9585,47 @@ mod tests {
             game.player_spawn_timer = 0.0;
             game.handle_spawns(0.01);
         }
-        let knights = game
-            .entities
-            .iter()
-            .filter(|e| e.job == Job::Knight)
-            .count();
-        let horsemen = game
-            .entities
-            .iter()
-            .filter(|e| e.job == Job::Horseman)
-            .count();
-        (knights, horsemen)
+        game.soldiers_of(Faction::Player)
     }
 
     #[test]
-    fn military_priority_raises_horsemen_when_the_gold_allows() {
+    fn military_priority_raises_horsemen_and_bowmen_when_the_gold_allows() {
         let mut game = realm_ready_to_grow(Priority::Military, 1000);
-        let (knights, horsemen) = raise_until_full(&mut game);
+        let (knights, horsemen, bowmen) = raise_until_full(&mut game);
         assert!(knights >= 2, "the realm raised only {knights} knights");
         assert!(horsemen >= 1, "no horseman was raised under Military");
+        assert!(bowmen >= 1, "no bowman was raised under Military");
         assert!(
             horsemen <= knights,
             "cavalry outnumbers the foot: {horsemen} to {knights}"
         );
+        assert!(
+            bowmen <= knights,
+            "bowmen outnumber the knights: {bowmen} to {knights}"
+        );
         assert_eq!(
             game.money,
-            1000 - knights as u32 * KNIGHT_GOLD_COST - horsemen as u32 * HORSEMAN_GOLD_COST,
-            "every horse and sword must be paid for"
+            1000 - knights as u32 * KNIGHT_GOLD_COST
+                - horsemen as u32 * HORSEMAN_GOLD_COST
+                - bowmen as u32 * BOWMAN_GOLD_COST,
+            "every horse, bow and sword must be paid for"
         );
     }
 
     #[test]
-    fn horsemen_need_their_gold_and_the_military_priority() {
-        // Too poor for a horse (but not for a knight): knights only.
-        let mut game = realm_ready_to_grow(Priority::Military, HORSEMAN_GOLD_COST - 1);
-        let (knights, horsemen) = raise_until_full(&mut game);
+    fn horsemen_and_bowmen_need_their_gold_and_the_military_priority() {
+        // Too poor for a horse or a bow (but not for a knight): knights only.
+        let mut game = realm_ready_to_grow(Priority::Military, BOWMAN_GOLD_COST - 1);
+        let (knights, horsemen, bowmen) = raise_until_full(&mut game);
         assert!(knights >= 1, "a knight was still affordable");
         assert_eq!(horsemen, 0, "a horseman was raised on too little gold");
+        assert_eq!(bowmen, 0, "a bowman was raised on too little gold");
 
         // Rich, but leaning Agriculture: knights only.
         let mut game = realm_ready_to_grow(Priority::Agriculture, 1000);
-        let (_, horsemen) = raise_until_full(&mut game);
+        let (_, horsemen, bowmen) = raise_until_full(&mut game);
         assert_eq!(horsemen, 0, "a horseman was raised under Agriculture");
+        assert_eq!(bowmen, 0, "a bowman was raised under Agriculture");
     }
 
     /// A flat, treeless lane from the origin out to x = 16 (forced land near
@@ -9451,6 +9653,125 @@ mod tests {
     /// Does the knight stand on a tile next to `t`?
     fn knight_beside(game: &Game, k: usize, t: Tile) -> bool {
         adjacent(game.entities[k].tile(), t)
+    }
+
+    /// The lane of `knight_on_a_lane` with the soldier carrying a bow instead.
+    /// Returns the bowman's index.
+    fn bowman_on_a_lane(game: &mut Game) -> usize {
+        let k = knight_on_a_lane(game);
+        let e = &mut game.entities[k];
+        e.job = Job::Bowman;
+        e.max_hp = max_hp_for(Faction::Player, Job::Bowman);
+        e.hp = e.max_hp;
+        k
+    }
+
+    #[test]
+    fn bowmen_shoot_a_foe_in_range_rather_than_closing() {
+        let mut game = Game::new(1);
+        let b = bowman_on_a_lane(&mut game);
+        // An enemy knight down the lane, within bowshot but well outside melee
+        // reach, with enough enemy civilians about that it fights rather than
+        // falling back home.
+        for _ in 0..=MIN_CIVILIANS_TO_GROW {
+            game.entities
+                .push(Entity::new(Faction::Enemy, Job::Civilian, (14, 4)));
+        }
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Knight, (3, 0)));
+        let foe = game.entities.len() - 1;
+        let foe_hp = game.entities[foe].max_hp;
+        let start = game.entities[b].pos;
+
+        let sim = (-6, -10, 20, 10);
+        game.update(0.1, sim);
+        assert_eq!(
+            game.arrows.len(),
+            1,
+            "the bowman loosed no arrow at a foe in bowshot"
+        );
+        assert_eq!(
+            game.entities[b].pos, start,
+            "the bowman walked instead of shooting"
+        );
+        assert!(
+            matches!(game.entities[b].anim, Anim::Act),
+            "the bowman isn't drawing its bow"
+        );
+
+        let mut struck = false;
+        for _ in 0..8 {
+            game.update(0.1, sim);
+            if game.entities[foe].hp < foe_hp {
+                struck = true;
+                break;
+            }
+        }
+        assert!(struck, "the arrow never struck the knight");
+        assert_eq!(
+            game.entities[foe].hp,
+            foe_hp - ARROW_DAMAGE,
+            "an arrow must deal exactly its damage"
+        );
+        assert_eq!(
+            game.entities[b].hp, game.entities[b].max_hp,
+            "the knight was still out of reach, yet the bowman was hurt"
+        );
+    }
+
+    #[test]
+    fn arrows_drop_at_the_end_of_their_flight() {
+        let mut game = Game::new(1);
+        let b = bowman_on_a_lane(&mut game);
+        let start = game.entities[b].pos;
+        game.arrows.push(Arrow {
+            pos: start,
+            vel: Vec2::new(ARROW_SPEED, 0.0),
+            life: ARROW_LIFE,
+            archer: Faction::Player,
+        });
+        let sim = (-6, -10, 20, 10);
+        for _ in 0..10 {
+            game.update(0.1, sim);
+        }
+        assert!(game.arrows.is_empty(), "an arrow flew on forever");
+        assert_eq!(
+            game.entities[b].hp, game.entities[b].max_hp,
+            "an arrow hurt its own side"
+        );
+    }
+
+    #[test]
+    fn bowmen_go_around_what_knights_hack_through() {
+        let mut game = Game::new(1);
+        knight_on_a_lane(&mut game);
+        game.world.set_node(1, 0, Resource::Wood, 5);
+        game.world.carve_water(2, 0);
+        let owner = owner_of(Faction::Player);
+        let foot = Mobility::Foot { bridge_ok: true };
+        assert!(
+            march_step_cost(&game.world, owner, foot, (0, 0), (1, 0)).is_some(),
+            "a knight prices hacking through a tree"
+        );
+        assert!(
+            march_step_cost(&game.world, owner, foot, (1, 0), (2, 0)).is_some(),
+            "a knight prices bridging water"
+        );
+        assert_eq!(
+            march_step_cost(&game.world, owner, Mobility::Light, (0, 0), (1, 0)),
+            None,
+            "a bowman priced hacking through a tree"
+        );
+        assert_eq!(
+            march_step_cost(&game.world, owner, Mobility::Light, (1, 0), (2, 0)),
+            None,
+            "a bowman priced bridging water"
+        );
+        assert_eq!(
+            march_step_cost(&game.world, owner, Mobility::Light, (0, 0), (0, 1)),
+            Some(1),
+            "a bowman can't walk clear ground"
+        );
     }
 
     #[test]
