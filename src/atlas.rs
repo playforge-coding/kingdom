@@ -239,6 +239,9 @@ pub fn build() -> Atlas {
         Source::sprite("house", crop(&houses, 0, 0, 16, 16)),
         Source::sprite("enemy_house", crop(&enemy_houses, 0, 0, 16, 16)),
         Source::sprite("ally_house", crop(&ally_houses, 0, 0, 16, 16)),
+        // The bridge sprite spans north to south; a quarter turn gives the
+        // one laid across an east-west crossing.
+        Source::sprite("bridge_ew", image::imageops::rotate90(&bridge)),
         Source::sprite("bridge", bridge),
         Source::sprite("wall", wall),
         Source::sprite("tree", pad_to_tile(&tree)),

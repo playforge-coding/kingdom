@@ -64,6 +64,10 @@ order a whole span tile by tile right away (each order may extend a pending
 one); the builder then works outward as the tiles are finished. Builders are
 allowed past their usual home leash to reach a bridge site.
 
+Each bridge turns itself to match its crossing: it runs east to west when it
+joins land or more bridge on those sides, and north to south otherwise. Ships
+can still sail through a bridged channel, passing underneath the span.
+
 !!! note "Knights bridge for themselves"
     Your **knights** also lay bridges on their own: when crossing water is the
     quickest way to a foe, an enemy structure, or your rally flag (counting the

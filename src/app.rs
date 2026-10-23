@@ -95,6 +95,14 @@ fn hull_bar_tint(faction: crate::game::Faction) -> [f32; 4] {
     }
 }
 
+/// Does the bridge on `(x, y)` run east to west? It does when more of its east
+/// and west neighbors are deck it joins (land, or more bridge per `deck`) than
+/// its north and south ones; a tie keeps the sprite's own north-south span.
+fn bridge_runs_east_west(x: i32, y: i32, deck: impl Fn(i32, i32) -> bool) -> bool {
+    let links = |a: (i32, i32), b: (i32, i32)| deck(a.0, a.1) as u8 + deck(b.0, b.1) as u8;
+    links((x - 1, y), (x + 1, y)) > links((x, y - 1), (x, y + 1))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scene {
     Menu,
@@ -372,8 +380,9 @@ impl State {
         }
     }
 
-    /// Assemble the draw list for the visible tile rectangle: terrain, bridges,
-    /// buildings/nodes, then animated entities (and their HP bars) on top.
+    /// Assemble the draw list for the visible tile rectangle: terrain and
+    /// buildings/nodes, then ships, then bridges (so hulls pass under them),
+    /// then animated entities (and their HP bars) on top.
     fn build_instances(&self) -> Vec<Instance> {
         let Some(game) = &self.game else {
             return Vec::new();
@@ -385,6 +394,7 @@ impl State {
         let grass = self.atlas.uv("grass");
         let water = self.atlas.uv("water");
         let bridge = self.atlas.uv("bridge");
+        let bridge_ew = self.atlas.uv("bridge_ew");
         let tree = self.atlas.uv("tree");
         let rock = self.atlas.uv("rock");
         let house = self.atlas.uv("house");
@@ -400,6 +410,9 @@ impl State {
         let (minx, miny, maxx, maxy) = self.visible_bounds();
         let cap = ((maxx - minx + 1) * (maxy - miny + 1)) as usize * 2 + 256;
         let mut out = Vec::with_capacity(cap);
+        // Bridge decks go down after the ships, so a hull sails under a span
+        // instead of over it.
+        let mut bridges = Vec::new();
 
         let tinted = |pos: [f32; 2], size: [f32; 2], uv: [f32; 4], color: [f32; 4]| Instance {
             pos,
@@ -443,7 +456,7 @@ impl State {
                 }
 
                 if world.is_bridge(x, y) {
-                    out.push(quad(p, [1.0, 1.0], bridge));
+                    bridges.push((x, y));
                 }
                 if world.is_house(x, y) {
                     out.push(quad(p, [1.0, 1.0], house));
@@ -475,93 +488,6 @@ impl State {
                     };
                     out.push(quad(p, [1.0, 1.0], uv));
                 }
-            }
-        }
-
-        // The testing ground's placement cursor: the tile under the pointer,
-        // washed in the color of the faction about to own what goes down
-        // there, or plain white for terrain that belongs to no one.
-        let owned = match game.sandbox_tool {
-            SandboxTool::PlaceUnit => Some(true),
-            SandboxTool::PlaceTile => Some(game.place_brush.owned()),
-            SandboxTool::Rally => None,
-        };
-        if sandbox && let Some(owned) = owned {
-            let (cx, cy) = self.cursor_tile();
-            let mut wash = match game.place_faction {
-                _ if !owned => WHITE,
-                Faction::Player => self.colors.player,
-                Faction::Enemy => self.colors.enemy,
-                Faction::Ally => self.colors.ally,
-            };
-            wash[3] = 0.45;
-            out.push(tinted([cx as f32, cy as f32], [1.0, 1.0], white, wash));
-        }
-
-        // Saplings: a young tree that scales up from a sprout as it matures.
-        for (sx, sy, grow) in game.saplings_iter() {
-            let s = 0.3 + 0.7 * grow.clamp(0.0, 1.0);
-            let px = sx as f32 + (1.0 - s) * 0.5;
-            let py = sy as f32 + (1.0 - s);
-            out.push(quad([px, py], [s, s], tree));
-        }
-
-        // Entities: pick an animation frame and draw an HP bar when hurt. We cap
-        // how many same-type units are drawn on any one tile. Small crowds show
-        // fully (so you see newcomers arrive), but a pathological pile-up of
-        // hundreds costs a handful of quads instead of hundreds.
-        let mut stack: HashMap<(i32, i32, bool, Job), u32> = HashMap::default();
-        for e in &game.entities {
-            let key = (
-                e.pos.x.floor() as i32,
-                e.pos.y.floor() as i32,
-                matches!(e.faction, Faction::Player),
-                e.job,
-            );
-            let count = stack.entry(key).or_insert(0);
-            *count += 1;
-            if *count > STACK_DRAW_CAP {
-                continue;
-            }
-            let (sheet, col, row) = sprite_frame(e);
-            let uv = self.atlas.frame_uv(sheet, col, row);
-            // A horseman's frames are 32x32, drawn over a 2x2-tile footprint
-            // with the hooves on its tile, and lifted off the ground while it
-            // leaps a stream. Everyone else is a 16x16 frame on one tile.
-            let mounted = e.job == Job::Horseman;
-            let lift = e.jump_lift();
-            if mounted {
-                out.push(tinted(
-                    [e.pos.x - 1.0, e.pos.y - HORSEMAN_DRAW_RISE - lift],
-                    [2.0, 2.0],
-                    uv,
-                    WHITE,
-                ));
-            } else {
-                out.push(tinted(
-                    [e.pos.x - 0.5, e.pos.y - 0.5],
-                    [1.0, 1.0],
-                    uv,
-                    WHITE,
-                ));
-            }
-
-            if e.hp < e.max_hp {
-                let ratio = (e.hp / e.max_hp).clamp(0.0, 1.0);
-                let (bw, bh) = (0.8f32, 0.12f32);
-                let bx = e.pos.x - bw / 2.0;
-                let by = if mounted {
-                    e.pos.y - HORSEMAN_DRAW_RISE - lift + 0.05
-                } else {
-                    e.pos.y - 0.72
-                };
-                out.push(tinted([bx, by], [bw, bh], white, [0.15, 0.0, 0.0, 0.85]));
-                let col = match e.faction {
-                    Faction::Player => [0.3, 0.55, 1.0, 0.95],
-                    Faction::Ally => [0.25, 0.85, 0.3, 0.95],
-                    Faction::Enemy => [0.9, 0.25, 0.2, 0.95],
-                };
-                out.push(tinted([bx, by], [bw * ratio, bh], white, col));
             }
         }
 
@@ -651,6 +577,117 @@ impl State {
             }
         }
 
+        // Bridge decks, each turned to run along its crossing: east to west
+        // when it joins deck on those sides, north to south otherwise. Bridges
+        // still being built count as deck, so a span ordered tile by tile
+        // lines up before it's finished.
+        let pending: Vec<_> = game
+            .build_sites()
+            .iter()
+            .filter(|s| s.kind == SiteKind::Bridge)
+            .map(|s| s.tile)
+            .collect();
+        let deck = |x: i32, y: i32| {
+            world.tile(x, y) == Tile::Grass || world.is_bridge(x, y) || pending.contains(&(x, y))
+        };
+        let bridge_uv = |x: i32, y: i32| {
+            if bridge_runs_east_west(x, y, deck) {
+                bridge_ew
+            } else {
+                bridge
+            }
+        };
+        for &(x, y) in &bridges {
+            out.push(quad([x as f32, y as f32], [1.0, 1.0], bridge_uv(x, y)));
+        }
+
+        // The testing ground's placement cursor: the tile under the pointer,
+        // washed in the color of the faction about to own what goes down
+        // there, or plain white for terrain that belongs to no one.
+        let owned = match game.sandbox_tool {
+            SandboxTool::PlaceUnit => Some(true),
+            SandboxTool::PlaceTile => Some(game.place_brush.owned()),
+            SandboxTool::Rally => None,
+        };
+        if sandbox && let Some(owned) = owned {
+            let (cx, cy) = self.cursor_tile();
+            let mut wash = match game.place_faction {
+                _ if !owned => WHITE,
+                Faction::Player => self.colors.player,
+                Faction::Enemy => self.colors.enemy,
+                Faction::Ally => self.colors.ally,
+            };
+            wash[3] = 0.45;
+            out.push(tinted([cx as f32, cy as f32], [1.0, 1.0], white, wash));
+        }
+
+        // Saplings: a young tree that scales up from a sprout as it matures.
+        for (sx, sy, grow) in game.saplings_iter() {
+            let s = 0.3 + 0.7 * grow.clamp(0.0, 1.0);
+            let px = sx as f32 + (1.0 - s) * 0.5;
+            let py = sy as f32 + (1.0 - s);
+            out.push(quad([px, py], [s, s], tree));
+        }
+
+        // Entities: pick an animation frame and draw an HP bar when hurt. We cap
+        // how many same-type units are drawn on any one tile. Small crowds show
+        // fully (so you see newcomers arrive), but a pathological pile-up of
+        // hundreds costs a handful of quads instead of hundreds.
+        let mut stack: HashMap<(i32, i32, bool, Job), u32> = HashMap::default();
+        for e in &game.entities {
+            let key = (
+                e.pos.x.floor() as i32,
+                e.pos.y.floor() as i32,
+                matches!(e.faction, Faction::Player),
+                e.job,
+            );
+            let count = stack.entry(key).or_insert(0);
+            *count += 1;
+            if *count > STACK_DRAW_CAP {
+                continue;
+            }
+            let (sheet, col, row) = sprite_frame(e);
+            let uv = self.atlas.frame_uv(sheet, col, row);
+            // A horseman's frames are 32x32, drawn over a 2x2-tile footprint
+            // with the hooves on its tile, and lifted off the ground while it
+            // leaps a stream. Everyone else is a 16x16 frame on one tile.
+            let mounted = e.job == Job::Horseman;
+            let lift = e.jump_lift();
+            if mounted {
+                out.push(tinted(
+                    [e.pos.x - 1.0, e.pos.y - HORSEMAN_DRAW_RISE - lift],
+                    [2.0, 2.0],
+                    uv,
+                    WHITE,
+                ));
+            } else {
+                out.push(tinted(
+                    [e.pos.x - 0.5, e.pos.y - 0.5],
+                    [1.0, 1.0],
+                    uv,
+                    WHITE,
+                ));
+            }
+
+            if e.hp < e.max_hp {
+                let ratio = (e.hp / e.max_hp).clamp(0.0, 1.0);
+                let (bw, bh) = (0.8f32, 0.12f32);
+                let bx = e.pos.x - bw / 2.0;
+                let by = if mounted {
+                    e.pos.y - HORSEMAN_DRAW_RISE - lift + 0.05
+                } else {
+                    e.pos.y - 0.72
+                };
+                out.push(tinted([bx, by], [bw, bh], white, [0.15, 0.0, 0.0, 0.85]));
+                let col = match e.faction {
+                    Faction::Player => [0.3, 0.55, 1.0, 0.95],
+                    Faction::Ally => [0.25, 0.85, 0.3, 0.95],
+                    Faction::Enemy => [0.9, 0.25, 0.2, 0.95],
+                };
+                out.push(tinted([bx, by], [bw * ratio, bh], white, col));
+            }
+        }
+
         // Cannonballs in flight: a small sprite centered on the shot.
         let cannonball = self.atlas.uv("cannonball");
         for b in game.cannonballs() {
@@ -706,7 +743,7 @@ impl State {
         for s in game.build_sites() {
             let uv = match s.kind {
                 SiteKind::House => house,
-                SiteKind::Bridge => bridge,
+                SiteKind::Bridge => bridge_uv(s.tile.0, s.tile.1),
                 SiteKind::Mine => cave,
                 SiteKind::Wall => wall,
                 SiteKind::Hut => hut,
