@@ -59,9 +59,9 @@ Everything you build is paid for out of this pool.
 
 - **:lucide-wheat: Agriculture / :lucide-swords: Military:** which kind
   of villager your houses favor raising when they spawn new workers. Under
-  Military, about a quarter of the soldiers raised are
-  **[horsemen](units.md#horsemen)** and a quarter **[bowmen](units.md#bowmen)**
-  when the gold allows.
+  Military, about a fifth of the soldiers raised are
+  **[horsemen](units.md#horsemen)**, a fifth **[bowmen](units.md#bowmen)** and
+  a fifth **[axemen](units.md#axemen)** when the gold allows.
 - **Gather: Balanced / :lucide-tree-pine: Wood / :lucide-mountain: Stone:**
   biases which resource idle civilians seek out. *Balanced* lets them pick the nearest.
 

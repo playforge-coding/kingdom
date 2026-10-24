@@ -81,12 +81,22 @@ pub enum Job {
     /// armored, and never hacks, bridges, boards a ship, or breaks into a
     /// structure (see `Mobility::Light`).
     Bowman,
+    /// A heavy soldier on foot with two axes: throws one at foes within
+    /// `AXE_RANGE` as it closes in, and once a foe is in reach winds up a slow
+    /// spin that strikes everyone around it at once (see [`Whirl`]). Tougher
+    /// than a knight but much slower and clumsier: it never duels, so it never
+    /// dodges a blow. Hacks and bridges like a knight, felling trees and
+    /// breaking walls and huts far faster, but never boards a ship.
+    Axeman,
 }
 
 impl Job {
-    /// Knights, horsemen and bowmen alike: anyone under arms.
+    /// Knights, horsemen, bowmen and axemen alike: anyone under arms.
     pub fn is_soldier(self) -> bool {
-        matches!(self, Job::Knight | Job::Horseman | Job::Bowman)
+        matches!(
+            self,
+            Job::Knight | Job::Horseman | Job::Bowman | Job::Axeman
+        )
     }
 }
 
@@ -94,9 +104,11 @@ impl Job {
 /// may price in besides walking (see `march_step_cost`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mobility {
-    /// A knight: hacks through trees and rocks, and lays bridges over open
-    /// water when `bridge_ok` (the stockpile has the wood for a span).
-    Foot { bridge_ok: bool },
+    /// A knight or axeman: hacks through trees and rocks, and lays bridges
+    /// over open water when `bridge_ok` (the stockpile has the wood for a span).
+    /// An axeman (`axe`) fells trees in a fraction of a knight's time, so its
+    /// planner prices them cheaper.
+    Foot { bridge_ok: bool, axe: bool },
     /// A horseman: goes around every obstacle, but leaps straight over a
     /// stream up to `HORSEMAN_JUMP_REACH` tiles wide onto the far bank.
     Mounted,
@@ -109,7 +121,14 @@ fn mobility_of(job: Job, bridge_ok: bool) -> Mobility {
     match job {
         Job::Horseman => Mobility::Mounted,
         Job::Bowman => Mobility::Light,
-        Job::Knight | Job::Civilian => Mobility::Foot { bridge_ok },
+        Job::Knight | Job::Civilian => Mobility::Foot {
+            bridge_ok,
+            axe: false,
+        },
+        Job::Axeman => Mobility::Foot {
+            bridge_ok,
+            axe: true,
+        },
     }
 }
 
@@ -217,9 +236,12 @@ pub struct Entity {
     pending: f32,
     /// A horseman mid-leap over a stream (see [`Jump`]). Transient.
     jump: Option<Jump>,
-    /// For a bowman: seconds until the bow is drawn again. Transient, so a
-    /// bowman loads with its bow ready.
+    /// For a bowman: seconds until the bow is drawn again; for an axeman,
+    /// until it can throw again. Transient, so either loads ready.
     reload: f32,
+    /// For an axeman: the spin it is winding up or whirling, if any (see
+    /// [`Whirl`]). Transient.
+    whirl: Option<Whirl>,
     /// For a melee soldier: the footwork of the fight it's in (see [`Duel`]).
     /// Transient.
     duel: Option<Duel>,
@@ -252,6 +274,36 @@ struct Charge {
     phase: ChargePhase,
     /// Seconds left in the phase.
     time: f32,
+}
+
+/// Where an axeman's spin attack is at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WhirlPhase {
+    /// Hoisting the axe, rooted to the spot and striking nobody.
+    Windup,
+    /// Spinning round with the axe out. The blow lands on everyone in reach
+    /// the moment this phase begins; the rest is the follow-through.
+    Spin,
+}
+
+/// An axeman's spin attack: a long windup, then one heavy blow to every foe
+/// within `SPIN_RADIUS` (see the combat step in `Game::update`).
+#[derive(Clone, Copy)]
+struct Whirl {
+    phase: WhirlPhase,
+    /// Seconds left in the phase.
+    time: f32,
+}
+
+/// What an axeman is doing with its axes right now, for the renderer.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AxeWork {
+    /// Winding up a spin.
+    Windup,
+    /// Spinning, this many seconds in.
+    Spin(f32),
+    /// Following through on a throw.
+    Throw,
 }
 
 /// What a melee soldier is doing with its feet while it trades blows.
@@ -301,6 +353,7 @@ fn max_hp_for(faction: Faction, job: Job) -> f32 {
         (_, Job::Knight) => 60.0,
         (_, Job::Horseman) => 90.0,
         (_, Job::Bowman) => 40.0,
+        (_, Job::Axeman) => 80.0,
         (Faction::Player, Job::Civilian) => 28.0,
         (Faction::Enemy, Job::Civilian) => 22.0,
         (Faction::Ally, Job::Civilian) => 24.0,
@@ -336,12 +389,28 @@ impl Entity {
             pending: 0.0,
             jump: None,
             reload: 0.0,
+            whirl: None,
             duel: None,
             flee: 0.0,
             flee_from: Vec2::ZERO,
             morale: 0.0,
             charge: None,
             charge_cooldown: 0.0,
+        }
+    }
+
+    /// For an axeman: the spin it is winding up or whirling, or the throw it
+    /// is following through on. `None` for anyone else, and for an axeman
+    /// just walking or hacking.
+    pub fn axe_work(&self) -> Option<AxeWork> {
+        if self.job != Job::Axeman {
+            return None;
+        }
+        match self.whirl {
+            Some(w) if w.phase == WhirlPhase::Windup => Some(AxeWork::Windup),
+            Some(w) => Some(AxeWork::Spin(SPIN_TIME - w.time)),
+            None if self.reload > AXE_RELOAD - AXE_THROW_POSE => Some(AxeWork::Throw),
+            None => None,
         }
     }
 
@@ -428,6 +497,11 @@ pub const HORSEMAN_GOLD_COST: u32 = 50;
 /// knight whenever the realm has fewer than one bowman for every two knights
 /// (cavalry is topped up first) and the treasury can cover it.
 pub const BOWMAN_GOLD_COST: u32 = 30;
+/// Gold an axeman costs to raise, both axes included. Under the Military
+/// priority a house raises one in place of a knight whenever the realm has
+/// fewer than one axeman for every two knights (cavalry and bowmen are topped
+/// up first) and the treasury can cover it.
+pub const AXEMAN_GOLD_COST: u32 = 35;
 /// Enemy and allied villages only raise horsemen once they have grown to this
 /// many houses, the same size at which an enemy village starts sending sea
 /// raids, so the early game stays a contest of foot soldiers.
@@ -716,6 +790,9 @@ const KNIGHT_SPEED: f32 = 2.9;
 const HORSEMAN_SPEED: f32 = 4.2;
 /// A bowman keeps a knight's pace: light kit, but no horse.
 const BOWMAN_SPEED: f32 = KNIGHT_SPEED;
+/// An axeman lumbers along under its axes and its armor, far slower than
+/// anyone else on foot.
+const AXEMAN_SPEED: f32 = 0.6 * KNIGHT_SPEED;
 /// The widest stream, in water tiles, a horseman can leap in a straight line
 /// from one bank to the other. Rivers are carved 2-3 tiles across (see
 /// `world::RIVER_HALF_WIDTH_MAIN`), so this clears the tributaries and leaves
@@ -765,6 +842,7 @@ fn speed_of(job: Job) -> f32 {
         Job::Knight => KNIGHT_SPEED,
         Job::Horseman => HORSEMAN_SPEED,
         Job::Bowman => BOWMAN_SPEED,
+        Job::Axeman => AXEMAN_SPEED,
     }
 }
 /// Seconds between route replans while a unit is on the move. A unit that just
@@ -795,6 +873,21 @@ const KNIGHT_BRIDGE_TIME: f32 = 2.5;
 /// obstacles this way is what makes a knight go around one whenever the detour
 /// is quicker, and only cut through when it genuinely isn't.
 const KNIGHT_DEMOLISH_STEP_COST: u32 = 1 + (KNIGHT_DEMOLISH_TIME * KNIGHT_SPEED) as u32;
+/// An axeman fells a tree far quicker than a knight hacks one down. Rocks
+/// take it as long as anyone.
+const AXEMAN_CHOP_TIME: f32 = 2.0;
+/// Likewise for the step onto a tree an axeman would have to fell first.
+const AXEMAN_CHOP_STEP_COST: u32 = 1 + (AXEMAN_CHOP_TIME * AXEMAN_SPEED) as u32;
+
+/// Seconds a soldier of `job` spends clearing a tree or rock (`kind`) off its
+/// way.
+fn demolish_time(job: Job, kind: Resource) -> f32 {
+    if job == Job::Axeman && kind == Resource::Wood {
+        AXEMAN_CHOP_TIME
+    } else {
+        KNIGHT_DEMOLISH_TIME
+    }
+}
 /// Likewise for a step onto open water the knight would have to bridge first.
 const KNIGHT_BRIDGE_STEP_COST: u32 = 1 + (KNIGHT_BRIDGE_TIME * KNIGHT_SPEED) as u32;
 /// Search budget (tiles expanded) for a knight's route. One weighted search
@@ -966,11 +1059,58 @@ const ARROW_DAMAGE: f32 = 14.0;
 const ARROW_SPEED: f32 = 10.0;
 /// Seconds an arrow flies before it drops: a little past `BOW_RANGE`.
 const ARROW_LIFE: f32 = (BOW_RANGE + 1.0) / ARROW_SPEED;
-/// An arrow this close to a hostile unit strikes it.
-const ARROW_HIT_RADIUS: f32 = 0.6;
+/// An arrow or thrown axe this close to a hostile unit strikes it.
+const MISSILE_HIT_RADIUS: f32 = 0.6;
+/// How far an axeman throws. Short of bowshot, but well past melee reach, so
+/// an axeman closing in gets a few throws off on the way.
+const AXE_RANGE: f32 = 4.0;
+/// Seconds between an axeman's throws: quicker than a bowman draws.
+const AXE_RELOAD: f32 = 0.9;
+/// How long an axeman stands still after a throw, following through, before
+/// it walks on.
+const AXE_THROW_POSE: f32 = 0.25;
+/// Damage one thrown axe deals: less than an arrow, made up for by the pace.
+const AXE_DAMAGE: f32 = 9.0;
+/// Thrown axe flight speed (tiles/second): it tumbles a little slower than an
+/// arrow flies, and stays under the same ten-tiles-a-frame limit.
+const AXE_SPEED: f32 = 8.0;
+/// Seconds a thrown axe flies before it drops: a little past `AXE_RANGE`.
+const AXE_LIFE: f32 = (AXE_RANGE + 1.0) / AXE_SPEED;
+/// Seconds an axeman spends winding up a spin, rooted and striking nobody. A
+/// knight trading blows with it gets a good deal of damage in first, and a
+/// foe that steps back in time is out of reach when it lands.
+const SPIN_WINDUP: f32 = 1.6;
+/// How long the spin itself lasts once the blow has landed: the
+/// follow-through before the axeman can do anything else.
+const SPIN_TIME: f32 = 0.5;
+/// The blow a spin lands on every foe within `SPIN_RADIUS`, all at once:
+/// most of a knight's hit points.
+const SPIN_DAMAGE: f32 = 45.0;
+/// How far round an axeman a spin reaches: a little past blade reach, but
+/// short of where a dodge that comes off carries a foe.
+const SPIN_RADIUS: f32 = 1.6;
+/// A hostile arrow or axe this close to an axeman mid-spin meets the blade
+/// and is knocked aside. Wider than `MISSILE_HIT_RADIUS`, so the blade gets to
+/// it before it reaches the axeman.
+const SPIN_DEFLECT_RADIUS: f32 = 0.9;
+/// How far, in degrees either way, a knocked-aside missile strays from
+/// straight back the way it came. The axeman isn't aiming: most fly off
+/// harmlessly, and only now and then does one find the thrower.
+const SPIN_DEFLECT_SPREAD: f32 = 70.0;
 /// Walls are tough, so breaking one takes several seconds of hacking.
 const WALL_MAX_HP: f32 = 220.0;
 const WALL_DPS: f32 = 18.0;
+/// An axeman's axe bites through a wall or a hut's timbers twice as fast.
+const AXEMAN_WALL_DPS: f32 = 2.0 * WALL_DPS;
+
+/// How fast a soldier of `job` hacks at an enemy wall or hut.
+fn siege_dps(job: Job) -> f32 {
+    if job == Job::Axeman {
+        AXEMAN_WALL_DPS
+    } else {
+        WALL_DPS
+    }
+}
 /// Huts are sturdier than walls; attackers need a good while to break in.
 const HUT_MAX_HP: f32 = 400.0;
 /// Most civilians that can shelter in a single hut.
@@ -1461,16 +1601,59 @@ pub struct Cannonball {
     gunner: Gunner,
 }
 
-/// An arrow in flight, loosed by a bowman of `archer`'s faction. It strikes
-/// the first hostile unit it comes within `ARROW_HIT_RADIUS` of, and never
-/// harms a hull or a structure. Transient, like a cannonball: a save taken
-/// mid-flight simply drops it.
-pub struct Arrow {
+/// What a [`Missile`] is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MissileKind {
+    /// Loosed by a bowman: `ARROW_DAMAGE`.
+    Arrow,
+    /// Thrown by an axeman, tumbling end over end: `AXE_DAMAGE`.
+    Axe,
+}
+
+impl MissileKind {
+    fn damage(self) -> f32 {
+        match self {
+            MissileKind::Arrow => ARROW_DAMAGE,
+            MissileKind::Axe => AXE_DAMAGE,
+        }
+    }
+
+    /// How fast it flies and for how long, in tiles a second and seconds.
+    fn flight(self) -> (f32, f32) {
+        match self {
+            MissileKind::Arrow => (ARROW_SPEED, ARROW_LIFE),
+            MissileKind::Axe => (AXE_SPEED, AXE_LIFE),
+        }
+    }
+}
+
+/// An arrow or thrown axe in flight, from a soldier of `thrower`'s faction.
+/// It strikes the first hostile unit it comes within `MISSILE_HIT_RADIUS` of,
+/// and never harms a hull or a structure. Transient, like a cannonball: a
+/// save taken mid-flight simply drops it.
+pub struct Missile {
+    pub kind: MissileKind,
     pub pos: Vec2,
     pub vel: Vec2,
     /// Seconds before it drops to the ground.
     life: f32,
-    archer: Faction,
+    /// Seconds it has been in the air, which turns a thrown axe over.
+    pub age: f32,
+    thrower: Faction,
+}
+
+impl Missile {
+    fn new(kind: MissileKind, from: Vec2, to: Vec2, thrower: Faction) -> Self {
+        let (speed, life) = kind.flight();
+        Missile {
+            kind,
+            pos: from,
+            vel: (to - from).normalize_or_zero() * speed,
+            life,
+            age: 0.0,
+            thrower,
+        }
+    }
 }
 
 /// How far past a village's capture radius a hostile unit counts as a threat,
@@ -1719,8 +1902,8 @@ pub struct Game {
     pirates: Vec<Pirate>,
     /// Cannonballs in flight (transient, not saved).
     cannonballs: Vec<Cannonball>,
-    /// Arrows in flight (transient, not saved).
-    arrows: Vec<Arrow>,
+    /// Arrows and thrown axes in flight (transient, not saved).
+    missiles: Vec<Missile>,
     pirate_spawn_timer: f32,
     pub build_mode: BuildMode,
     /// What a click does on the testing ground. Meaningless in a real game.
@@ -2017,7 +2200,7 @@ impl Game {
             warships: Vec::new(),
             pirates: Vec::new(),
             cannonballs: Vec::new(),
-            arrows: Vec::new(),
+            missiles: Vec::new(),
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
             build_mode: BuildMode::House,
             sandbox_tool: SandboxTool::PlaceUnit,
@@ -2300,6 +2483,14 @@ impl Game {
             }
             e.morale -= adt;
             let (pi, fi) = snap[i];
+            // An axeman spins at a foe in reach and throws at one farther off
+            // (see `axe_step`). With neither to do it hacks at walls and huts
+            // like a knight, below; it never duels.
+            if self.entities[i].job == Job::Axeman
+                && self.axe_step(i, adt, &snap, &grid, &mut damage, &mut acting[i])
+            {
+                continue;
+            }
             // A bowman stands and shoots: the nearest foe within bowshot takes
             // an arrow each time the bow is drawn again. It never hacks at a
             // wall or hut, and it has no blade for whoever reaches it.
@@ -2329,7 +2520,7 @@ impl Game {
                     let mut td = BOW_KITE_RANGE * BOW_KITE_RANGE;
                     grid.for_each_within(pi, BOW_KITE_RANGE, |j, pj| {
                         let other = &self.entities[j];
-                        let blade = matches!(other.job, Job::Knight | Job::Horseman);
+                        let blade = matches!(other.job, Job::Knight | Job::Horseman | Job::Axeman);
                         let d = pi.distance_squared(pj);
                         if blade && hostile(fi, snap[j].1) && d <= td {
                             td = d;
@@ -2341,12 +2532,8 @@ impl Game {
                     self.entities[i].facing = dir_from_vec(target - pi);
                     if self.entities[i].reload <= 0.0 {
                         self.entities[i].reload = BOW_RELOAD;
-                        self.arrows.push(Arrow {
-                            pos: pi,
-                            vel: (target - pi).normalize_or_zero() * ARROW_SPEED,
-                            life: ARROW_LIFE,
-                            archer: fi,
-                        });
+                        self.missiles
+                            .push(Missile::new(MissileKind::Arrow, pi, target, fi));
                     }
                 }
                 continue;
@@ -2434,13 +2621,13 @@ impl Game {
             } else if let Some(wall) =
                 adjacent_enemy_wall(&self.world, owner_of(fi), self.entities[i].tile())
             {
-                *wall_damage.entry(wall).or_insert(0.0) += WALL_DPS * adt;
+                *wall_damage.entry(wall).or_insert(0.0) += siege_dps(self.entities[i].job) * adt;
                 acting[i] = true;
                 self.entities[i].facing = dir_from_vec(tile_center(wall) - pi);
             } else if let Some(hut) =
                 adjacent_enemy_hut(&self.world, owner_of(fi), self.entities[i].tile())
             {
-                *hut_damage.entry(hut).or_insert(0.0) += WALL_DPS * adt;
+                *hut_damage.entry(hut).or_insert(0.0) += siege_dps(self.entities[i].job) * adt;
                 acting[i] = true;
                 self.entities[i].facing = dir_from_vec(tile_center(hut) - pi);
             }
@@ -2686,10 +2873,83 @@ impl Game {
         self.update_pirates(dt);
         // Sail the navy after the pirates so warships react to this frame's
         // pirate positions, then fly every cannonball both sides fired and
-        // every arrow the bowmen loosed.
+        // every arrow and axe the bowmen and axemen let fly.
         self.update_navy(dt);
         self.update_cannonballs(dt);
-        self.update_arrows(dt);
+        self.update_missiles(dt);
+    }
+
+    /// One axeman's turn in the combat step. A spin under way counts down:
+    /// once the windup is through, `SPIN_DAMAGE` lands on every foe within
+    /// `SPIN_RADIUS` that isn't dodging clear, and the spin follows through
+    /// (knocking aside any missile that meets it, see `update_missiles`).
+    /// Otherwise a foe in blade reach starts a windup, and one within
+    /// `AXE_RANGE` takes a thrown axe whenever one is ready. Returns whether
+    /// the axeman is taken up with its axes (or broke and ran), in which case
+    /// it hacks at no wall or hut; `acting` is set while it stands at the work.
+    fn axe_step(
+        &mut self,
+        i: usize,
+        adt: f32,
+        snap: &[(Vec2, Faction)],
+        grid: &Grid,
+        damage: &mut [f32],
+        acting: &mut bool,
+    ) -> bool {
+        let (pi, fi) = snap[i];
+        let e = &mut self.entities[i];
+        e.reload -= adt;
+        if let Some(mut w) = e.whirl {
+            *acting = true;
+            w.time -= adt;
+            e.whirl = match w.phase {
+                _ if w.time > 0.0 => Some(w),
+                WhirlPhase::Windup => Some(Whirl {
+                    phase: WhirlPhase::Spin,
+                    time: SPIN_TIME,
+                }),
+                WhirlPhase::Spin => None,
+            };
+            if w.phase == WhirlPhase::Windup && w.time <= 0.0 {
+                grid.for_each_within(pi, SPIN_RADIUS, |j, _| {
+                    let dodged = self.entities[j]
+                        .duel
+                        .is_some_and(|d| d.stance == Stance::StepBack && d.dodge);
+                    if j != i && hostile(fi, snap[j].1) && !dodged {
+                        damage[j] += SPIN_DAMAGE;
+                    }
+                });
+            }
+            return true;
+        }
+        let following_through = e.reload > AXE_RELOAD - AXE_THROW_POSE;
+        let Some(j) = nearest_foe(snap, grid, pi, fi, AXE_RANGE) else {
+            *acting = following_through;
+            return following_through;
+        };
+        let foe = snap[j].0;
+        let in_reach = pi.distance_squared(foe) <= COMBAT_RANGE * COMBAT_RANGE;
+        if !in_reach && e.reload > 0.0 {
+            *acting = following_through;
+            return following_through;
+        }
+        if self.check_morale(i, snap, grid) {
+            return true;
+        }
+        *acting = true;
+        let e = &mut self.entities[i];
+        e.facing = dir_from_vec(foe - pi);
+        if in_reach {
+            e.whirl = Some(Whirl {
+                phase: WhirlPhase::Windup,
+                time: SPIN_WINDUP,
+            });
+        } else {
+            e.reload = AXE_RELOAD;
+            self.missiles
+                .push(Missile::new(MissileKind::Axe, pi, foe, fi));
+        }
+        true
     }
 
     /// A soldier in a fight checks its nerve every `MORALE_CHECK` seconds. When
@@ -2726,6 +2986,7 @@ impl Game {
         e.morale = FLEE_TIME + MORALE_RECOVER;
         e.duel = None;
         e.charge = None;
+        e.whirl = None;
         e.harvest_timer = 0.0;
         e.target_node = None;
         e.build_site = None;
@@ -3130,31 +3391,55 @@ impl Game {
         &self.cannonballs
     }
 
-    /// Arrows in flight, for rendering.
-    pub fn arrows(&self) -> &[Arrow] {
-        &self.arrows
+    /// Arrows and thrown axes in flight, for rendering.
+    pub fn missiles(&self) -> &[Missile] {
+        &self.missiles
     }
 
-    /// Fly every arrow a step and resolve hits: the first hostile unit within
-    /// `ARROW_HIT_RADIUS` of the shaft takes `ARROW_DAMAGE` (and dies, tallied
-    /// like any other casualty, if that empties its hit points), and an arrow
-    /// that strikes nothing drops at the end of its flight. Hulls and
-    /// structures are never touched.
-    fn update_arrows(&mut self, dt: f32) {
-        let r2 = ARROW_HIT_RADIUS * ARROW_HIT_RADIUS;
+    /// Fly every arrow and thrown axe a step and resolve hits: the first
+    /// hostile unit within `MISSILE_HIT_RADIUS` takes the missile's damage
+    /// (and dies, tallied like any other casualty, if that empties its hit
+    /// points), and one that strikes nothing drops at the end of its flight.
+    /// Hulls and structures are never touched. A hostile missile that meets
+    /// an axeman mid-spin is knocked aside instead, off in no particular
+    /// direction but roughly back the way it came (`SPIN_DEFLECT_SPREAD`), and
+    /// counts as the axeman's from then on: it strikes whichever of the other
+    /// side it happens to fly into, its own thrower included.
+    fn update_missiles(&mut self, dt: f32) {
+        let r2 = MISSILE_HIT_RADIUS * MISSILE_HIT_RADIUS;
+        let deflect2 = SPIN_DEFLECT_RADIUS * SPIN_DEFLECT_RADIUS;
+        let spinning: Vec<(Vec2, Faction)> = self
+            .entities
+            .iter()
+            .filter(|e| matches!(e.axe_work(), Some(AxeWork::Spin(_))))
+            .map(|e| (e.pos, e.faction))
+            .collect();
         let mut ai = 0;
-        while ai < self.arrows.len() {
-            self.arrows[ai].life -= dt;
-            let step = self.arrows[ai].vel * dt;
-            self.arrows[ai].pos += step;
-            let ap = self.arrows[ai].pos;
-            let archer = self.arrows[ai].archer;
+        while ai < self.missiles.len() {
+            let m = &mut self.missiles[ai];
+            m.life -= dt;
+            m.age += dt;
+            m.pos += m.vel * dt;
+            let (ap, thrower, damage) = (m.pos, m.thrower, m.kind.damage());
+            if let Some(&(_, side)) = spinning
+                .iter()
+                .find(|&&(p, f)| hostile(thrower, f) && p.distance_squared(ap) < deflect2)
+            {
+                let spread = SPIN_DEFLECT_SPREAD as i32;
+                let turn = (self.rng.range(-spread, spread + 1) as f32).to_radians();
+                let m = &mut self.missiles[ai];
+                m.vel = Vec2::from_angle(turn).rotate(-m.vel);
+                m.life = m.kind.flight().1;
+                m.thrower = side;
+                ai += 1;
+                continue;
+            }
             let struck = self
                 .entities
                 .iter()
-                .position(|e| hostile(archer, e.faction) && e.pos.distance_squared(ap) < r2);
+                .position(|e| hostile(thrower, e.faction) && e.pos.distance_squared(ap) < r2);
             if let Some(ei) = struck {
-                self.entities[ei].hp -= ARROW_DAMAGE;
+                self.entities[ei].hp -= damage;
                 if self.entities[ei].hp <= 0.0 {
                     let e = self.entities.swap_remove(ei);
                     match e.faction {
@@ -3164,8 +3449,8 @@ impl Game {
                     }
                 }
             }
-            if struck.is_some() || self.arrows[ai].life <= 0.0 {
-                self.arrows.swap_remove(ai);
+            if struck.is_some() || self.missiles[ai].life <= 0.0 {
+                self.missiles.swap_remove(ai);
             } else {
                 ai += 1;
             }
@@ -3742,7 +4027,7 @@ impl Game {
             return;
         }
         let keep = if contested { n - n / 2 } else { 1 };
-        // Only the soldiers on foot (knights and bowmen) settle, and never
+        // Only the soldiers on foot (knights, bowmen and axemen) settle, and never
         // more of them than the garrison leaves over: horsemen keep their
         // saddles.
         let on_foot = inside
@@ -3894,7 +4179,9 @@ impl Game {
                         .fold(f32::MAX, f32::min);
                     if e.faction == faction && d2 <= capture2 {
                         match e.job {
-                            Job::Knight | Job::Horseman | Job::Bowman => v.knights += 1,
+                            Job::Knight | Job::Horseman | Job::Bowman | Job::Axeman => {
+                                v.knights += 1
+                            }
                             Job::Civilian => v.civilians += 1,
                         }
                     } else if hostile(e.faction, faction) && d2 <= threat2 {
@@ -4214,27 +4501,35 @@ impl Game {
 
     /// Should the next soldier this faction raises ride rather than walk? Yes
     /// while it fields fewer than one horseman for every two knights, so the
-    /// army settles at about a third mounted and tops itself back up after
+    /// army settles at about a fifth mounted and tops itself back up after
     /// losses. Horsemen are never raised while the realm is short of knights
     /// to begin with.
     fn wants_horseman(&self, faction: Faction) -> bool {
-        let (knights, horsemen, _) = self.soldiers_of(faction);
+        let (knights, horsemen, _, _) = self.soldiers_of(faction);
         horsemen * 2 < knights
     }
 
     /// Should the next soldier this faction raises carry a bow? Yes while it
     /// fields fewer than one bowman for every two knights, by the same logic
-    /// as `wants_horseman`, so an army raised under Military settles at about
-    /// half knights, a quarter horsemen and a quarter bowmen.
+    /// as `wants_horseman`.
     fn wants_bowman(&self, faction: Faction) -> bool {
-        let (knights, _, bowmen) = self.soldiers_of(faction);
+        let (knights, _, bowmen, _) = self.soldiers_of(faction);
         bowmen * 2 < knights
     }
 
-    /// How many knights, horsemen and bowmen (in that order) this faction has
-    /// under arms, not counting hired mercenaries.
-    fn soldiers_of(&self, faction: Faction) -> (usize, usize, usize) {
-        let (mut knights, mut horsemen, mut bowmen) = (0usize, 0usize, 0usize);
+    /// Should the next soldier this faction raises carry axes? Yes while it
+    /// fields fewer than one axeman for every two knights, by the same logic
+    /// as `wants_horseman`, so an army raised under Military settles at about
+    /// two knights for every horseman, bowman and axeman.
+    fn wants_axeman(&self, faction: Faction) -> bool {
+        let (knights, _, _, axemen) = self.soldiers_of(faction);
+        axemen * 2 < knights
+    }
+
+    /// How many knights, horsemen, bowmen and axemen (in that order) this
+    /// faction has under arms, not counting hired mercenaries.
+    fn soldiers_of(&self, faction: Faction) -> (usize, usize, usize, usize) {
+        let (mut knights, mut horsemen, mut bowmen, mut axemen) = (0usize, 0usize, 0usize, 0usize);
         for e in &self.entities {
             if e.faction != faction || e.mercenary {
                 continue;
@@ -4243,10 +4538,11 @@ impl Game {
                 Job::Knight => knights += 1,
                 Job::Horseman => horsemen += 1,
                 Job::Bowman => bowmen += 1,
+                Job::Axeman => axemen += 1,
                 Job::Civilian => {}
             }
         }
-        (knights, horsemen, bowmen)
+        (knights, horsemen, bowmen, axemen)
     }
 
     fn handle_spawns(&mut self, dt: f32) {
@@ -4263,8 +4559,10 @@ impl Game {
                     // A grown camp fields cavalry alongside its foot soldiers.
                     Job::Horseman
                 } else if self.wants_bowman(Faction::Enemy) {
-                    // Any camp fields bowmen among its foot.
+                    // Any camp fields bowmen and axemen among its foot.
                     Job::Bowman
+                } else if self.wants_axeman(Faction::Enemy) {
+                    Job::Axeman
                 } else {
                     Job::Knight
                 };
@@ -4307,13 +4605,15 @@ impl Game {
                 }
                 // Under the Military priority, a realm light on cavalry
                 // raises a horseman in place of the knight when it can
-                // afford the horse, and one light on bowmen raises a bowman
-                // when it can afford the bow.
+                // afford the horse, one light on bowmen raises a bowman when
+                // it can afford the bow, and likewise for axemen.
                 if job == Job::Knight && self.priority == Priority::Military {
                     if self.money >= HORSEMAN_GOLD_COST && self.wants_horseman(Faction::Player) {
                         job = Job::Horseman;
                     } else if self.money >= BOWMAN_GOLD_COST && self.wants_bowman(Faction::Player) {
                         job = Job::Bowman;
+                    } else if self.money >= AXEMAN_GOLD_COST && self.wants_axeman(Faction::Player) {
+                        job = Job::Axeman;
                     }
                 }
                 // Soldiers must be paid for; an empty treasury raises a
@@ -4321,6 +4621,7 @@ impl Game {
                 let cost = match job {
                     Job::Horseman => HORSEMAN_GOLD_COST,
                     Job::Bowman => BOWMAN_GOLD_COST,
+                    Job::Axeman => AXEMAN_GOLD_COST,
                     Job::Knight => KNIGHT_GOLD_COST,
                     Job::Civilian => 0,
                 };
@@ -4349,6 +4650,8 @@ impl Game {
                     Job::Horseman
                 } else if self.wants_bowman(Faction::Ally) {
                     Job::Bowman
+                } else if self.wants_axeman(Faction::Ally) {
+                    Job::Axeman
                 } else {
                     Job::Knight
                 };
@@ -4998,11 +5301,11 @@ impl Game {
         before - self.entities.len()
     }
 
-    /// Clear the testing ground of every unit, arrow and flag, leaving the
+    /// Clear the testing ground of every unit, missile and flag, leaving the
     /// terrain painted on it.
     pub fn clear_units(&mut self) {
         self.entities.clear();
-        self.arrows.clear();
+        self.missiles.clear();
         self.rallies.clear();
     }
 
@@ -6378,7 +6681,7 @@ fn ai_step(
             let farm = farm.expect("checked above");
             gather_behavior(world, e, owner, pref, home, farm, snap, grid, rng, dt)
         }
-        (_, Job::Knight | Job::Horseman | Job::Bowman) => {
+        (_, Job::Knight | Job::Horseman | Job::Bowman | Job::Axeman) => {
             if under_limit {
                 e.charge = None;
                 retreat_behavior(world, e, owner, home, dt)
@@ -7040,7 +7343,13 @@ fn soldier_behavior(
         advance_jump(e, dt);
         return None;
     }
-    let bridge_ok = matches!(mobility, Mobility::Foot { bridge_ok: true });
+    let bridge_ok = matches!(
+        mobility,
+        Mobility::Foot {
+            bridge_ok: true,
+            ..
+        }
+    );
 
     // Mid-action: laying a bridge tile, or hacking down a tree/rock we already
     // started on.
@@ -7441,12 +7750,25 @@ fn nudge(world: &World, owner: u8, e: &mut Entity, step: Vec2) -> bool {
 /// of walking: one for clear ground, the hacking time for a tree or rock, the
 /// bridging time for open water when the knight may lay bridges (`bridge_ok`),
 /// and `None` for what it can't pass at all (buildings, caves, huts, enemy
-/// walls, water it can't bridge, ungenerated terrain).
-fn knight_step_cost(world: &World, owner: u8, bridge_ok: bool, x: i32, y: i32) -> Option<u32> {
+/// walls, water it can't bridge, ungenerated terrain). An axeman (`axe`) is
+/// charged its own, shorter felling time for a tree.
+fn knight_step_cost(
+    world: &World,
+    owner: u8,
+    bridge_ok: bool,
+    axe: bool,
+    x: i32,
+    y: i32,
+) -> Option<u32> {
     if world.walkable_for(owner, x, y) {
         Some(1)
     } else if world.walkable_for_siege(owner, x, y) {
-        Some(KNIGHT_DEMOLISH_STEP_COST)
+        let tree = world.node(x, y).is_some_and(|n| n.kind == Resource::Wood);
+        Some(if axe && tree {
+            AXEMAN_CHOP_STEP_COST
+        } else {
+            KNIGHT_DEMOLISH_STEP_COST
+        })
     } else if bridge_ok && world.is_open_water(x, y) {
         Some(KNIGHT_BRIDGE_STEP_COST)
     } else {
@@ -7517,7 +7839,9 @@ fn march_step_cost(
     to: Tile,
 ) -> Option<u32> {
     match mobility {
-        Mobility::Foot { bridge_ok } => knight_step_cost(world, owner, bridge_ok, to.0, to.1),
+        Mobility::Foot { bridge_ok, axe } => {
+            knight_step_cost(world, owner, bridge_ok, axe, to.0, to.1)
+        }
         Mobility::Mounted => horseman_step_cost(world, owner, from, to),
         Mobility::Light => world.walkable_for(owner, to.0, to.1).then_some(1),
     }
@@ -7628,7 +7952,13 @@ fn advance_or_hack(
         advance_jump(e, dt);
         return None;
     }
-    let bridge_ok = matches!(mobility, Mobility::Foot { bridge_ok: true });
+    let bridge_ok = matches!(
+        mobility,
+        Mobility::Foot {
+            bridge_ok: true,
+            ..
+        }
+    );
     if !e.path_done() {
         let (wx, wy) = e.path[e.path_cursor];
         let blocked = world.node(wx, wy).is_some() || world.is_open_water(wx, wy);
@@ -7655,9 +7985,9 @@ fn advance_or_hack(
             set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
             return None;
         }
-        if world.node(wx, wy).is_some() {
+        if let Some(node) = world.node(wx, wy) {
             e.target_node = Some((wx, wy));
-            e.harvest_timer = KNIGHT_DEMOLISH_TIME;
+            e.harvest_timer = demolish_time(e.job, node.kind);
             e.facing = dir_from_vec(tile_center((wx, wy)) - e.pos);
             set_anim(e, Anim::Act, dt);
             return None;
@@ -8736,6 +9066,7 @@ fn job_u8(j: Job) -> u8 {
         Job::Knight => 1,
         Job::Horseman => 2,
         Job::Bowman => 3,
+        Job::Axeman => 4,
     }
 }
 fn job_of(v: u8) -> Job {
@@ -8743,6 +9074,7 @@ fn job_of(v: u8) -> Job {
         1 => Job::Knight,
         2 => Job::Horseman,
         3 => Job::Bowman,
+        4 => Job::Axeman,
         _ => Job::Civilian,
     }
 }
@@ -9112,6 +9444,7 @@ impl Game {
                 pending: 0.0,
                 jump: None,
                 reload: 0.0,
+                whirl: None,
                 duel: None,
                 flee: 0.0,
                 flee_from: Vec2::ZERO,
@@ -9426,7 +9759,7 @@ impl Game {
             warships,
             pirates: Vec::new(),
             cannonballs: Vec::new(),
-            arrows: Vec::new(),
+            missiles: Vec::new(),
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
             build_mode,
             sandbox_tool: SandboxTool::PlaceUnit,
@@ -11235,8 +11568,8 @@ mod tests {
     }
 
     /// Fire the player's spawn until the realm is full, and tally the knights,
-    /// horsemen and bowmen raised.
-    fn raise_until_full(game: &mut Game) -> (usize, usize, usize) {
+    /// horsemen, bowmen and axemen raised.
+    fn raise_until_full(game: &mut Game) -> (usize, usize, usize, usize) {
         for _ in 0..60 {
             if game.population() >= game.pop_cap() {
                 break;
@@ -11248,12 +11581,17 @@ mod tests {
     }
 
     #[test]
-    fn military_priority_raises_horsemen_and_bowmen_when_the_gold_allows() {
+    fn military_priority_raises_horsemen_bowmen_and_axemen_when_the_gold_allows() {
         let mut game = realm_ready_to_grow(Priority::Military, 1000);
-        let (knights, horsemen, bowmen) = raise_until_full(&mut game);
+        let (knights, horsemen, bowmen, axemen) = raise_until_full(&mut game);
         assert!(knights >= 2, "the realm raised only {knights} knights");
         assert!(horsemen >= 1, "no horseman was raised under Military");
         assert!(bowmen >= 1, "no bowman was raised under Military");
+        assert!(axemen >= 1, "no axeman was raised under Military");
+        assert!(
+            axemen <= knights,
+            "axemen outnumber the knights: {axemen} to {knights}"
+        );
         assert!(
             horsemen <= knights,
             "cavalry outnumbers the foot: {horsemen} to {knights}"
@@ -11266,8 +11604,9 @@ mod tests {
             game.money,
             1000 - knights as u32 * KNIGHT_GOLD_COST
                 - horsemen as u32 * HORSEMAN_GOLD_COST
-                - bowmen as u32 * BOWMAN_GOLD_COST,
-            "every horse, bow and sword must be paid for"
+                - bowmen as u32 * BOWMAN_GOLD_COST
+                - axemen as u32 * AXEMAN_GOLD_COST,
+            "every horse, bow, axe and sword must be paid for"
         );
     }
 
@@ -11275,16 +11614,168 @@ mod tests {
     fn horsemen_and_bowmen_need_their_gold_and_the_military_priority() {
         // Too poor for a horse or a bow (but not for a knight): knights only.
         let mut game = realm_ready_to_grow(Priority::Military, BOWMAN_GOLD_COST - 1);
-        let (knights, horsemen, bowmen) = raise_until_full(&mut game);
+        let (knights, horsemen, bowmen, axemen) = raise_until_full(&mut game);
         assert!(knights >= 1, "a knight was still affordable");
         assert_eq!(horsemen, 0, "a horseman was raised on too little gold");
         assert_eq!(bowmen, 0, "a bowman was raised on too little gold");
+        assert_eq!(axemen, 0, "an axeman was raised on too little gold");
 
         // Rich, but leaning Agriculture: knights only.
         let mut game = realm_ready_to_grow(Priority::Agriculture, 1000);
-        let (_, horsemen, bowmen) = raise_until_full(&mut game);
+        let (_, horsemen, bowmen, axemen) = raise_until_full(&mut game);
         assert_eq!(horsemen, 0, "a horseman was raised under Agriculture");
         assert_eq!(bowmen, 0, "a bowman was raised under Agriculture");
+        assert_eq!(axemen, 0, "an axeman was raised under Agriculture");
+    }
+
+    #[test]
+    fn axemen_survive_a_save() {
+        let mut game = Game::new(1);
+        let i = game
+            .entities
+            .iter()
+            .position(|e| e.faction == Faction::Player)
+            .expect("the player starts with units");
+        game.entities[i].job = Job::Axeman;
+        game.entities[i].whirl = Some(Whirl {
+            phase: WhirlPhase::Windup,
+            time: 1.0,
+        });
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+        assert_eq!(loaded.entities[i].job, Job::Axeman, "the job was lost");
+        assert!(
+            loaded.entities[i].whirl.is_none(),
+            "a spin under way must not survive a save"
+        );
+    }
+
+    /// An axeman of yours at the origin of the testing ground and enemy
+    /// soldiers of `job` at `foes`. Returns the game with the axeman first.
+    fn axeman_faces(job: Job, foes: &[Tile]) -> Game {
+        let mut game = Game::new_sandbox();
+        game.place_job = Job::Axeman;
+        assert!(game.place_unit((0, 0)));
+        game.place_faction = Faction::Enemy;
+        game.place_job = job;
+        for &t in foes {
+            assert!(game.place_unit(t));
+        }
+        game
+    }
+
+    #[test]
+    fn axemen_throw_at_a_foe_out_of_reach() {
+        let mut game = axeman_faces(Job::Knight, &[(3, 0)]);
+        game.update(0.1, SANDBOX_SIM);
+        assert_eq!(game.missiles.len(), 1, "no axe was thrown");
+        assert_eq!(game.missiles[0].kind, MissileKind::Axe);
+        assert!(
+            game.entities[0].whirl.is_none(),
+            "the axeman wound up a spin at a foe out of reach"
+        );
+        assert_eq!(game.entities[0].axe_work(), Some(AxeWork::Throw));
+    }
+
+    #[test]
+    fn a_spin_winds_up_slowly_then_strikes_everyone_in_reach() {
+        // Two knights in reach and one out of it. The combat step is run on
+        // its own so the knights' own blows and footwork stay out of it.
+        let mut game = axeman_faces(Job::Knight, &[(1, 0), (0, 1), (3, 0)]);
+        game.entities[0].morale = 1_000.0;
+        let dt = 0.1;
+        let mut dealt = vec![0f32; game.entities.len()];
+        let mut struck_at = None;
+        for step in 0..30 {
+            let snap: Vec<(Vec2, Faction)> =
+                game.entities.iter().map(|e| (e.pos, e.faction)).collect();
+            let grid = Grid::build(snap.iter().map(|&(p, _)| p));
+            let mut damage = vec![0f32; snap.len()];
+            let mut acting = false;
+            game.axe_step(0, dt, &snap, &grid, &mut damage, &mut acting);
+            assert!(acting, "the axeman wasn't at work at step {step}");
+            if damage.iter().any(|&d| d > 0.0) && struck_at.is_none() {
+                struck_at = Some(step as f32 * dt);
+            }
+            for (d, x) in dealt.iter_mut().zip(&damage) {
+                *d += x;
+            }
+        }
+        let at = struck_at.expect("the spin never landed");
+        assert!(
+            at >= SPIN_WINDUP - dt * 1.5,
+            "the spin landed {at}s in, before the windup was through"
+        );
+        assert_eq!(
+            dealt[1], SPIN_DAMAGE,
+            "the knight in reach took the wrong blow"
+        );
+        assert_eq!(
+            dealt[2], SPIN_DAMAGE,
+            "the other knight in reach was missed"
+        );
+        assert_eq!(dealt[3], 0.0, "the spin reached a knight three tiles off");
+    }
+
+    #[test]
+    fn a_spinning_axeman_knocks_arrows_aside() {
+        let mut game = axeman_faces(Job::Bowman, &[(5, 0)]);
+        game.entities[0].whirl = Some(Whirl {
+            phase: WhirlPhase::Spin,
+            time: SPIN_TIME,
+        });
+        let at = game.entities[0].pos;
+        game.missiles.push(Missile::new(
+            MissileKind::Arrow,
+            at + Vec2::new(3.0, 0.0),
+            at,
+            Faction::Enemy,
+        ));
+        for _ in 0..10 {
+            game.update_missiles(0.05);
+        }
+        assert_eq!(
+            game.entities[0].hp, game.entities[0].max_hp,
+            "the arrow got past the spinning axe"
+        );
+        let m = game
+            .missiles
+            .first()
+            .expect("the knocked-aside arrow vanished");
+        assert_eq!(
+            m.thrower,
+            Faction::Player,
+            "the arrow still counts as the enemy's"
+        );
+        assert!(m.vel.x > 0.0, "the arrow kept flying the way it came in");
+    }
+
+    #[test]
+    fn axemen_fell_trees_and_break_walls_faster_than_knights() {
+        assert!(
+            demolish_time(Job::Axeman, Resource::Wood) < demolish_time(Job::Knight, Resource::Wood)
+        );
+        assert_eq!(
+            demolish_time(Job::Axeman, Resource::Stone),
+            demolish_time(Job::Knight, Resource::Stone),
+            "rocks are no quicker for an axe"
+        );
+        assert!(siege_dps(Job::Axeman) > siege_dps(Job::Knight));
+
+        let mut game = Game::new(1);
+        knight_on_a_lane(&mut game);
+        game.world.set_node(1, 0, Resource::Wood, 5);
+        let owner = owner_of(Faction::Player);
+        let cost =
+            |job| march_step_cost(&game.world, owner, mobility_of(job, true), (0, 0), (1, 0));
+        assert!(
+            cost(Job::Axeman) < cost(Job::Knight),
+            "an axeman's route prices a tree as dear as a knight's"
+        );
+        assert!(speed_of(Job::Axeman) < speed_of(Job::Knight));
+        assert!(
+            max_hp_for(Faction::Player, Job::Axeman) > max_hp_for(Faction::Player, Job::Knight)
+        );
     }
 
     /// A flat, treeless lane from the origin out to x = 16 (forced land near
@@ -11346,7 +11837,7 @@ mod tests {
         let sim = (-6, -10, 20, 10);
         game.update(0.1, sim);
         assert_eq!(
-            game.arrows.len(),
+            game.missiles.len(),
             1,
             "the bowman loosed no arrow at a foe in bowshot"
         );
@@ -11384,17 +11875,17 @@ mod tests {
         let mut game = Game::new(1);
         let b = bowman_on_a_lane(&mut game);
         let start = game.entities[b].pos;
-        game.arrows.push(Arrow {
-            pos: start,
-            vel: Vec2::new(ARROW_SPEED, 0.0),
-            life: ARROW_LIFE,
-            archer: Faction::Player,
-        });
+        game.missiles.push(Missile::new(
+            MissileKind::Arrow,
+            start,
+            start + Vec2::X,
+            Faction::Player,
+        ));
         let sim = (-6, -10, 20, 10);
         for _ in 0..10 {
             game.update(0.1, sim);
         }
-        assert!(game.arrows.is_empty(), "an arrow flew on forever");
+        assert!(game.missiles.is_empty(), "an arrow flew on forever");
         assert_eq!(
             game.entities[b].hp, game.entities[b].max_hp,
             "an arrow hurt its own side"
@@ -11408,7 +11899,7 @@ mod tests {
         game.world.set_node(1, 0, Resource::Wood, 5);
         game.world.carve_water(2, 0);
         let owner = owner_of(Faction::Player);
-        let foot = Mobility::Foot { bridge_ok: true };
+        let foot = mobility_of(Job::Knight, true);
         assert!(
             march_step_cost(&game.world, owner, foot, (0, 0), (1, 0)).is_some(),
             "a knight prices hacking through a tree"
@@ -13231,16 +13722,22 @@ mod tests {
     #[test]
     fn testing_ground_units_can_be_removed_and_cleared() {
         let mut game = Game::new_sandbox();
-        for job in [Job::Civilian, Job::Knight, Job::Horseman, Job::Bowman] {
+        for job in [
+            Job::Civilian,
+            Job::Knight,
+            Job::Horseman,
+            Job::Bowman,
+            Job::Axeman,
+        ] {
             game.place_job = job;
             assert!(game.sandbox_click(Vec2::new(2.5, 2.5)));
         }
         game.place_faction = Faction::Ally;
         assert!(game.sandbox_click(Vec2::new(5.5, 5.5)));
-        assert_eq!(game.faction_counts(), (4, 0, 1));
+        assert_eq!(game.faction_counts(), (5, 0, 1));
 
         // A right-click clears the one tile, and nobody there counts as lost.
-        assert_eq!(game.remove_units_at(Vec2::new(2.2, 2.9)), 4);
+        assert_eq!(game.remove_units_at(Vec2::new(2.2, 2.9)), 5);
         assert_eq!(game.faction_counts(), (0, 0, 1));
         assert_eq!(game.units_lost, 0);
         assert_eq!(game.remove_units_at(Vec2::new(2.5, 2.5)), 0);

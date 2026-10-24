@@ -11,14 +11,15 @@ use winit::window::Window;
 
 use crate::atlas::MapColors;
 use crate::game::{
-    AlertKind, AlertResponse, BOWMAN_GOLD_COST, BRIDGE_WOOD_COST, BUILD_NEAR_RADIUS, BUILDER_WAGE,
-    Brush, BuildMode, ESCORT_HIRE_COST, Faction, Game, GatherPriority, HORSEMAN_GOLD_COST,
-    HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST, HUT_GOLD_COST, Job, KNIGHT_GOLD_COST,
-    LEVY_GOLD_PAY, LEVY_SERVICE, LaunchRefusal, MAX_ESCORTS, MINE_GOLD_COST, MINE_STONE_COST,
-    Priority, SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST,
-    SETTLER_WOOD_COST, STONE_PRICE, SandboxTool, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST,
-    TROOP_WOOD_COST, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST,
-    WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
+    AXEMAN_GOLD_COST, AlertKind, AlertResponse, BOWMAN_GOLD_COST, BRIDGE_WOOD_COST,
+    BUILD_NEAR_RADIUS, BUILDER_WAGE, Brush, BuildMode, ESCORT_HIRE_COST, Faction, Game,
+    GatherPriority, HORSEMAN_GOLD_COST, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
+    HUT_GOLD_COST, Job, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, LEVY_SERVICE, LaunchRefusal, MAX_ESCORTS,
+    MINE_GOLD_COST, MINE_STONE_COST, Priority, SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED,
+    SETTLER_GOLD_COST, SETTLER_STONE_COST, SETTLER_WOOD_COST, STONE_PRICE, SandboxTool,
+    TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST, TROOP_WOOD_COST, WALL_GOLD_COST,
+    WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST, WARSHIP_WOOD_COST,
+    WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -319,6 +320,7 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
                     (Job::Knight, "Knight"),
                     (Job::Horseman, "Horseman"),
                     (Job::Bowman, "Bowman"),
+                    (Job::Axeman, "Axeman"),
                 ] {
                     if ui
                         .selectable_value(&mut game.place_job, job, name)
@@ -848,10 +850,12 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
                     "Each new knight costs {KNIGHT_GOLD_COST} gold; a broke village raises a civilian instead."
                 ));
                 ui.small(format!(
-                    "Under Military priority, about a quarter of your soldiers are horsemen at {HORSEMAN_GOLD_COST} gold each and a quarter bowmen at {BOWMAN_GOLD_COST}."
+                    "Under Military priority, about a fifth of your soldiers each are horsemen at {HORSEMAN_GOLD_COST} gold, bowmen at {BOWMAN_GOLD_COST} and axemen at {AXEMAN_GOLD_COST}."
                 ));
                 ui.small("Horsemen are fast and tough and leap streams up to 2 tiles wide, but never hack, bridge, or board ships.");
                 ui.small("Bowmen shoot foes from 5 tiles away, even across water, but are frail in melee and never hack, bridge, or board ships.");
+                ui.small("Axemen are slow and tough. They throw axes from 4 tiles away and, up close, wind up a slow spin that hits everyone around them and can knock arrows away.");
+                ui.small("Axemen fell trees and break walls and huts much faster than knights, but never board ships.");
                 ui.small("Trade: load a ship on the coast and it sails to an allied shore for gold.");
                 ui.small("Autonomous trade keeps launching ships while the stockpile covers the load.");
                 ui.small("Settlers: click a far shore and a ship carries civilians over to found a new village.");

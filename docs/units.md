@@ -10,9 +10,10 @@ All units navigate the tile grid with **BFS pathfinding**, routing around water,
 buildings, walls, and resource nodes, or across bridges. Soldiers plan with a
 **weighted search** instead: knights, who can also cut through trees and rocks
 and lay bridges, weigh clearing an obstacle against walking around it (see
-[Knights](#knights)), horsemen weigh leaping a stream against riding
-around it (see [Horsemen](#horsemen)), and bowmen, who clear nothing, simply
-walk around whatever is in the way (see [Bowmen](#bowmen)).
+[Knights](#knights)), axemen do the same but fell trees far quicker (see
+[Axemen](#axemen)), horsemen weigh leaping a stream against riding around it
+(see [Horsemen](#horsemen)), and bowmen, who clear nothing, simply walk around
+whatever is in the way (see [Bowmen](#bowmen)).
 
 ## Civilians
 
@@ -90,8 +91,8 @@ Horsemen are your cavalry: a knight on a horse, with a lance. Under the
 **:lucide-swords: Military priority**, a house raises a horseman in place of a
 knight whenever you have **fewer than one horseman for every two knights** and
 the treasury holds the **50 gold** a horse costs (twice a knight), so an army
-raised under Military settles at about a third mounted and tops its cavalry
-back up after losses. Under Agriculture, houses raise knights only.
+raised under Military (with its bowmen and axemen) settles at about a fifth
+mounted and tops its cavalry back up after losses. Under Agriculture, houses raise knights only.
 
 On the field a horseman fights like a knight, with the same blade, and answers
 the same rally flag, but:
@@ -124,7 +125,8 @@ the same rally flag, but:
   soldiers too. Cavalry fights on the home continent.
 - **Keeps the saddle.** When a captured village is settled (see
   [After the battle](gameplay.md#after-the-battle)), only the soldiers on foot
-  (knights and bowmen) lay down their arms; horsemen stand the garrison first.
+  (knights, bowmen and axemen) lay down their arms; horsemen stand the
+  garrison first.
 
 The enemy and the allies field cavalry too, but only from villages that have
 grown to **7 or more houses**, the same size at which an enemy village starts
@@ -139,9 +141,9 @@ Bowmen are your archers: foot soldiers who shoot rather than close. Under the
 **:lucide-swords: Military priority**, a house raises a bowman in place of a
 knight whenever you have **fewer than one bowman for every two knights** and
 the treasury holds the **30 gold** a bow costs. Cavalry is topped up first
-(see [Horsemen](#horsemen)), so an army raised under Military settles at about
-half knights, a quarter horsemen, and a quarter bowmen. Under Agriculture,
-houses raise knights only.
+(see [Horsemen](#horsemen)) and [axemen](#axemen) after, so an army raised
+under Military settles at about two knights for every horseman, bowman and
+axeman. Under Agriculture, houses raise knights only.
 
 A bowman answers the same rally flag as everyone else and marches on the
 enemy with the rest of the army, but:
@@ -156,7 +158,7 @@ enemy with the rest of the army, but:
 - **Shoots across water.** A foe on the far bank of a stream, or behind a
   wall, is in bowshot like any other. Only units are ever hit: an arrow does
   nothing to a hut, a wall, or a ship.
-- **Gives ground but keeps shooting.** When an enemy knight or horseman gets
+- **Gives ground but keeps shooting.** When an enemy knight, horseman or axeman gets
   within **3 tiles**, a bowman backs away from it without missing a shot,
   sidestepping along a wall or a bank that's in the way. It backs off slower
   than a knight walks, so a foe set on reaching it still does, only an arrow
@@ -182,6 +184,54 @@ The enemy and the allies raise bowmen too, from villages of any size, in the
 same one-per-two-knights proportion. An enemy camp's archers will pick at your
 knights across the stream that kept its foot at bay, and at civilians caught
 out in the open, so huts matter more once the arrows start flying.
+
+## Axemen
+
+Axemen are your heavy infantry: slow, tough foot soldiers with a pair of
+axes. Under the **:lucide-swords: Military priority**, a house raises an
+axeman in place of a knight whenever you have **fewer than one axeman for
+every two knights** and the treasury holds the **35 gold** the axes cost.
+Cavalry and bowmen are topped up first. Under Agriculture, houses raise
+knights only.
+
+An axeman answers the same rally flag as everyone else and marches on the
+enemy with the rest of the army, but:
+
+- **Throws axes on the way in.** A foe within **4 tiles** takes a thrown axe
+  about **once a second**, each dealing **9 damage**: less than an arrow, but
+  quicker. The axeman pauses for a moment after each throw, then keeps
+  closing. Thrown axes fly straight and hit the first hostile unit they
+  pass, just like arrows.
+- **Winds up a spin up close.** Once a foe is in reach, the axeman hoists its
+  axe and spends **1.6 seconds** winding up, rooted to the spot and striking
+  nobody. Then it spins, landing **45 damage** at once on **every foe within
+  about a tile and a half**. A crowd that piles onto an axeman pays for it,
+  but a foe that steps back in time is out of reach when the blow lands, and a
+  knight trading blows with it gets a good deal of damage in during the
+  windup.
+- **Knocks missiles aside while spinning.** An arrow or thrown axe that meets
+  the blade mid-spin is batted away. The axeman isn't aiming: the missile
+  flies off roughly back the way it came, give or take a wide angle, and now
+  counts as the axeman's. Most land harmlessly, but now and then one finds the
+  archer who loosed it, or someone standing near them. Only the short spin
+  itself does this; the windup doesn't.
+- **Is slow and clumsy, but tough.** An axeman walks at **60% of a knight's
+  pace** and never dodges or circles: it stands flat-footed and takes every
+  blow. In return it has **80 hit points** to a knight's 60.
+- **Fells trees and breaks walls fast.** Like a knight, an axeman hacks through
+  trees and rocks and lays bridges, but it fells a tree in **2 seconds** to a
+  knight's 5, so it cuts through a wood where a knight would go around. It
+  also hacks at enemy **walls and huts twice as fast** as a knight. Rocks
+  take it as long as anyone.
+- **Stays ashore.** Like cavalry and bowmen, axemen never board a
+  [troop ship](building.md#troop-ship).
+- **Settles like the foot.** When a captured village is settled (see
+  [After the battle](gameplay.md#after-the-battle)), axemen lay down their
+  axes alongside the knights.
+
+The enemy and the allies raise axemen too, from villages of any size, in the
+same one-per-two-knights proportion. Watch for enemy axemen at your gates:
+left alone at a hut, one breaks in far sooner than a knight would.
 
 ## The draft
 
@@ -344,6 +394,10 @@ enemy's coastal villages keeps the sea quiet.
   range**, giving ground to a blade that closes in, and deal no melee damage. An arrow hurts the
   first hostile unit it passes and nothing else. They lose their nerve like
   anyone else.
+- [Axemen](#axemen) don't duel either. They throw axes at foes farther off and
+  meet anyone in reach with a slow spin that hits everyone around them at
+  once. They never dodge, and a spin knocks aside any arrow or axe that meets
+  it.
 - Wounded units show an **HP bar**; when HP hits zero the unit dies.
 - Kills are tallied on the HUD as **Enemies defeated**; your own deaths as
   **Units lost**.
@@ -355,7 +409,7 @@ enemy's coastal villages keeps the sea quiet.
 The **:lucide-flag: Rally** build mode turns a left-click into a **rally flag**,
 and you can plant **as many as you like**:
 
-- Your knights, horsemen, and bowmen **drop whatever they're doing** and rush
+- Your knights, horsemen, bowmen, and axemen **drop whatever they're doing** and rush
   to the flags.
 - With several flags standing, the soldiers **share themselves out** among
   them. Each goes to the **nearest** flag it may answer, except that a flag

@@ -64,6 +64,13 @@ both natively and in the browser (via WebGL) using **Trunk**.
   or not, and **back away from a closing blade** while they keep shooting,
   but are frail in melee and never hack, bridge, or board a ship.
   Enemy and allied villages field them too.
+- **Axemen** are your heavy infantry. Under Military, a house raises one in
+  place of a knight (35 gold) whenever you have fewer than one axeman per two
+  knights, after the cavalry and bowmen. They walk slowly but take a beating,
+  **throw axes 4 tiles**, and up close **wind up a slow spin** that strikes
+  every foe around them and knocks aside any arrow that meets it. They fell
+  trees and break walls and huts much faster than knights, but never board a
+  ship. Enemy and allied villages field them too.
 - **Three factions** (you = blue, enemy = red, allies = green). The **enemy** is
   hostile to everyone; their soldiers stream out to hunt you. The **allies** hold
   villages on coasts across the sea: they trade with you and attack the enemy on

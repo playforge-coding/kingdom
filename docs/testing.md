@@ -23,7 +23,8 @@ menu. The camera opens on the origin at the usual zoom, and all the normal
   villages, send raids, and put pirates to sea all stay stopped.
 - **Real units.** Anyone you place is an ordinary unit running the same AI it
   would in a real game. Enemy soldiers hunt your units and the allies',
-  bowmen shoot from range, horsemen ride down the foot, and civilians putter
+  bowmen shoot from range, axemen throw and spin, horsemen ride down the
+  foot, and civilians putter
   about. Wounded units show their HP bars and the dead are removed as usual.
 - **Instant terrain and buildings.** A brush paints water, trees, rocks,
   bridges, houses, walls, huts, and mines straight onto the grid: no builder,
@@ -57,7 +58,7 @@ can switch by picking what you want to place.
 
 ### Units
 
-Choose a **type**: *Civilian*, *Knight*, *Horseman*, or *Bowman* (see
+Choose a **type**: *Civilian*, *Knight*, *Horseman*, *Bowman*, or *Axeman* (see
 **[Units & Combat](units.md)** for what each one does), then **left-click** a
 tile to put one down. Click again to stack more on the same tile; once a
 fight reaches them they spread out (see
@@ -97,8 +98,8 @@ on their own.
 - **Right-click** a tile to remove everyone standing on it. Removal is not a
   death, so it counts toward neither tally. If nobody is there, the tile is
   wiped back to bare grass instead.
-- **:lucide-x: Clear everyone** takes every unit off the grid, arrows and
-  rally flag included, and leaves the terrain.
+- **:lucide-x: Clear everyone** takes every unit off the grid, arrows, thrown
+  axes and rally flags included, and leaves the terrain.
 - **:lucide-x: Clear the grid** wipes every painted tile back to grass and
   leaves the units.
 

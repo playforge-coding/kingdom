@@ -218,6 +218,14 @@ pub fn build() -> Atlas {
         "../assets/textures/entities/ally_bowman.png"
     ));
     let arrow = load(include_bytes!("../assets/textures/entities/arrow.png"));
+    let axeman = load(include_bytes!("../assets/textures/entities/axeman.png"));
+    let enemy_axeman = load(include_bytes!(
+        "../assets/textures/entities/enemy_axeman.png"
+    ));
+    let ally_axeman = load(include_bytes!(
+        "../assets/textures/entities/ally_axeman.png"
+    ));
+    let axe = load(include_bytes!("../assets/textures/entities/axe.png"));
     let cargo_ship = load(include_bytes!("../assets/textures/entities/cargo_ship.png"));
     let warship = load(include_bytes!("../assets/textures/entities/warship.png"));
     let enemy_warship = load(include_bytes!(
@@ -270,6 +278,16 @@ pub fn build() -> Atlas {
         Source::sheet("ally_bowman", ally_bowman, 5, 8),
         // Arrow: 1 column x 2 rows of 16x16 frames, pointing up then right.
         Source::sheet("arrow", arrow, 1, 2),
+        // Axeman sheets: 6 columns x 6 rows of 16x16 frames. Rows 0-3 walk
+        // (down, up, right, left, 5 frames each); row 4 is the axe hoisted,
+        // swung low and down, then the body turned right, away and left with
+        // the axe out; row 5 is the same turn with the blade's trail.
+        Source::sheet("axeman", axeman, 6, 6),
+        Source::sheet("enemy_axeman", enemy_axeman, 6, 6),
+        Source::sheet("ally_axeman", ally_axeman, 6, 6),
+        // Thrown axe: 4 columns x 2 rows of 16x16 frames, the head turning a
+        // full circle counterclockwise from straight up, an eighth per frame.
+        Source::sheet("axe", axe, 4, 2),
         // Cargo ship: 4 columns x 1 row of 32x32 frames, facing left, up, down,
         // right (in that column order).
         Source::sheet("cargo_ship", cargo_ship, 4, 1),
@@ -414,6 +432,34 @@ mod tests {
         for row in 0..2 {
             let uv = atlas.frame_uv("arrow", 0, row);
             assert!(uv[2] > uv[0] && uv[3] > uv[1], "arrow frame {row} is empty");
+        }
+    }
+
+    #[test]
+    fn every_axeman_sheet_is_packed_with_all_six_rows() {
+        // The renderer reads an axeman's frame by state and facing, so each
+        // faction's sheet must be packed with its full 6x6 grid, and the
+        // thrown axe with all eight turns.
+        let atlas = build();
+        for sheet in ["axeman", "enemy_axeman", "ally_axeman"] {
+            for row in 0..6 {
+                for col in 0..6 {
+                    let uv = atlas.frame_uv(sheet, col, row);
+                    assert!(
+                        uv[2] > uv[0] && uv[3] > uv[1],
+                        "{sheet} frame ({col}, {row}) is empty"
+                    );
+                }
+            }
+        }
+        for row in 0..2 {
+            for col in 0..4 {
+                let uv = atlas.frame_uv("axe", col, row);
+                assert!(
+                    uv[2] > uv[0] && uv[3] > uv[1],
+                    "axe frame ({col}, {row}) is empty"
+                );
+            }
         }
     }
 }

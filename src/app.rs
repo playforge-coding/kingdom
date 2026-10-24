@@ -16,7 +16,8 @@ use winit::window::{Window, WindowId};
 use crate::atlas::{self, Atlas, MapColors};
 use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
 use crate::game::{
-    AUTO_ZONE_RADIUS, Anim, CamState, Dir, Entity, Faction, Game, Job, SandboxTool, SiteKind,
+    AUTO_ZONE_RADIUS, Anim, AxeWork, CamState, Dir, Entity, Faction, Game, Job, MissileKind,
+    SandboxTool, SiteKind,
 };
 use crate::gfx::{Instance, Renderer};
 use crate::save;
@@ -696,8 +697,18 @@ impl State {
 
         // Arrows in flight: the shaft drawn along its line of flight. The sheet
         // holds one frame pointing down and one pointing left; the other two
-        // headings mirror those by swapping the UV corners.
-        for a in game.arrows() {
+        // headings mirror those by swapping the UV corners. A thrown axe
+        // tumbles instead, turning over toward the way it flies.
+        for a in game.missiles() {
+            if a.kind == MissileKind::Axe {
+                let turn = (a.age * AXE_SPIN_FPS) as u32 % 8;
+                // The sheet turns counterclockwise; an axe flying right turns
+                // the other way, head over toward its heading.
+                let f = if a.vel.x > 0.0 { (8 - turn) % 8 } else { turn };
+                let uv = self.atlas.frame_uv("axe", f % 4, f / 4);
+                out.push(quad([a.pos.x - 0.35, a.pos.y - 0.35], [0.7, 0.7], uv));
+                continue;
+            }
             let mut uv = if a.vel.x.abs() >= a.vel.y.abs() {
                 self.atlas.frame_uv("arrow", 0, 1)
             } else {
@@ -1150,6 +1161,11 @@ const BOWMAN_ROWS: AnimRows = AnimRows {
 
 /// Frames per second every walk and action cycle runs at.
 const ANIM_FPS: f32 = 8.0;
+/// Frames per second an axeman's spin turns through: a full turn every four
+/// frames, so it whirls rather than plods.
+const SPIN_FPS: f32 = 14.0;
+/// Frames per second a thrown axe tumbles through its eight turns.
+const AXE_SPIN_FPS: f32 = 20.0;
 
 /// Map an entity's state + facing to a (sheet, column, row) frame.
 fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
@@ -1159,14 +1175,17 @@ fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
         (Faction::Player, Job::Knight) => "knight",
         (Faction::Player, Job::Horseman) => "horseman",
         (Faction::Player, Job::Bowman) => "bowman",
+        (Faction::Player, Job::Axeman) => "axeman",
         (Faction::Enemy, Job::Civilian) => "enemy_farmer",
         (Faction::Enemy, Job::Knight) => "enemy_knight",
         (Faction::Enemy, Job::Horseman) => "enemy_horseman",
         (Faction::Enemy, Job::Bowman) => "enemy_bowman",
+        (Faction::Enemy, Job::Axeman) => "enemy_axeman",
         (Faction::Ally, Job::Civilian) => "ally_farmer",
         (Faction::Ally, Job::Knight) => "ally_knight",
         (Faction::Ally, Job::Horseman) => "ally_horseman",
         (Faction::Ally, Job::Bowman) => "ally_bowman",
+        (Faction::Ally, Job::Axeman) => "ally_axeman",
     };
     let rows = match e.job {
         Job::Civilian => FARMER_ROWS,
@@ -1174,6 +1193,10 @@ fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
         Job::Bowman => BOWMAN_ROWS,
         Job::Horseman => {
             let (col, row) = horseman_frame(e);
+            return (sheet, col, row);
+        }
+        Job::Axeman => {
+            let (col, row) = axeman_frame(e);
             return (sheet, col, row);
         }
     };
@@ -1222,6 +1245,46 @@ fn horseman_frame(e: &Entity) -> (u32, u32) {
             (f % 4, block + f / 4)
         }
         Anim::Act => (((e.anim_time * ANIM_FPS) as u32) % 4, block + 2),
+    }
+}
+
+/// The axeman sheets are 6x6 grids of 16x16 frames: four walk rows (down,
+/// up, right, left, 5 frames), then a row of the axe at work (hoisted, swung
+/// low, swung down, then the body turned right, away and left with the axe
+/// out) and the same row again with the blade's trail. A windup holds the
+/// axe hoisted; the spin swings it low and then turns round and round with
+/// the trail; a throw shows the arm out toward the facing; any other work
+/// (felling, hacking at a wall, bridging) chops hoist, low, down. Returns the
+/// (column, row) of the frame to draw.
+fn axeman_frame(e: &Entity) -> (u32, u32) {
+    match e.axe_work() {
+        Some(AxeWork::Windup) => return (0, 4),
+        Some(AxeWork::Spin(t)) => {
+            let f = (t * SPIN_FPS) as u32;
+            return (if f == 0 { 1 } else { 2 + (f - 1) % 4 }, 5);
+        }
+        Some(AxeWork::Throw) => {
+            let col = match e.facing {
+                Dir::Down => 2,
+                Dir::Right => 3,
+                Dir::Up => 4,
+                Dir::Left => 5,
+            };
+            return (col, 4);
+        }
+        None => {}
+    }
+    let row = match e.facing {
+        Dir::Down => 0,
+        Dir::Up => 1,
+        Dir::Right => 2,
+        Dir::Left => 3,
+    };
+    let tick = (e.anim_time * ANIM_FPS) as u32;
+    match e.anim {
+        Anim::Idle => (0, row),
+        Anim::Walk => (tick % 5, row),
+        Anim::Act => (tick % 3, 4),
     }
 }
 
