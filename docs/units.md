@@ -32,7 +32,9 @@ Whatever the job, civilians:
 
 - Deposit everything they gather into your **shared stockpile**.
 - Prefer to stay near home rather than wander off after distant resources
-  (builders may step out of that leash to reach a site, such as a bridge span).
+  (builders may step out of that leash to reach a site, such as a bridge span,
+  and settlers [called to another village](gameplay.md#moving-people-between-villages)
+  leave it to walk there).
 - **Take shelter in huts** when a raid comes close.
 
 Use the **Gather** toggle (Balanced / Wood / Stone) to bias what they collect.

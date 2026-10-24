@@ -83,6 +83,7 @@ mod icons {
     pub const TENT: ImageSource = include_image!("../assets/icons/tent.svg");
     pub const TREE_PINE: ImageSource = include_image!("../assets/icons/tree-pine.svg");
     pub const TRIANGLE_ALERT: ImageSource = include_image!("../assets/icons/triangle-alert.svg");
+    pub const USERS: ImageSource = include_image!("../assets/icons/users.svg");
     pub const WHEAT: ImageSource = include_image!("../assets/icons/wheat.svg");
     pub const X: ImageSource = include_image!("../assets/icons/x.svg");
 }
@@ -1115,15 +1116,17 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 /// The realm panel: the minimap, the overview toggle, and a list of the
-/// player's villages with their defenders and a button to jump to each.
+/// player's villages with their defenders, a button to jump to each, and one
+/// to call settlers there from another village.
 fn realm_ui(
     ctx: &egui::Context,
-    game: &Game,
+    game: &mut Game,
     view: View,
     colors: &MapColors,
     minimap: &mut Minimap,
 ) -> Option<Action> {
     let mut action = None;
+    let mut call = None;
     egui::Window::new("Realm")
         .anchor(Align2::RIGHT_TOP, [-12.0, 12.0])
         .resizable(false)
@@ -1170,6 +1173,16 @@ fn realm_ui(
             if mine.is_empty() {
                 ui.small("You hold no villages.");
             }
+            let migrants = game.migrants();
+            if migrants > 0 {
+                icon_label(
+                    ui,
+                    icons::USERS,
+                    format!("{} on the road", plural(migrants, "settler", "settlers")),
+                );
+            }
+            // Settlers can only be called from somewhere else.
+            let can_call = mine.len() > 1;
             egui::ScrollArea::vertical()
                 .max_height(240.0)
                 .show(ui, |ui| {
@@ -1205,12 +1218,30 @@ fn realm_ui(
                                                 .color(CAUTION),
                                         );
                                     }
+                                    if can_call
+                                        && ui
+                                            .button((icon(ui, icons::USERS), "Call settlers"))
+                                            .on_hover_text(format!(
+                                                "Up to {} civilians walk over from the village \
+                                                 with the most to spare, which keeps {} at \
+                                                 home. Where no road clear of the enemy leads \
+                                                 here, they sail over as a settler ship instead.",
+                                                crate::game::MIGRANT_CIVILIANS,
+                                                crate::game::SETTLER_CIVILIANS_SPARED
+                                            ))
+                                            .clicked()
+                                    {
+                                        call = Some(v.center);
+                                    }
                                 });
                             });
                         });
                     }
                 });
         });
+    if let Some(center) = call {
+        game.call_settlers(center);
+    }
     action
 }
 
@@ -1290,6 +1321,18 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                         }
                                         LaunchRefusal::Escorts => {
                                             "Can't hire: the allies have no more escorts to spare"
+                                        }
+                                        LaunchRefusal::NoMigrants => {
+                                            "Can't call settlers: no other village has civilians to spare"
+                                        }
+                                        LaunchRefusal::ShipCost => {
+                                            "Can't call settlers: no road leads here, and the stockpile doesn't cover a ship"
+                                        }
+                                        LaunchRefusal::NoWay => {
+                                            "Can't call settlers: no road or sea route leads here"
+                                        }
+                                        LaunchRefusal::RoadHeld => {
+                                            "Can't call settlers: enemies are on the road, and no ship can go instead"
                                         }
                                     },
                                 ),
@@ -1392,6 +1435,16 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                                 AlertKind::LeviesDeserted => {
                                     (icons::COINS, ALARM, "Unpaid levies deserted")
                                 }
+                                AlertKind::MigrantsSetOut => (
+                                    icons::USERS,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "Settlers set out on the road to another village",
+                                ),
+                                AlertKind::MigrantsArrived => (
+                                    icons::USERS,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "Settlers arrived and joined the village",
+                                ),
                             };
                             ui.add(icon(ui, glyph).tint(tint));
                             ui.label(RichText::new(text).color(tint));

@@ -207,6 +207,10 @@ pub struct Entity {
     /// Transient: a party caught by a save simply gives up the trip on load
     /// and settles back into ordinary village life where it stands.
     found_at: Option<Tile>,
+    /// For a civilian of the player's called to another village (see
+    /// `call_settlers`): the house it's walking to. Saved, so a migrant caught
+    /// by a save still finishes the trip instead of turning back.
+    migrate_to: Option<Tile>,
     /// Simulation time owed to an off-screen entity. It accrues while the unit
     /// waits its turn and is spent (capped) when its rotating batch comes up,
     /// so the far realm runs at a slower tick instead of freezing. Transient.
@@ -328,6 +332,7 @@ impl Entity {
             levy: false,
             mercenary: false,
             found_at: None,
+            migrate_to: None,
             pending: 0.0,
             jump: None,
             reload: 0.0,
@@ -598,6 +603,25 @@ const REINFORCE_RADIUS: i32 = 10;
 /// A settler ship drops anchor once it reaches water within this many tiles
 /// (Chebyshev) of the colony's anchor; the settlers wade the rest.
 const SETTLE_LANDING_RADIUS: i32 = 4;
+
+// Migration: a village of the player's calls settlers from another one (see
+// `call_settlers`). Where a road clear of the enemy joins the two they walk it,
+// free of charge; where none does, they sail over as a settler-ship
+// reinforcement instead.
+/// Civilians who set out on the road when a village calls for settlers. The
+/// village they leave keeps `SETTLER_CIVILIANS_SPARED` at home, so fewer go
+/// when it can't spare the full party.
+pub const MIGRANT_CIVILIANS: usize = 3;
+/// A migrant this close (Chebyshev) to the house it's bound for has arrived.
+/// Well inside `CIVILIAN_HOME_RADIUS`, so the leash then keeps it there.
+const MIGRANT_ARRIVE_RADIUS: i32 = 3;
+/// Tile budget for a migrant's road. Generous, since villages can stand a
+/// long way apart, and the road is planned only rarely (see
+/// `migrant_behavior`).
+const MIGRANT_PATH_BUDGET: usize = 60_000;
+/// A road counts as held by the enemy, and the settlers sail instead, when a
+/// hostile soldier or enemy house stands this close (Chebyshev) to it.
+const MIGRANT_SAFE_RADIUS: i32 = 10;
 
 // Troop ships: the military transport. The same unarmored hull as a settler
 // ship, but it carries knights, may land right by an enemy village, and the
@@ -1542,6 +1566,11 @@ pub enum AlertKind {
     /// The draft stood down but the treasury couldn't pay some levies, so they
     /// deserted.
     LeviesDeserted,
+    /// Civilians called by another village set out on the road there. Raised
+    /// at the village they leave.
+    MigrantsSetOut,
+    /// Civilians called from another village walked in and joined this one.
+    MigrantsArrived,
 }
 
 /// Why a settle or troop-landing order was refused, carried on its
@@ -1567,6 +1596,17 @@ pub enum LaunchRefusal {
     Mercenaries,
     /// Escort hiring only: the allowed number of escorts is already afloat.
     Escorts,
+    /// Calling settlers only: no other village has civilians to spare.
+    NoMigrants,
+    /// Calling settlers only: no road reaches the village, and the stockpile
+    /// doesn't cover the settler ship that would carry them instead.
+    ShipCost,
+    /// Calling settlers only: neither a road nor a sea route reaches the
+    /// village from one with civilians to spare.
+    NoWay,
+    /// Calling settlers only: the enemy lies along every road there, and no
+    /// settler ship can go instead.
+    RoadHeld,
 }
 
 #[derive(Clone, Copy)]
@@ -2632,6 +2672,7 @@ impl Game {
 
         self.emerge_from_huts();
         self.found_parties_arrive();
+        self.migrants_arrive();
         self.clear_reached_rally();
         self.resolve_captures();
         self.age_alerts(dt);
@@ -5216,6 +5257,267 @@ impl Game {
         crew
     }
 
+    /// Player civilians on the road between villages, answering a call for
+    /// settlers.
+    pub fn migrants(&self) -> usize {
+        self.entities
+            .iter()
+            .filter(|e| e.migrate_to.is_some())
+            .count()
+    }
+
+    /// Call settlers to the player village whose center is nearest `center`
+    /// (the Realm panel passes a village's own). The other village with the
+    /// most civilians to spare, keeping `SETTLER_CIVILIANS_SPARED` at home,
+    /// sends up to `MIGRANT_CIVILIANS` of them. Where a road joins the two and
+    /// no enemy lies along it (see `road_is_clear`), they walk it, free of
+    /// charge; where none does, a full crew sails over from
+    /// that village's harbor as a settler-ship reinforcement, at a settler
+    /// ship's usual cost. Refused, with nothing spent and a toast at the
+    /// village saying why, when no other village can spare anyone or neither
+    /// road nor sea reaches it.
+    pub fn call_settlers(&mut self, center: Vec2) -> bool {
+        let villages = cluster(&self.player_house_tiles);
+        let centers: Vec<Vec2> = villages.iter().map(|v| village_center(v)).collect();
+        let Some(target) = (0..villages.len()).min_by(|&a, &b| {
+            centers[a]
+                .distance_squared(center)
+                .total_cmp(&centers[b].distance_squared(center))
+        }) else {
+            return false;
+        };
+        let at = centers[target];
+        let refuse = |game: &mut Game, why: LaunchRefusal| {
+            game.push_alert(AlertKind::LaunchRefused(why), at);
+            false
+        };
+        // Each village's own people: civilians at work in the open (not
+        // hiding in a hut, not already on the road), counted toward the
+        // nearest village the way the population survey counts them.
+        let attr2 = VILLAGE_ATTRIBUTION_RADIUS * VILLAGE_ATTRIBUTION_RADIUS;
+        let mut people: Vec<Vec<usize>> = vec![Vec::new(); villages.len()];
+        for (i, e) in self.entities.iter().enumerate() {
+            if e.faction != Faction::Player
+                || e.job != Job::Civilian
+                || e.sheltered
+                || e.migrate_to.is_some()
+            {
+                continue;
+            }
+            let nearest = (0..centers.len()).min_by(|&a, &b| {
+                e.pos
+                    .distance_squared(centers[a])
+                    .total_cmp(&e.pos.distance_squared(centers[b]))
+            });
+            if let Some(k) = nearest
+                && e.pos.distance_squared(centers[k]) <= attr2
+            {
+                people[k].push(i);
+            }
+        }
+        // Who can answer: every other village with someone to spare, the one
+        // with the most to spare first, and the nearest of those.
+        let spare = |k: usize| people[k].len().saturating_sub(SETTLER_CIVILIANS_SPARED);
+        let mut sources: Vec<usize> = (0..villages.len())
+            .filter(|&k| k != target && spare(k) > 0)
+            .collect();
+        sources.sort_by(|&a, &b| {
+            spare(b).cmp(&spare(a)).then(
+                centers[a]
+                    .distance_squared(at)
+                    .total_cmp(&centers[b].distance_squared(at)),
+            )
+        });
+        if sources.is_empty() {
+            return refuse(self, LaunchRefusal::NoMigrants);
+        }
+
+        // Over land: the party walks from the first village a road joins to
+        // this one, as long as no enemy lies along it. The ones nearest the
+        // destination answer the call.
+        let owner = owner_of(Faction::Player);
+        let mut road_held = false;
+        for &k in &sources {
+            let mut party = people[k].clone();
+            party.sort_by(|&a, &b| {
+                self.entities[a]
+                    .pos
+                    .distance_squared(at)
+                    .total_cmp(&self.entities[b].pos.distance_squared(at))
+            });
+            party.truncate(spare(k).min(MIGRANT_CIVILIANS));
+            let start = self.entities[party[0]].tile();
+            let Some(dest) = nearest_house(&villages[target], start) else {
+                continue;
+            };
+            // Generate the road's terrain first: ungenerated chunks read as
+            // walls to the pathfinder.
+            self.world.ensure_region(
+                start.0.min(dest.0) - 16,
+                start.1.min(dest.1) - 16,
+                start.0.max(dest.0) + 16,
+                start.1.max(dest.1) + 16,
+            );
+            let Some(road) = migrant_route(&self.world, owner, start, dest) else {
+                continue;
+            };
+            if !self.road_is_clear(&road) {
+                road_held = true;
+                continue;
+            }
+            for &i in &party {
+                let e = &mut self.entities[i];
+                e.migrate_to = Some(dest);
+                e.target_node = None;
+                e.mine_target = None;
+                e.build_site = None;
+                e.harvest_timer = 0.0;
+                e.repath = 0.0;
+                e.set_path(Vec::new());
+            }
+            log::info!(
+                "{} settlers set out on the road to ({}, {})",
+                party.len(),
+                dest.0,
+                dest.1
+            );
+            self.push_alert(AlertKind::MigrantsSetOut, centers[k]);
+            return true;
+        }
+
+        // No clear road from anywhere: a full crew sails over instead, a
+        // settler-ship reinforcement from the harbor of the village sending
+        // it. When a road was there but the enemy held it, that's the reason
+        // any refusal from here on gives.
+        let refuse_sea = |game: &mut Game, why: LaunchRefusal| {
+            refuse(
+                game,
+                if road_held {
+                    LaunchRefusal::RoadHeld
+                } else {
+                    why
+                },
+            )
+        };
+        if self.wood < SETTLER_WOOD_COST
+            || self.stone < SETTLER_STONE_COST
+            || self.money < SETTLER_GOLD_COST
+        {
+            return refuse_sea(self, LaunchRefusal::ShipCost);
+        }
+        sources.retain(|&k| spare(k) >= SETTLER_CIVILIANS);
+        if sources.is_empty() {
+            return refuse_sea(self, LaunchRefusal::Civilians);
+        }
+        let near = (at.x.floor() as i32, at.y.floor() as i32);
+        let Some(anchor) = find_land_anchor(&mut self.world, near, SETTLE_ANCHOR_RADIUS)
+            .filter(|&a| self.near_player_village(a))
+        else {
+            return refuse_sea(self, LaunchRefusal::NoWay);
+        };
+        for &k in &sources {
+            let docks = self.docks_near(&villages[k]);
+            let Some((port, path)) = plan_voyage(&mut self.world, &docks, anchor) else {
+                continue;
+            };
+            let start = tile_center(port);
+            let mut crew = people[k].clone();
+            crew.sort_by(|&a, &b| {
+                self.entities[a]
+                    .pos
+                    .distance_squared(start)
+                    .total_cmp(&self.entities[b].pos.distance_squared(start))
+            });
+            crew.truncate(SETTLER_CIVILIANS);
+            // Remove from the highest index down so the earlier ones stay valid.
+            crew.sort_unstable_by(|a, b| b.cmp(a));
+            let civilians = crew.len() as u32;
+            for i in crew {
+                self.entities.swap_remove(i);
+            }
+            self.wood -= SETTLER_WOOD_COST;
+            self.stone -= SETTLER_STONE_COST;
+            self.money -= SETTLER_GOLD_COST;
+            let facing = path
+                .first()
+                .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
+            self.transports.push(Transport {
+                pos: start,
+                faction: Faction::Player,
+                path,
+                path_cursor: 0,
+                anchor,
+                civilians,
+                knights: 0,
+                bob: 0.0,
+                facing,
+            });
+            self.push_alert(AlertKind::SettlersSailed, start);
+            return true;
+        }
+        refuse_sea(self, LaunchRefusal::NoWay)
+    }
+
+    /// Is a migrants' road clear of the enemy? No hostile soldier and no
+    /// enemy house may stand within `MIGRANT_SAFE_RADIUS` (Chebyshev) of any
+    /// tile on it, so settlers are never sent walking through a war.
+    fn road_is_clear(&self, road: &[Tile]) -> bool {
+        let r = MIGRANT_SAFE_RADIUS;
+        let (mut lo, mut hi) = ((i32::MAX, i32::MAX), (i32::MIN, i32::MIN));
+        for &(x, y) in road {
+            lo = (lo.0.min(x - r), lo.1.min(y - r));
+            hi = (hi.0.max(x + r), hi.1.max(y + r));
+        }
+        let near_road = |&(x, y): &Tile| x >= lo.0 && x <= hi.0 && y >= lo.1 && y <= hi.1;
+        let threats: Vec<Tile> = self
+            .entities
+            .iter()
+            .filter(|e| e.is_soldier() && hostile(e.faction, Faction::Player))
+            .map(|e| e.tile())
+            .chain(self.world.enemy_house_tiles.iter().copied())
+            .filter(near_road)
+            .collect();
+        road.iter().all(|&(x, y)| {
+            threats
+                .iter()
+                .all(|&(tx, ty)| (tx - x).abs().max((ty - y).abs()) > r)
+        })
+    }
+
+    /// Settle migrants who have reached the village that called them: they
+    /// drop the trip, and the leash keeps them there from then on. A migrant
+    /// whose destination is no longer a house of the player's (the village
+    /// fell while they walked), or who is no longer a civilian of the player's
+    /// (drafted, say, or carried off into another realm), gives up the trip
+    /// where it stands. Once the last of a party is in, an alert says so.
+    fn migrants_arrive(&mut self) {
+        let mut arrived: Vec<Tile> = Vec::new();
+        for e in &mut self.entities {
+            let Some(dest) = e.migrate_to else { continue };
+            if e.faction != Faction::Player
+                || e.job != Job::Civilian
+                || !self.player_house_tiles.contains(&dest)
+            {
+                e.migrate_to = None;
+                continue;
+            }
+            let (x, y) = e.tile();
+            if (x - dest.0).abs().max((y - dest.1).abs()) <= MIGRANT_ARRIVE_RADIUS {
+                e.migrate_to = None;
+                e.set_path(Vec::new());
+                if !arrived.contains(&dest) {
+                    arrived.push(dest);
+                }
+            }
+        }
+        for dest in arrived {
+            if !self.entities.iter().any(|e| e.migrate_to == Some(dest)) {
+                log::info!("settlers arrived at ({}, {})", dest.0, dest.1);
+                self.push_alert(AlertKind::MigrantsArrived, tile_center(dest));
+            }
+        }
+    }
+
     /// Debit a warship's cost and set its hull in the water at `spot`. The
     /// caller has already checked the spot and the stockpile.
     fn launch_warship(&mut self, spot: Tile) {
@@ -6121,6 +6423,52 @@ fn found_party_behavior(
     None
 }
 
+/// A civilian of the player's on the road to the village that called it (see
+/// `Game::call_settlers`): walk there, planning the whole road at once and
+/// replanning only rarely, like a founding party. If the road is lost (a
+/// bridge on it pulled down, say), the trip is given up, and the leash walks
+/// the civilian back to whichever village is nearest.
+fn migrant_behavior(
+    world: &World,
+    e: &mut Entity,
+    owner: u8,
+    dest: Tile,
+    dt: f32,
+) -> Option<StepEvent> {
+    if e.path_done() && e.may_replan() {
+        e.repath = 3.0;
+        match migrant_route(world, owner, e.tile(), dest) {
+            Some(p) => e.set_path(p),
+            None => {
+                e.migrate_to = None;
+                set_anim(e, Anim::Idle, dt);
+                return None;
+            }
+        }
+    }
+    let moved = follow_path(e, CIVILIAN_SPEED, dt);
+    set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
+    None
+}
+
+/// A migrant's road from `start` to within `MIGRANT_ARRIVE_RADIUS` of the
+/// house `dest`, over ground the player may walk. Searched cheapest-first
+/// toward the house, since the road can be long and a plain BFS would flood
+/// the whole countryside to find it.
+fn migrant_route(world: &World, owner: u8, start: Tile, dest: Tile) -> Option<Vec<Tile>> {
+    let r = MIGRANT_ARRIVE_RADIUS;
+    let near = |x: i32, y: i32| (x - dest.0).abs().max((y - dest.1).abs()) <= r;
+    pathfind::cheapest(
+        start,
+        MIGRANT_PATH_BUDGET,
+        |x, y| near(x, y) && world.walkable_for(owner, x, y),
+        |_, (x, y)| world.walkable_for(owner, x, y).then_some(1),
+        // Arriving anywhere within `r` (Chebyshev) of the house is up to `2r`
+        // steps short of it, so the distance is relaxed by that much.
+        |x, y| (((x - dest.0).abs() + (y - dest.1).abs()) as u32).saturating_sub(2 * r as u32),
+    )
+}
+
 /// Shared, per-frame context the player's civilians reason over: mines and
 /// their occupancy, sapling tiles, every hut they might shelter in, and the
 /// construction sites waiting on a builder (with the claims taken so far).
@@ -6366,6 +6714,11 @@ fn gather_behavior(
     if let Some(ev) = seek_shelter(world, e, owner, Faction::Player, snap, grid, farm.huts, dt) {
         release_cave(e, farm.cave_use);
         return ev;
+    }
+
+    // Called away to another village: walk the road there, leash or no leash.
+    if let Some(dest) = e.migrate_to {
+        return migrant_behavior(world, e, owner, dest, dt);
     }
 
     // A claimed construction site: this civilian is its builder. Walk over and
@@ -8229,14 +8582,15 @@ const MAGIC: &[u8; 4] = b"KGDM";
 /// version listed in `from_bytes` loadable: new sections go at the tail of the
 /// blob and default to empty when a save predates them, so upgrading the game
 /// never strands a player's world.
-const VERSION: u8 = 18;
+const VERSION: u8 = 19;
 /// Oldest save version `from_bytes` still accepts. Version 13 is the last
 /// format before transports (it has no transport section to read), v14's
 /// transports carried only settlers (no per-ship knight count), v15 predates
 /// the per-unit birth-faction (origin) tail section, v16 predates the
-/// unit-flag and transport-owner tail sections, and v17 predates the warship
+/// unit-flag and transport-owner tail sections, v17 predates the warship
 /// owner, orders, and sortie tail section (every warship then was the
-/// player's).
+/// player's), and v18 predates the migrant tail section (nobody was on the
+/// road between villages).
 const MIN_VERSION: u8 = 13;
 
 fn wu8(b: &mut Vec<u8>, v: u8) {
@@ -8565,6 +8919,20 @@ impl Game {
             }
             wf32(&mut b, w.sortie);
         }
+
+        // v19 tail section: where each unit is migrating to (a flag byte,
+        // then the house), so settlers on the road between villages finish
+        // the trip after a load. Older saves lack it and nobody is migrating.
+        wu32(&mut b, self.entities.len() as u32);
+        for e in &self.entities {
+            let (on_road, (x, y)) = match e.migrate_to {
+                Some(t) => (1, t),
+                None => (0, (0, 0)),
+            };
+            wu8(&mut b, on_road);
+            wi32(&mut b, x);
+            wi32(&mut b, y);
+        }
         b
     }
 
@@ -8650,6 +9018,7 @@ impl Game {
                 levy,
                 mercenary: false,
                 found_at: None,
+                migrate_to: None,
                 pending: 0.0,
                 jump: None,
                 reload: 0.0,
@@ -8899,6 +9268,19 @@ impl Game {
                     w.goal = has_goal.then_some(goal);
                     w.plan_pos = goal;
                     w.sortie = sortie;
+                }
+            }
+        }
+
+        // Migrant destinations (v19 tail section); older saves keep the
+        // default set above, with nobody on the road.
+        if version >= 19 {
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let on_road = r.u8()? != 0;
+                let dest = (r.i32()?, r.i32()?);
+                if let Some(e) = entities.get_mut(i) {
+                    e.migrate_to = on_road.then_some(dest);
                 }
             }
         }
@@ -9323,9 +9705,11 @@ mod tests {
         // byte. Loading it must still work, with nothing at sea.
         let game = Game::new(3);
         let mut bytes = game.to_bytes(CAM);
-        // Strip the tail sections newer than v13: warship owners (v18),
-        // transport owners and unit flags (v17), then origins (v16).
+        // Strip the tail sections newer than v13: migrants (v19), warship
+        // owners (v18), transport owners and unit flags (v17), then origins
+        // (v16).
         let n = game.entities.len();
+        bytes.truncate(bytes.len() - (4 + 9 * n)); // migrants
         bytes.truncate(bytes.len() - 4); // warship owners (none afloat)
         bytes.truncate(bytes.len() - 4); // transport owners (none at sea)
         bytes.truncate(bytes.len() - (4 + n)); // unit flags
@@ -9348,9 +9732,11 @@ mod tests {
         // save and relabel the version: it must load as a pure settler ship.
         let game = Game::new(3);
         let mut bytes = game.to_bytes(CAM);
-        // Strip the tail sections newer than v14: warship owners (v18),
-        // transport owners and unit flags (v17), then origins (v16).
+        // Strip the tail sections newer than v14: migrants (v19), warship
+        // owners (v18), transport owners and unit flags (v17), then origins
+        // (v16).
         let n = game.entities.len();
+        bytes.truncate(bytes.len() - (4 + 9 * n)); // migrants
         bytes.truncate(bytes.len() - 4); // warship owners (none afloat)
         bytes.truncate(bytes.len() - 4); // transport owners (none at sea)
         bytes.truncate(bytes.len() - (4 + n)); // unit flags
@@ -11270,8 +11656,10 @@ mod tests {
         game.warships
             .push(Warship::new(Faction::Player, Vec2::new(1.5, 1.5)));
         let mut bytes = game.to_bytes(CAM);
-        // Strip the v18 tail (count + one record) and stamp the old version.
-        let tail = 4 + (1 + 1 + 4 + 4 + 4);
+        // Strip the v19 migrant tail, then the v18 tail (count + one record),
+        // and stamp the old version.
+        let migrants = 4 + 9 * game.entities.len();
+        let tail = migrants + 4 + (1 + 1 + 4 + 4 + 4);
         bytes.truncate(bytes.len() - tail);
         bytes[4] = 17;
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v17 save must load");
@@ -12792,5 +13180,192 @@ mod tests {
         assert!(moved, "the civilian should wander");
         assert_eq!(game.entities[0].job, Job::Civilian);
         assert!(game.saplings.is_empty(), "nothing is sown on the grid");
+    }
+
+    /// Two villages of the player's on the testing ground's open grass, a
+    /// road's walk apart: `home` at the origin with `people` civilians, and an
+    /// empty outpost 60 tiles east. Returns the outpost's center.
+    fn two_villages(people: i32) -> (Game, Vec2) {
+        let mut game = Game::new_sandbox();
+        game.world.ensure_region(-30, -30, 90, 30);
+        for t in [(0, 0), (3, 0), (60, 0), (63, 0)] {
+            game.world.set_house(t.0, t.1, true);
+            game.player_house_tiles.push(t);
+        }
+        for i in 0..people {
+            game.entities
+                .push(Entity::new(Faction::Player, Job::Civilian, (i - 2, 2)));
+        }
+        game.survey_villages();
+        (game, village_center(&[(60, 0), (63, 0)]))
+    }
+
+    #[test]
+    fn called_settlers_walk_the_road_and_stay() {
+        let (mut game, outpost) = two_villages(8);
+        assert!(game.call_settlers(outpost), "a road joins the two villages");
+        // Eight at home, four kept back: a full party of three sets out.
+        assert_eq!(game.migrants(), MIGRANT_CIVILIANS);
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::MigrantsSetOut),
+            "setting out raises an alert"
+        );
+
+        let sim = (-30, -30, 90, 30);
+        let mut steps = 0;
+        while game.migrants() > 0 && steps < 3000 {
+            game.update(0.1, sim);
+            steps += 1;
+        }
+        assert_eq!(game.migrants(), 0, "the settlers never arrived");
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::MigrantsArrived),
+            "arriving raises an alert"
+        );
+        // Once there, the leash holds them at the outpost, not back home.
+        for _ in 0..300 {
+            game.update(0.1, sim);
+        }
+        let there = game
+            .entities
+            .iter()
+            .filter(|e| e.pos.distance(outpost) < CIVILIAN_HOME_RADIUS as f32 + 2.0)
+            .count();
+        assert_eq!(there, MIGRANT_CIVILIANS, "the settlers must stay put");
+        assert_eq!(game.civilian_count(Faction::Player), 8, "nobody was lost");
+    }
+
+    #[test]
+    fn calling_settlers_keeps_a_core_at_home() {
+        // Five at home: only the one beyond the four kept back may go.
+        let (mut game, outpost) = two_villages(5);
+        assert!(game.call_settlers(outpost));
+        assert_eq!(game.migrants(), 1);
+        // Four left: nobody can be spared, and the toast says so.
+        let (mut game, outpost) = two_villages(4);
+        assert!(!game.call_settlers(outpost));
+        assert_eq!(game.migrants(), 0);
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::NoMigrants)),
+            "a refused call says why"
+        );
+    }
+
+    #[test]
+    fn settlers_sail_to_a_village_no_road_reaches() {
+        let (mut game, outpost) = two_villages(8);
+        // Moat the outpost all round, and dig a channel from home out to the
+        // moat, so the only way over is by water.
+        let hub: Tile = (61, 0);
+        for y in -9..=9 {
+            for x in 52..=70 {
+                if (x - hub.0).abs().max((y - hub.1).abs()) >= 7 {
+                    game.world.carve_water(x, y);
+                }
+            }
+        }
+        for x in 0..=54 {
+            game.world.carve_water(x, 6);
+        }
+        game.survey_villages();
+
+        // Too poor for a ship: refused, nothing spent, nobody gone.
+        game.wood = 0;
+        assert!(!game.call_settlers(outpost));
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::ShipCost)),
+            "a call that needs a ship it can't afford says why"
+        );
+        assert_eq!(game.civilian_count(Faction::Player), 8);
+
+        game.wood = SETTLER_WOOD_COST;
+        game.stone = SETTLER_STONE_COST;
+        game.money = SETTLER_GOLD_COST;
+        assert!(
+            game.call_settlers(outpost),
+            "the settlers must sail instead"
+        );
+        assert_eq!(game.migrants(), 0, "nobody walks");
+        assert_eq!(game.transports().len(), 1);
+        assert_eq!(game.transports()[0].civilians as usize, SETTLER_CIVILIANS);
+        assert_eq!(game.civilian_count(Faction::Player), 8 - SETTLER_CIVILIANS);
+        assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
+        assert!(
+            game.near_player_village(game.transports()[0].anchor),
+            "the ship must land as a reinforcement, not a new colony"
+        );
+    }
+
+    #[test]
+    fn migrants_finish_the_trip_after_a_load() {
+        let mut game = Game::new(1);
+        let house = game.player_house_tiles[0];
+        game.entities[0].job = Job::Civilian;
+        game.entities[0].migrate_to = Some(house);
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("the save must load");
+        assert_eq!(loaded.entities[0].migrate_to, Some(house));
+        assert!(loaded.entities[1..].iter().all(|e| e.migrate_to.is_none()));
+
+        // A v18 save predates migrants: it loads with nobody on the road.
+        let mut bytes = game.to_bytes(CAM);
+        bytes.truncate(bytes.len() - (4 + 9 * game.entities.len()));
+        bytes[4] = 18;
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v18 save must load");
+        assert_eq!(loaded.entities.len(), game.entities.len());
+        assert!(loaded.entities.iter().all(|e| e.migrate_to.is_none()));
+    }
+
+    #[test]
+    fn settlers_never_walk_a_road_the_enemy_holds() {
+        // An enemy soldier stands on the road and there is no other way:
+        // refused, saying why, and nobody sets out.
+        let (mut game, outpost) = two_villages(8);
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Knight, (30, 1)));
+        game.wood = SETTLER_WOOD_COST;
+        game.stone = SETTLER_STONE_COST;
+        game.money = SETTLER_GOLD_COST;
+        assert!(!game.call_settlers(outpost));
+        assert_eq!(game.migrants(), 0);
+        assert!(
+            game.alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::RoadHeld)),
+            "a held road is the reason given"
+        );
+
+        // A channel runs from home to the outpost: the settlers sail around
+        // the enemy instead.
+        game.world.ensure_region(-10, -10, 80, 20);
+        for x in -4..=66 {
+            game.world.carve_water(x, 6);
+        }
+        game.survey_villages();
+        assert!(
+            game.call_settlers(outpost),
+            "the settlers must sail instead"
+        );
+        assert_eq!(game.migrants(), 0, "nobody walks past the enemy");
+        assert_eq!(game.transports().len(), 1);
+
+        // With the enemy gone, the road is clear again and they walk.
+        let (mut game, outpost) = two_villages(8);
+        game.entities
+            .push(Entity::new(Faction::Enemy, Job::Knight, (30, 30)));
+        assert!(game.call_settlers(outpost));
+        assert_eq!(
+            game.migrants(),
+            MIGRANT_CIVILIANS,
+            "a distant foe doesn't hold the road"
+        );
     }
 }

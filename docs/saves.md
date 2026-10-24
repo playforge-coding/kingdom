@@ -14,7 +14,9 @@ A save captures everything needed to reconstruct your session exactly:
 - The world **seed**.
 - Your **stockpile** (wood, stone, and gold).
 - **Stats:** enemies defeated and units lost.
-- **Every unit:** position, faction, role, and state.
+- **Every unit:** position, faction, role, and state, including where settlers
+  on the road between villages are headed, so they finish the trip after a
+  load.
 - **Cargo ships** currently at sea, with their load and payout, plus the
   **autonomous-trade switch** and the configured cargo load.
 - **Settler and troop ships** under sail, with everyone aboard, their

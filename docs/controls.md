@@ -157,7 +157,11 @@ kingdom:
   A village **under attack** is flagged in
   red and one with **no defenders** in amber, since an empty village is easy to
   take. Those come first in the list. **:lucide-crosshair: Go** jumps the camera
-  there and zooms back in if you were on the overview.
+  there and zooms back in if you were on the overview. Once you hold two or
+  more villages, each row also has **:lucide-users: Call settlers**, which
+  sends civilians there from the village with the most to spare (see
+  [Moving people between villages](gameplay.md#moving-people-between-villages)).
+  While any are on their way, the panel counts the settlers on the road.
 
 ## Alerts
 
@@ -177,6 +181,11 @@ saying what happened and where:
 - a settle, troop-landing, or hiring order was **refused**, saying why: no
   shore there, too close to a standing village (settling only), no sea route,
   the cost or crew not covered, or (escorts) the allies have none left to spare
+- settlers you called **set out** on the road to another village, or
+  **arrived** and joined it; a call that can't go through says why (no other
+  village has civilians to spare, no road or sea route leads there, the enemy
+  holds the road and no ship can go instead, or a ship is needed and the
+  stockpile doesn't cover it)
 - your settlers **landed** and founded a new village, or your knights went
   **ashore** on a far coast
 - an **enemy fleet set sail** for one of your coasts (raised at the landing it's

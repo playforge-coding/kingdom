@@ -220,9 +220,59 @@ A young colony short on hands doesn't have to wait for homes to fill on their
 own. Send a settler ship **at one of your own villages**, clicking its shore,
 and instead of founding anew the settlers sail over, go ashore, and **join it**:
 three more civilians, no new houses, and an alert when they land. The usual
-costs, crew rules, and pirate risk apply.
+costs, crew rules, and pirate risk apply. **:lucide-users: Call settlers** on
+the colony's row in the Realm panel does the same thing for you when no road
+clear of the enemy leads there, picking the harbor itself (see
+[Moving people between villages](#moving-people-between-villages)).
 
 See **[Building](building.md#settler-ship)** for the full launch rules.
+
+## Moving people between villages
+
+Civilians work the village they live in and never wander off to another on
+their own. To send people where they're needed, such as a freshly captured
+village or a frontier with building to do, press **:lucide-users: Call
+settlers** on that village's row in the
+**[Realm panel](controls.md#the-realm-panel)**.
+
+- **Who comes:** the other village with the most civilians to spare sends up
+  to **3**. Like a settler ship, it always keeps **4** at home, so a village
+  of 5 sends just one and a village of 4 or fewer sends nobody. Of its people,
+  the ones nearest the village that called answer first.
+- **Over land, for free:** where a road joins the two villages and no enemy
+  stands along it, the settlers walk it. It costs nothing but the time on the
+  road. Once they arrive they get to work there, and from then on that's
+  home.
+- **Never through a war:** a road with an enemy soldier or an enemy village
+  within 10 tiles of it doesn't count. The call goes to the next village with
+  people to spare and a clear road, and failing that, to the sea.
+- **By sea, where no clear road leads:** if nobody with people to spare can
+  walk there safely (a colony across the water, or a road the enemy holds), a
+  full crew of 3 sails over from the sending village's harbor as a
+  [reinforcement](#reinforcing-a-colony) instead, at a settler ship's usual
+  cost (30 wood, 20 stone, 50 gold) and with the usual pirate risk.
+- **The road has its dangers:** settlers on the road are out in the open.
+  When raiders come near they run for the nearest hut like any villager, and
+  one who takes shelter on the way stays in that hut's village instead of
+  finishing the trip. If the village that called them falls before they get
+  there, they give up and settle in whichever village is nearest.
+
+```mermaid
+flowchart TD
+    call["Call settlers on a village"] --> spare{"Another village has more than 4 civilians?"}
+    spare -- "No" --> refused["Refused: nobody to spare"]
+    spare -- "Yes" --> road{"A road leads there with no enemy along it?"}
+    road -- "Yes" --> walk["Up to 3 walk over, free"]
+    road -- "No" --> ship{"Stockpile covers a ship, and a sea route reaches it?"}
+    ship -- "Yes" --> sail["3 sail over as a reinforcement"]
+    ship -- "No" --> refusedWay["Refused, saying why"]
+```
+
+An alert tells you when settlers set out and another when the last of them
+arrives, and the Realm panel counts how many are on the road. A refused call
+costs nothing and says why: no other village has civilians to spare, no road
+or sea route leads there, the enemy holds the road and no ship can go
+instead, or a ship is needed and the stockpile doesn't cover it.
 
 ## Invading overseas
 

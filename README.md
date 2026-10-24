@@ -36,7 +36,10 @@ both natively and in the browser (via WebGL) using **Trunk**.
   nearest reachable resource and chop wood or quarry stone (with a swing
   animation), **miners** work your bottomless mines, and **builders** walk to
   your construction orders and put the structures up. Everything they gather
-  goes into your shared stockpile.
+  goes into your shared stockpile. **Call settlers** from the Realm panel to
+  move a few from the village with the most to spare to another: they walk
+  over for free where a road clear of the enemy leads, or sail over as a
+  settler ship where none does.
 - **Knights** seek out and **attack** the enemy faction. Both sides take damage
   in melee; HP bars appear above wounded units. Fighters keep a tile apart
   rather than piling up, circle, dodge back (not always cleanly) and lunge,
