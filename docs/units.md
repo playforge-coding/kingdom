@@ -26,7 +26,9 @@ the moment, and the HUD's status line shows how many are working each:
   but only four to a mine.
 - **Builders** claim pending **[construction orders](building.md)**, walk to the
   site, and put the structure up over a few real seconds. The **builder's pay**
-  is part of every order's gold cost.
+  is part of every order's gold cost. If trees or rocks stand in the way, a
+  builder chops and quarries through them (banking the wood and stone) instead
+  of giving up, though it still walks around a thicket when that's quicker.
 
 Whatever the job, civilians:
 
@@ -38,8 +40,10 @@ Whatever the job, civilians:
 - **Take shelter in huts** when a raid comes close.
 
 Use the **Gather** toggle (Balanced / Wood / Stone) to bias what they collect.
-A construction order outranks everything else: even a miner puts down the pick
-when a site is waiting for hands.
+A construction order outranks everything else. The moment a site is waiting for
+hands, a civilian drops whatever it's doing to go build: a miner puts
+down the pick, a farmer abandons a half-finished swing or turns back from the
+tree it was walking to.
 
 ## Knights
 

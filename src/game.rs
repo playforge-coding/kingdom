@@ -752,6 +752,11 @@ const CHARGE_COOLDOWN: f32 = 6.0;
 /// ...and after one is called off.
 const CHARGE_RETRY: f32 = 1.5;
 const HARVEST_TIME: f32 = 2.0;
+/// What a builder's route planner charges, in tiles of walking, for each load
+/// of a tree or rock it must clear off the way to a site: one `HARVEST_TIME`
+/// swing is about five tiles of a civilian's walk. So a detour around a
+/// thicket wins while it's shorter than cutting through.
+const BUILDER_CLEAR_STEP_COST: u32 = 5;
 
 /// How fast a unit of this job walks.
 fn speed_of(job: Job) -> f32 {
@@ -6488,10 +6493,45 @@ fn unclaimed_site(farm: &FarmCtx) -> bool {
         .any(|s| !farm.site_claims.contains(&s.tile))
 }
 
+/// What a builder's route planner charges for stepping onto `(x, y)`, in tiles
+/// of walking: one for clear ground, the time to harvest a tree or rock clean
+/// away (`BUILDER_CLEAR_STEP_COST` per load it holds), and `None` for what it
+/// can't pass at all (water, buildings, caves, huts, foreign walls).
+fn builder_step_cost(world: &World, owner: u8, x: i32, y: i32) -> Option<u32> {
+    if world.walkable_for(owner, x, y) {
+        Some(1)
+    } else if world.walkable_for_siege(owner, x, y) {
+        let loads = world.node(x, y).map_or(1, |n| n.amount.max(1));
+        Some(1 + loads * BUILDER_CLEAR_STEP_COST)
+    } else {
+        None
+    }
+}
+
+/// The quickest route for a builder to a tile satisfying `goal`, with the
+/// harvesting of any tree or rock in the way priced in (see
+/// `builder_step_cost`). It goes around a thicket when that's quicker and cuts
+/// straight through when it isn't, or when there's no way around at all.
+fn builder_route(
+    world: &World,
+    owner: u8,
+    start: Tile,
+    goal: impl Fn(i32, i32) -> bool,
+) -> Option<Vec<Tile>> {
+    pathfind::cheapest(
+        start,
+        PATH_BUDGET,
+        |x, y| goal(x, y) && builder_step_cost(world, owner, x, y).is_some(),
+        |_, (x, y)| builder_step_cost(world, owner, x, y),
+        |_, _| 0,
+    )
+}
+
 /// Claim the nearest *reachable* unclaimed construction site, marking it taken
-/// so no one else walks there too. One multi-goal BFS routes to any tile from
-/// which such a site can be worked, so an unreachable site (a bridge span still
-/// waiting on its previous tile, say) is simply left for later.
+/// so no one else walks there too. One multi-goal search routes to any tile
+/// from which such a site can be worked, cutting through trees and rocks if
+/// it must, so an unreachable site (a bridge span still waiting on its
+/// previous tile, say) is simply left for later.
 fn claim_site(
     world: &World,
     owner: u8,
@@ -6513,26 +6553,17 @@ fn claim_site(
             .map(|(dx, dy)| (x + dx, y + dy))
             .find(|t| open.contains(t))
     };
-    let path = pathfind::bfs(
-        start,
-        PATH_BUDGET,
-        |x, y| world.walkable_for(owner, x, y) && neighbor_site(x, y).is_some(),
-        |x, y| world.walkable_for(owner, x, y),
-    )?;
+    let path = builder_route(world, owner, start, |x, y| neighbor_site(x, y).is_some())?;
     let dest = path.last().copied().unwrap_or(start);
     let site = neighbor_site(dest.0, dest.1)?;
     farm.site_claims.insert(site);
     Some((site, path))
 }
 
-/// Route to any tile from which `site` can be worked (a walkable 4-neighbor).
+/// Route to any tile from which `site` can be worked (a 4-neighbor), cutting
+/// through trees and rocks if it must.
 fn path_beside(world: &World, owner: u8, start: Tile, site: Tile) -> Option<Vec<Tile>> {
-    pathfind::bfs(
-        start,
-        PATH_BUDGET,
-        |x, y| world.walkable_for(owner, x, y) && adjacent((x, y), site),
-        |x, y| world.walkable_for(owner, x, y),
-    )
+    builder_route(world, owner, start, |x, y| adjacent((x, y), site))
 }
 
 /// True when `(x, y)` is within the leash of some player house.
@@ -6723,16 +6754,37 @@ fn gather_behavior(
 
     // A claimed construction site: this civilian is its builder. Walk over and
     // work it, exempt from the home leash so a bridge can run out past it.
+    // Trees and rocks in the way are cut down and quarried on the way there.
     if let Some(site) = e.build_site {
         if !farm.sites.iter().any(|s| s.tile == site) {
             // Canceled or finished under us; back to ordinary work.
             e.build_site = None;
+            e.target_node = None;
+            e.harvest_timer = 0.0;
         } else if adjacent(here, site) {
+            e.target_node = None;
+            e.harvest_timer = 0.0;
             e.set_path(Vec::new());
             e.facing = dir_from_vec(tile_center(site) - e.pos);
             set_anim(e, Anim::Act, dt);
             return Some(StepEvent::Construct(site));
         } else {
+            // Clearing a tree or rock off the route: swing until it's gone
+            // (banking every load), then carry on along the way.
+            if let Some(t) = e.target_node {
+                if world.node(t.0, t.1).is_some() {
+                    e.facing = dir_from_vec(tile_center(t) - e.pos);
+                    set_anim(e, Anim::Act, dt);
+                    e.harvest_timer -= dt;
+                    if e.harvest_timer <= 0.0 {
+                        e.harvest_timer = HARVEST_TIME;
+                        return Some(StepEvent::Harvest(t));
+                    }
+                    return None;
+                }
+                e.target_node = None;
+                e.harvest_timer = 0.0;
+            }
             if e.may_replan() {
                 e.repath = REPLAN_TICK;
                 if let Some(p) = path_beside(world, owner, here, site) {
@@ -6745,6 +6797,17 @@ fn gather_behavior(
                 }
             }
             if e.build_site.is_some() {
+                // The next step is a tree or rock: stop short and clear it.
+                if let Some(&next) = e.path.get(e.path_cursor)
+                    && world.node(next.0, next.1).is_some()
+                    && adjacent(here, next)
+                {
+                    e.target_node = Some(next);
+                    e.harvest_timer = HARVEST_TIME;
+                    e.facing = dir_from_vec(tile_center(next) - e.pos);
+                    set_anim(e, Anim::Act, dt);
+                    return None;
+                }
                 let moved = follow_path(e, CIVILIAN_SPEED, dt);
                 set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
                 return None;
@@ -6768,6 +6831,32 @@ fn gather_behavior(
         let moved = follow_path(e, CIVILIAN_SPEED, dt);
         set_anim(e, if moved { Anim::Walk } else { Anim::Idle }, dt);
         return None;
+    }
+
+    // Building outranks every other job. A site waiting for hands pulls a
+    // civilian off whatever it's doing (a swing half-done, a walk out to a
+    // tree, a mine slot) instead of waiting for that task to wrap up. Only
+    // checked on the replan clock, so a site nobody can reach yet (the next
+    // span of a bridge, say) doesn't cost every worker a search each frame.
+    if e.repath <= 0.0 && unclaimed_site(farm) {
+        if let Some((site, path)) = claim_site(world, owner, here, farm) {
+            release_cave(e, farm.cave_use);
+            e.target_node = None;
+            e.harvest_timer = 0.0;
+            e.build_site = Some(site);
+            e.set_path(path);
+            set_anim(
+                e,
+                if e.path_done() {
+                    Anim::Idle
+                } else {
+                    Anim::Walk
+                },
+                dt,
+            );
+            return None;
+        }
+        e.repath = REPLAN_TICK;
     }
 
     // Working: mining a cave, harvesting a node, or tending a sapling.
@@ -6859,7 +6948,8 @@ fn gather_behavior(
     }
 
     // Idle hands take up building before gathering: claim the nearest
-    // reachable site still waiting on a builder and head over.
+    // reachable site still waiting on a builder and head over. (Busy hands
+    // are pulled off their work for it above.)
     if let Some((site, path)) = claim_site(world, owner, here, farm) {
         e.build_site = Some(site);
         e.target_node = None;
@@ -10713,6 +10803,92 @@ mod tests {
             }
         }
         panic!("no open ground near the village");
+    }
+
+    #[test]
+    fn builders_cut_their_way_through_to_a_walled_in_site() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        game.wood = 100;
+        game.stone = 100;
+        game.money = 100;
+        let spot = find_house_spot(&game);
+        game.build_mode = BuildMode::House;
+        assert!(game.try_build(tile_center(spot)));
+
+        // Ring the site in trees two tiles out, so the only way in is to
+        // chop through.
+        for dy in -2..=2i32 {
+            for dx in -2..=2i32 {
+                let t = (spot.0 + dx, spot.1 + dy);
+                if dx.abs().max(dy.abs()) == 2 && game.world.is_open_grass(t.0, t.1) {
+                    game.world.set_node(t.0, t.1, Resource::Wood, 2);
+                }
+            }
+        }
+        let start = (-4..=4i32)
+            .flat_map(|dy| (-4..=4i32).map(move |dx| (dx, dy)))
+            .filter(|&(dx, dy)| dx.abs().max(dy.abs()) >= 3)
+            .map(|(dx, dy)| (spot.0 + dx, spot.1 + dy))
+            .find(|&(x, y)| game.world.walkable_for(0, x, y))
+            .expect("open ground outside the ring");
+        assert!(
+            pathfind::bfs(
+                start,
+                PATH_BUDGET,
+                |x, y| adjacent((x, y), spot),
+                |x, y| game.world.walkable_for(0, x, y),
+            )
+            .is_none(),
+            "the ring left a way in"
+        );
+        let wood_before = game.wood;
+        game.entities
+            .push(Entity::new(Faction::Player, Job::Civilian, start));
+
+        let sim = (spot.0 - 30, spot.1 - 30, spot.0 + 30, spot.1 + 30);
+        let mut built = false;
+        for _ in 0..3000 {
+            game.update(0.1, sim);
+            if game.world.is_house(spot.0, spot.1) {
+                built = true;
+                break;
+            }
+        }
+        assert!(built, "the builder never cut through to the site");
+        assert!(
+            game.wood > wood_before,
+            "the trees cleared on the way should be banked"
+        );
+    }
+
+    #[test]
+    fn a_new_build_order_pulls_a_gatherer_off_its_work() {
+        let mut game = Game::new(1);
+        game.entities.clear();
+        game.wood = 100;
+        game.stone = 100;
+        game.money = 100;
+        let spot = find_house_spot(&game);
+        let start = stand_tile(&game.world, 0, spot).expect("the site must be workable");
+        // A civilian deep in a long swing at something next to it.
+        let mut e = Entity::new(Faction::Player, Job::Civilian, start);
+        e.target_node = Some(spot);
+        e.harvest_timer = 1000.0;
+        game.entities.push(e);
+        let sim = (spot.0 - 20, spot.1 - 20, spot.0 + 20, spot.1 + 20);
+        game.update(0.1, sim);
+
+        game.build_mode = BuildMode::House;
+        assert!(game.try_build(tile_center(spot)));
+        for _ in 0..10 {
+            game.update(0.1, sim);
+        }
+        assert_eq!(
+            game.entities[0].build_site,
+            Some(spot),
+            "the gatherer finished its swing before taking up the build"
+        );
     }
 
     #[test]

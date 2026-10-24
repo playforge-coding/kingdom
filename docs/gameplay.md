@@ -83,8 +83,8 @@ Three factions share the world:
    **pirates** prowl the ocean and will sink a cargo ship they catch (the alert
    it raises offers a one-click **Summon warship** when you can afford one).
 3. **Build.** Spend wood, stone, and gold on [houses, bridges, mines, walls, and huts](building.md).
-   A click places an order; a civilian takes up the **builder's** job, walks
-   over, and puts the structure up over a few seconds (the builder's pay is part
+   A click places an order; a civilian drops its gathering at once to take up
+   the **builder's** job, walks over, and puts the structure up over a few seconds (the builder's pay is part
    of the cost). Houses raise their own village's population cap and
    periodically spawn new workers, so each settlement grows on its own. Mark
    [builder zones](building.md#builder-zones) and flip the autonomous-building

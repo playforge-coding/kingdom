@@ -7,8 +7,9 @@ comments: true
 Pick a build mode in the HUD's **Build** section, then **left-click** a tile to
 place a **construction order**. Nothing goes up on the spot: the order's full
 cost is set aside at the click, a ghost of the structure marks the site, and one
-of your **[civilians](units.md#civilians)** walks over, takes up the builder's
-job, and works the site for a few real seconds until the structure stands. The
+of your **[civilians](units.md#civilians)** walks over (cutting through any
+trees or rocks walling the site off), takes up the builder's job, and works the
+site for a few real seconds until the structure stands. The
 ghost solidifies as the work progresses, and **clicking a pending site again
 cancels the order and refunds everything**.
 
