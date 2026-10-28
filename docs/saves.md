@@ -4,8 +4,21 @@ comments: true
 
 # Saves & Files
 
-Kingdom saves the entire world to a single compact **binary blob**. There's one
-save slot; pressing **:lucide-save: Save** in the HUD overwrites it.
+Kingdom saves the entire world to a compact **binary blob**. Saves live in
+named **slots**: type a name next to **:lucide-save: Save** in the HUD and the
+world is stored under it. Saving under a name you've used before overwrites
+that slot; saving under a new name adds one. There is no fixed slot count, so
+you can keep as many worlds as your storage holds.
+
+Every slot appears on the main menu under **Saved Worlds**, each with a
+**Load** and a **Delete** button. Delete asks you to click a second time
+before it removes anything.
+
+A loaded or freshly created world prefills the save box (with the slot it came
+from, or a name built from the seed), so a plain **Save** keeps updating the
+same slot unless you rename it. Slot names are trimmed to letters, digits,
+spaces, dashes and underscores, and capped at 40 characters, so they double as
+file names.
 
 ## What's saved
 
@@ -37,8 +50,7 @@ owed their pay, but a loaded game's levies are free to stand down as soon as
 the realm has been quiet for a little while.
 
 The **[testing ground](testing.md)** is never saved. It has no **Save**
-button, so experimenting there can't overwrite your one save slot with an
-empty grid.
+button, so experimenting there can't fill a save slot with an empty grid.
 
 Loading replays the seed to regenerate untouched terrain, then applies your
 saved edits on top, so even an "infinite" world round-trips from a small file.
@@ -62,18 +74,24 @@ loads with none at sea, and one from before the enemy and allied navies loads
 every warship as yours). Only a save written by a *newer* build than the one
 loading it, or one older than the loader still supports, is refused.
 
-## Where it lives
+## Where they live
 
 === "Native"
 
-    Saved to a file named **`kingdom_save.dat`**. **Load Saved World** on the
-    menu reads it back.
+    Each slot is a file named after it, **`<name>.dat`**, in a `saves/`
+    directory under the platform's data dir (for example
+    `~/Library/Application Support/kingdom/saves` on macOS,
+    `~/.local/share/kingdom/saves` on Linux, `%APPDATA%\kingdom\saves` on
+    Windows). A save file from before slots existed (`kingdom_save.dat`) is
+    moved into the directory on startup as a slot named **world**.
 
 === "Web"
 
-    The browser can't write arbitrary files, so the same blob is stored in
-    **IndexedDB** under your site's origin. It persists across page reloads as
-    long as you don't clear site data.
+    The browser can't write arbitrary files, so each slot's blob is stored as
+    its own record in **IndexedDB** under your site's origin, keyed by the
+    slot's name (the pre-slot save was keyed **world**, so it shows up as a
+    slot of that name). Saves persist across page reloads as long as you
+    don't clear site data.
 
-In both cases the **Load Saved World** menu button is enabled only when a save
-is present.
+In both cases the menu's **Saved Worlds** list shows whatever slots are
+present, and nothing when there are none.

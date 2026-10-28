@@ -28,10 +28,12 @@ both natively and in the browser (via WebGL) using **Trunk**.
   most towns sit on a river or coast, prime hunting ground for the navy. Only
   single-tile notches are auto-bridged, so rivers stay real barriers you cross by
   **bridge** or **boat**.
-- **Saving.** Save any time to a custom binary `.dat` blob (magic `KGDM`) that
+- **Saving.** Save any time under any name you like, with as many slots as
+  your disk holds, each a custom binary `.dat` blob (magic `KGDM`) that
   captures the seed, stockpile, stats, every unit, and all edited chunks
-  (buildings, bridges, depleted resources). Native builds write a file
-  (`kingdom_save.dat`); the web build stores the blob in **IndexedDB**.
+  (buildings, bridges, depleted resources). Native builds write one file per
+  slot in a `saves/` directory; the web build stores each blob in
+  **IndexedDB**.
 - **Civilians** take up whichever job the realm needs: **farmers** walk to the
   nearest reachable resource and chop wood or quarry stone (with a swing
   animation), **miners** work your bottomless mines, and **builders** walk to

@@ -166,6 +166,9 @@ pub struct State {
     scene: Scene,
     menu: MenuState,
     game: Option<Game>,
+    /// The save-slot name the HUD's save box edits: prefilled from the slot a
+    /// world was loaded from, or with a fresh name when one is created.
+    save_name: String,
     input: Input,
     last_time: f64,
 }
@@ -175,7 +178,7 @@ impl State {
         let atlas = atlas::build();
         let renderer = Renderer::new(window.clone(), &atlas).await;
         let ui = crate::ui::Ui::new(&window);
-        save::init(); // begin loading any existing save (async on web)
+        save::init(); // begin loading any existing saves (async on web)
         let mut camera = Camera::new(Vec2::ZERO);
         camera.aspect =
             (renderer.size.width as f32 / renderer.size.height.max(1) as f32).clamp(0.1, 10.0);
@@ -190,6 +193,7 @@ impl State {
             scene: Scene::Menu,
             menu: MenuState::default(),
             game: None,
+            save_name: String::new(),
             input: Input::default(),
             last_time: now_secs(),
         }
@@ -322,6 +326,7 @@ impl State {
                 self.game = Some(game);
                 self.camera.view_height = DEFAULT_VIEW_HEIGHT;
                 self.scene = Scene::Playing;
+                self.save_name = format!("world {seed}");
                 log::info!("created world with seed {seed}");
             }
             Action::CreateSandbox => {
@@ -331,16 +336,17 @@ impl State {
                 self.scene = Scene::Playing;
                 log::info!("opened the testing ground");
             }
-            Action::Load => {
-                if let Some(bytes) = save::read() {
+            Action::Load(name) => {
+                if let Some(bytes) = save::read(&name) {
                     if let Some((game, cam)) = Game::from_bytes(&bytes) {
                         self.camera.center = Vec2::new(cam.cx, cam.cy);
                         self.camera.view_height = cam.view_height;
                         self.game = Some(game);
                         self.scene = Scene::Playing;
-                        log::info!("loaded saved world");
+                        self.save_name = name.clone();
+                        log::info!("loaded saved world '{name}'");
                     } else {
-                        log::warn!("save file could not be parsed");
+                        log::warn!("save '{name}' could not be parsed");
                     }
                 }
             }
@@ -349,14 +355,20 @@ impl State {
                     self.scene = Scene::Playing;
                 }
             }
-            Action::Save => {
-                // The testing ground is never saved: it would overwrite the
-                // one save slot with an empty grid.
+            Action::Save(name) => {
+                // The testing ground is never saved: a slot holding an empty
+                // grid would only mislead.
                 if let Some(game) = &self.game
                     && !game.sandbox()
+                    && let Some(name) = save::sanitize_name(&name)
                 {
-                    save::write(game.to_bytes(self.cam_state()));
+                    save::write(&name, game.to_bytes(self.cam_state()));
+                    // Keep the save box showing the name actually stored.
+                    self.save_name = name;
                 }
+            }
+            Action::DeleteSave(name) => {
+                save::delete(&name);
             }
             Action::ToMenu => {
                 self.scene = Scene::Menu;
@@ -1078,28 +1090,25 @@ impl State {
                         game,
                         view,
                         colors: &self.colors,
+                        save_name: &mut self.save_name,
                     },
                 ),
-                None => {
-                    let has_save = save::exists();
-                    self.ui.run(
-                        window,
-                        UiScene::Menu {
-                            menu: &mut self.menu,
-                            has_save,
-                            has_game: false,
-                        },
-                    )
-                }
+                None => self.ui.run(
+                    window,
+                    UiScene::Menu {
+                        menu: &mut self.menu,
+                        slots: save::slots(),
+                        has_game: false,
+                    },
+                ),
             },
             Scene::Menu => {
-                let has_save = save::exists();
                 let has_game = self.game.is_some();
                 self.ui.run(
                     window,
                     UiScene::Menu {
                         menu: &mut self.menu,
-                        has_save,
+                        slots: save::slots(),
                         has_game,
                     },
                 )

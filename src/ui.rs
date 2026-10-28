@@ -27,9 +27,13 @@ pub enum Action {
     CreateWorld(i32),
     /// Open the testing ground: an empty gray grid to place units on.
     CreateSandbox,
-    Load,
+    /// Load the named save slot.
+    Load(String),
     Resume,
-    Save,
+    /// Save the running world under the named slot.
+    Save(String),
+    /// Remove the named save slot.
+    DeleteSave(String),
     ToMenu,
     /// Move the camera to a spot, zooming back in from the overview if asked.
     Focus {
@@ -53,6 +57,9 @@ pub struct View {
 #[derive(Default)]
 pub struct MenuState {
     pub seed_text: String,
+    /// The slot a first click on Delete has marked; a second click on the
+    /// same slot's button actually removes it.
+    pub confirm_delete: Option<String>,
 }
 
 /// HUD icons: Lucide SVGs (see `assets/icons/LICENSE`) drawn with white
@@ -106,13 +113,16 @@ fn icon_label(ui: &mut egui::Ui, source: ImageSource, text: impl Into<egui::Widg
 pub enum Scene<'a> {
     Menu {
         menu: &'a mut MenuState,
-        has_save: bool,
+        /// Every save slot's name, for the load list.
+        slots: Vec<String>,
         has_game: bool,
     },
     Game {
         game: &'a mut Game,
         view: View,
         colors: &'a MapColors,
+        /// The slot name the HUD's save box edits.
+        save_name: &'a mut String,
     },
 }
 
@@ -183,10 +193,15 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
     match scene {
         Scene::Menu {
             menu,
-            has_save,
+            slots,
             has_game,
-        } => menu_ui(ui, menu, *has_save, *has_game),
-        Scene::Game { game, view, colors } => {
+        } => menu_ui(ui, menu, slots, *has_game),
+        Scene::Game {
+            game,
+            view,
+            colors,
+            save_name,
+        } => {
             let ctx = ui.ctx().clone();
             // The testing ground has no stockpile, orders, or realm to keep
             // track of: its one panel is the unit picker.
@@ -195,7 +210,7 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
                 let alert = alerts_ui(&ctx, game, *view);
                 return hud.or(alert);
             }
-            let hud = game_ui(&ctx, game);
+            let hud = game_ui(&ctx, game, save_name);
             let realm = realm_ui(&ctx, game, *view, colors, minimap);
             let alert = alerts_ui(&ctx, game, *view);
             hud.or(realm).or(alert)
@@ -206,7 +221,7 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
 fn menu_ui(
     ui: &mut egui::Ui,
     menu: &mut MenuState,
-    has_save: bool,
+    slots: &[String],
     has_game: bool,
 ) -> Option<Action> {
     let mut action = None;
@@ -242,17 +257,42 @@ fn menu_ui(
                 action = Some(Action::CreateWorld(seed));
             }
 
-            ui.add_enabled_ui(has_save, |ui| {
-                if ui
-                    .button((icon(ui, icons::FOLDER_OPEN), "Load Saved World"))
-                    .clicked()
-                {
-                    action = Some(Action::Load);
-                }
-            });
-
             if has_game && ui.button((icon(ui, icons::PLAY), "Resume")).clicked() {
                 action = Some(Action::Resume);
+            }
+
+            if !slots.is_empty() {
+                ui.add_space(16.0);
+                ui.add(WidgetAtom::new((
+                    icon(ui, icons::FOLDER_OPEN),
+                    RichText::new("Saved Worlds").strong(),
+                )));
+                ui.add_space(4.0);
+                egui::Grid::new("saves_grid")
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        for name in slots {
+                            ui.label(name);
+                            if ui.button((icon(ui, icons::PLAY), "Load")).clicked() {
+                                action = Some(Action::Load(name.clone()));
+                            }
+                            let confirming = menu.confirm_delete.as_deref() == Some(name.as_str());
+                            let label = if confirming {
+                                "Really delete?"
+                            } else {
+                                "Delete"
+                            };
+                            if ui.button((icon(ui, icons::X), label)).clicked() {
+                                if confirming {
+                                    menu.confirm_delete = None;
+                                    action = Some(Action::DeleteSave(name.clone()));
+                                } else {
+                                    menu.confirm_delete = Some(name.clone());
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
             }
 
             ui.add_space(16.0);
@@ -426,7 +466,7 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
     action
 }
 
-fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
+fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Option<Action> {
     let mut action = None;
     egui::Window::new("Kingdom")
         .default_pos([12.0, 12.0])
@@ -831,13 +871,21 @@ fn game_ui(ctx: &egui::Context, game: &mut Game) -> Option<Action> {
             ui.separator();
 
             ui.horizontal(|ui| {
-                if ui.button((icon(ui, icons::SAVE), "Save")).clicked() {
-                    action = Some(Action::Save);
-                }
+                ui.add(egui::TextEdit::singleline(save_name).desired_width(110.0));
+                let valid = crate::save::sanitize_name(save_name).is_some();
+                ui.add_enabled_ui(valid, |ui| {
+                    if ui.button((icon(ui, icons::SAVE), "Save")).clicked() {
+                        action = Some(Action::Save(save_name.clone()));
+                    }
+                });
                 if ui.button((icon(ui, icons::MENU), "Menu")).clicked() {
                     action = Some(Action::ToMenu);
                 }
             });
+            ui.small(
+                "Each name is its own save slot; saving under an existing name \
+                 overwrites that slot. Keep as many slots as you like.",
+            );
 
             egui::CollapsingHeader::new("Help")
                 .default_open(false)

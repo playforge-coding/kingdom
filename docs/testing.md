@@ -129,6 +129,6 @@ tiles in this tool, so use the button or a second click to lift a flag.
   modes, trade, colonies, and navy are absent from the panel. What your
   civilians gather still lands in a stockpile, but nothing spends it.
 - **Never saved.** The testing ground has no **Save** button, and it can't
-  touch your save slot. **:lucide-menu: Menu** takes you back to the main
+  touch your save slots. **:lucide-menu: Menu** takes you back to the main
   menu, where **:lucide-play: Resume** returns to the grid as you left it
   until you create or load another world.
