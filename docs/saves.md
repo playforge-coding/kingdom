@@ -20,6 +20,21 @@ same slot unless you rename it. Slot names are trimmed to letters, digits,
 spaces, dashes and underscores, and capped at 40 characters, so they double as
 file names.
 
+## Autosave
+
+While you play, the world also **autosaves to the slot named in the save
+box**: every two minutes, when you leave for the main menu (the **Menu**
+button or <kbd>Esc</kbd>), and when you close the window. In other words, the
+slot you're playing in quietly keeps up with you, and a crash or a hasty quit
+costs at most the last couple of minutes.
+
+Because the autosave writes to whatever name is in the box, renaming the box
+mid-session points both manual saves and autosaves at the new slot, leaving
+the old one as it was: an easy way to branch a world. To abandon a session
+without it being saved, there isn't a way to opt out beyond deleting the slot
+afterward; the [testing ground](testing.md) remains the place for
+consequence-free experiments, since it never saves at all.
+
 ## What's saved
 
 A save captures everything needed to reconstruct your session exactly:

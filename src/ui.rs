@@ -884,7 +884,9 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
             });
             ui.small(
                 "Each name is its own save slot; saving under an existing name \
-                 overwrites that slot. Keep as many slots as you like.",
+                 overwrites that slot. Keep as many slots as you like. The world \
+                 also autosaves to the named slot every couple of minutes and \
+                 when you leave.",
             );
 
             egui::CollapsingHeader::new("Help")

@@ -125,6 +125,8 @@ const OVERVIEW_VIEW_HEIGHT: f32 = 240.0;
 /// Most chunks the overview generates per frame. A far zoom can uncover
 /// hundreds at once, so they fill in over a few frames rather than in one stall.
 const OVERVIEW_CHUNK_BUDGET: usize = 6;
+/// Seconds of play between autosaves.
+const AUTOSAVE_INTERVAL: f32 = 120.0;
 
 fn now_secs() -> f64 {
     #[cfg(target_arch = "wasm32")]
@@ -169,6 +171,8 @@ pub struct State {
     /// The save-slot name the HUD's save box edits: prefilled from the slot a
     /// world was loaded from, or with a fresh name when one is created.
     save_name: String,
+    /// Seconds of play since the last autosave.
+    autosave_timer: f32,
     input: Input,
     last_time: f64,
 }
@@ -194,6 +198,7 @@ impl State {
             menu: MenuState::default(),
             game: None,
             save_name: String::new(),
+            autosave_timer: 0.0,
             input: Input::default(),
             last_time: now_secs(),
         }
@@ -211,6 +216,19 @@ impl State {
         }
         self.renderer.resize(w, h);
         self.camera.aspect = (w as f32 / h as f32).clamp(0.1, 10.0);
+    }
+
+    /// Write the running world back to its own slot (the name in the HUD's
+    /// save box) and start the interval over. The testing ground is never
+    /// saved, and a name box emptied of anything usable skips the write.
+    fn autosave(&mut self) {
+        if let Some(game) = &self.game
+            && !game.sandbox()
+            && let Some(name) = save::sanitize_name(&self.save_name)
+        {
+            save::write(&name, game.to_bytes(self.cam_state()));
+        }
+        self.autosave_timer = 0.0;
     }
 
     fn cam_state(&self) -> CamState {
@@ -276,6 +294,12 @@ impl State {
         if let Some(game) = &mut self.game {
             game.update(dt, sim);
         }
+
+        // Autosave on a timer that only runs while actually playing.
+        self.autosave_timer += dt;
+        if self.autosave_timer >= AUTOSAVE_INTERVAL {
+            self.autosave();
+        }
     }
 
     fn build_at_cursor(&mut self) {
@@ -327,6 +351,7 @@ impl State {
                 self.camera.view_height = DEFAULT_VIEW_HEIGHT;
                 self.scene = Scene::Playing;
                 self.save_name = format!("world {seed}");
+                self.autosave_timer = 0.0;
                 log::info!("created world with seed {seed}");
             }
             Action::CreateSandbox => {
@@ -344,6 +369,7 @@ impl State {
                         self.game = Some(game);
                         self.scene = Scene::Playing;
                         self.save_name = name.clone();
+                        self.autosave_timer = 0.0;
                         log::info!("loaded saved world '{name}'");
                     } else {
                         log::warn!("save '{name}' could not be parsed");
@@ -371,6 +397,9 @@ impl State {
                 save::delete(&name);
             }
             Action::ToMenu => {
+                // Leaving for the menu is a natural stopping point, and often
+                // the way out of the game entirely, so take a snapshot.
+                self.autosave();
                 self.scene = Scene::Menu;
             }
             Action::Focus { pos, zoom_in } => {
@@ -1383,7 +1412,12 @@ impl ApplicationHandler<State> for App {
         let ui_consumed = state.ui.on_event(&state.window, &event);
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // One last snapshot so closing the window never loses more
+                // than the current autosave interval.
+                state.autosave();
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::CursorMoved { position, .. } => {
                 state.input.cursor = (position.x, position.y);
@@ -1437,7 +1471,11 @@ impl ApplicationHandler<State> for App {
                         }
                         KeyCode::Escape if pressed => {
                             // Playing -> back to menu; on the menu -> quit.
+                            // Leaving play is a way out of the session, so
+                            // autosave; the world can't change on the menu,
+                            // so quitting from there has nothing new to save.
                             if state.scene == Scene::Playing {
+                                state.autosave();
                                 state.scene = Scene::Menu;
                             } else {
                                 event_loop.exit();
