@@ -329,7 +329,8 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
             )));
             ui.small(
                 "Left-click a tile to put the chosen unit, terrain or building down; \
-                 everything stands at once. Right-click a tile to remove whoever stands \
+                 everything stands at once. Drag with a brush to paint a stroke. \
+                 Right-click a tile to remove whoever stands \
                  on it, or to wipe it back to grass. Units behave as they would in a \
                  real game.",
             );
@@ -915,6 +916,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
                 ui.small("Allies fight the enemy on their own, but never join your battles.");
                 ui.small("Civilians farm, mine, and build as needed; knights defend.");
                 ui.small("Builds take a few seconds; the builder's pay is part of the cost.");
+                ui.small("Drag to order houses, bridges, mines, walls, or huts along a line; start the drag on a pending order to cancel a line instead.");
                 ui.small("Civilians replant trees and mine caves once resources run dry.");
                 ui.small("Mines never run out, but only 4 miners can work one at a time.");
                 ui.small("Huts shelter civilians from raids; knights rush to defend an attacked one.");

@@ -17,7 +17,7 @@ use crate::atlas::{self, Atlas, MapColors};
 use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
 use crate::game::{
     AUTO_ZONE_RADIUS, Anim, AxeWork, CamState, Dir, Entity, Faction, Game, Job, MissileKind,
-    SandboxTool, SiteKind,
+    SandboxTool, SiteKind, Stroke, tile_at, tile_path,
 };
 use crate::gfx::{Instance, Renderer};
 use crate::save;
@@ -154,6 +154,9 @@ struct Input {
     zoom_in: bool,
     zoom_out: bool,
     cursor: (f64, f64),
+    /// While the left button is held in a mode that builds tile by tile: the
+    /// last tile the drag reached and what it does to each new one.
+    drag: Option<((i32, i32), Stroke)>,
 }
 
 pub struct State {
@@ -280,6 +283,9 @@ impl State {
         if z != 0.0 {
             self.camera.zoom((z * ZOOM_RATE * dt).exp());
         }
+        // Panning or zooming slides the map under a held drag, which keeps
+        // building along the way.
+        self.drag_to_cursor();
 
         // Entities in a generous rectangle around the view run at the full
         // frame rate; the rest of the realm is stepped in slower, rotating
@@ -302,6 +308,8 @@ impl State {
         }
     }
 
+    /// A left press on the map: act on the tile under the cursor, and start a
+    /// drag if the current mode builds tile by tile.
     fn build_at_cursor(&mut self) {
         let world = self.camera.screen_to_world(
             self.input.cursor.0 as f32,
@@ -310,10 +318,39 @@ impl State {
             self.renderer.size.height as f32,
         );
         if let Some(game) = &mut self.game {
+            // Settled before the press acts, since the press may cancel the
+            // very order that makes this drag an eraser.
+            self.input.drag = game.stroke_at(world).map(|s| (tile_at(world), s));
             if game.sandbox() {
                 game.sandbox_click(world);
             } else {
                 game.try_build(world);
+            }
+        }
+    }
+
+    /// Carry a held drag on to the tile now under the cursor, covering every
+    /// tile in between so a quick sweep leaves no gaps. Stretches that pass
+    /// under the HUD are skipped rather than built beneath it.
+    fn drag_to_cursor(&mut self) {
+        let Some((last, stroke)) = self.input.drag else {
+            return;
+        };
+        if self.scene != Scene::Playing {
+            self.input.drag = None;
+            return;
+        }
+        let to = self.cursor_tile();
+        if to == last {
+            return;
+        }
+        self.input.drag = Some((to, stroke));
+        if self.ui.ctx.is_pointer_over_egui() {
+            return;
+        }
+        if let Some(game) = &mut self.game {
+            for t in tile_path(last, to) {
+                game.stroke_build(t, stroke);
             }
         }
     }
@@ -326,7 +363,7 @@ impl State {
             self.renderer.size.width as f32,
             self.renderer.size.height as f32,
         );
-        (world.x.floor() as i32, world.y.floor() as i32)
+        tile_at(world)
     }
 
     /// Visible tile rectangle (inclusive) with a small margin.
@@ -1421,12 +1458,23 @@ impl ApplicationHandler<State> for App {
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::CursorMoved { position, .. } => {
                 state.input.cursor = (position.x, position.y);
+                state.drag_to_cursor();
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } if !ui_consumed => state.build_at_cursor(),
+            // The drag ends however the button comes up, over the HUD or not,
+            // and when the window can no longer tell (the pointer left it or
+            // focus moved elsewhere, so the release may never arrive).
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            }
+            | WindowEvent::CursorLeft { .. }
+            | WindowEvent::Focused(false) => state.input.drag = None,
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,

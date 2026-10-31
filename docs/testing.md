@@ -41,7 +41,7 @@ menu. The camera opens on the origin at the usual zoom, and all the normal
 flowchart LR
     faction["Pick a faction"] --> tool{"Tool"}
     tool -- "Place a unit" --> unit["Left-click: a unit of the chosen type appears"]
-    tool -- "Paint terrain or a building" --> paint["Left-click: the chosen brush replaces the tile"]
+    tool -- "Paint terrain or a building" --> paint["Left-click or drag: the chosen brush replaces each tile"]
     tool -- "Rally your knights" --> rally["Left-click: your knights rush the flag"]
     right["Right-click a tile"] --> who{"Anyone standing there?"}
     who -- "Yes" --> gone["They are removed"]
@@ -67,7 +67,8 @@ stand on (a wall or water, say) refuses the click.
 
 ### Terrain and buildings
 
-Choose a **brush** and **left-click** a tile. Painting first wipes the tile
+Choose a **brush** and **left-click** a tile, or hold the button and **drag**
+to paint every tile the pointer crosses. Painting first wipes the tile
 back to bare grass and then puts the brush down, so a house painted over a tree
 simply replaces it:
 

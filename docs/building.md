@@ -13,6 +13,16 @@ site for a few real seconds until the structure stands. The
 ghost solidifies as the work progresses, and **clicking a pending site again
 cancels the order and refunds everything**.
 
+You don't have to click tile by tile. For houses, bridges, mines, walls, and
+huts, **hold the left button and drag** to order one on every tile the pointer
+crosses, so a wall or a bridge goes down as a single stroke. A drag that starts
+on a pending order of the current kind works the other way and **cancels every
+matching order it passes over**. Each tile is checked on its own, so the drag
+skips tiles where the structure can't go and stops ordering once the stockpile
+runs dry. Sweeping back over a line you just laid leaves it alone, and nothing
+is ordered under the HUD panels. Rally flags, builder zones, and the ship modes
+still take one click each.
+
 Everything is paid for from your shared stockpile of wood, stone, and
 **:lucide-coins: gold**, and most buildings can only go **within 20 tiles of a
 house you already own**. That range is roomy enough to plan a whole district

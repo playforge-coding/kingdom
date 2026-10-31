@@ -16,6 +16,7 @@ through the panel; your units carry them out on their own.
 | <kbd>Q</kbd> or <kbd>-</kbd> (hold) | Zoom out (past full detail, the map turns into the [overview](#the-overview)) |
 | <kbd>M</kbd> | Jump to the [overview](#the-overview) and back |
 | **Left-click** | Perform the current build action, or place a rally flag |
+| **Left-drag** | Order (or cancel) the current structure on every tile the pointer crosses |
 | **Right-click** | Clear every rally flag (the knights' and the navy's) |
 | <kbd>Esc</kbd> | Return to the menu (from the menu on native builds: quit) |
 
@@ -23,12 +24,15 @@ Left-click always does whatever the **Build** section of the panel is currently
 set to: order a house, a bridge, a mine, or a wall, mark a tree for a hut, mark
 a builder zone, or drop a rally flag. Orders aren't built on the spot: a
 civilian walks over and builds the site over a few seconds, and clicking a
-pending site cancels and refunds it. See **[Building](building.md)** for what
-each mode does.
+pending site cancels and refunds it. In the house, bridge, mine, wall, and hut
+modes you can also **hold the button and drag** to lay a whole line of orders
+at once, or start the drag on a pending order to cancel a line of them. See
+**[Building](building.md)** for what each mode does.
 
 On the **[testing ground](testing.md)** the mouse does something simpler:
 left-click places the unit picked in its panel, paints the chosen terrain or
-building onto the tile at once, or plants a rally flag, and right-click
+building onto the tile at once (drag to paint a stroke), or plants a rally
+flag, and right-click
 removes whoever stands on the tile (or wipes an empty tile back to grass).
 
 ## The HUD panel

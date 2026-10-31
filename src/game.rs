@@ -182,6 +182,34 @@ fn tile_center(t: Tile) -> Vec2 {
     Vec2::new(t.0 as f32 + 0.5, t.1 as f32 + 0.5)
 }
 
+/// The tile under a world position.
+pub fn tile_at(world_pos: Vec2) -> Tile {
+    (world_pos.x.floor() as i32, world_pos.y.floor() as i32)
+}
+
+/// The tiles a straight line from `a` to `b` passes through, `a` left out and
+/// `b` included. Each shares an edge with the one before, so a fast drag
+/// leaves no gaps and a dragged wall or bridge never joins only at a corner.
+pub fn tile_path(a: Tile, b: Tile) -> Vec<Tile> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (nx, ny) = (dx.abs(), dy.abs());
+    let mut out = Vec::with_capacity((nx + ny) as usize);
+    let (mut ix, mut iy) = (0, 0);
+    let mut t = a;
+    while ix < nx || iy < ny {
+        // Step along whichever axis the line crosses a tile edge on first.
+        if (1 + 2 * ix) * ny < (1 + 2 * iy) * nx {
+            t.0 += dx.signum();
+            ix += 1;
+        } else {
+            t.1 += dy.signum();
+            iy += 1;
+        }
+        out.push(t);
+    }
+    out
+}
+
 pub struct Entity {
     pub faction: Faction,
     /// The faction this unit was born into. Villagers incorporated into
@@ -1320,6 +1348,17 @@ pub enum BuildMode {
     /// Left-click open water to plant a navy rally flag: warships drop their
     /// hunts and patrols and sail to it. The flag clears once one arrives.
     NavyRally,
+}
+
+/// What a left-button drag does on each tile it crosses after the press,
+/// settled by the press itself (see [`Game::stroke_at`]): a press that
+/// ordered (or tried to order) a structure lays the same order on every tile
+/// dragged over, and one that canceled a pending order cancels the matching
+/// ones the drag passes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stroke {
+    Place,
+    Cancel,
 }
 
 /// What a left-click does on the testing ground (see `Game::new_sandbox`),
@@ -5094,8 +5133,7 @@ impl Game {
     /// civilian walks over to work the site. Clicking a pending site of the
     /// same kind cancels it and refunds everything.
     pub fn try_build(&mut self, world_pos: Vec2) -> bool {
-        let x = world_pos.x.floor() as i32;
-        let y = world_pos.y.floor() as i32;
+        let (x, y) = tile_at(world_pos);
         match self.build_mode {
             BuildMode::House => self.order_build((x, y), SiteKind::House),
             BuildMode::Bridge => self.order_build((x, y), SiteKind::Bridge),
@@ -5168,6 +5206,63 @@ impl Game {
                 }
                 true
             }
+        }
+    }
+
+    /// The structure the current build mode orders one tile at a time, if any.
+    fn build_kind(&self) -> Option<SiteKind> {
+        match self.build_mode {
+            BuildMode::House => Some(SiteKind::House),
+            BuildMode::Bridge => Some(SiteKind::Bridge),
+            BuildMode::Mine => Some(SiteKind::Mine),
+            BuildMode::Wall => Some(SiteKind::Wall),
+            BuildMode::Hut => Some(SiteKind::Hut),
+            _ => None,
+        }
+    }
+
+    /// How a left-button drag starting with a press at `world_pos` carries
+    /// on, or `None` if the current mode acts on the press alone (flags,
+    /// zones, ships, placing units). Ask before handing the press to
+    /// `try_build`, since the press may cancel the very order this looks for.
+    pub fn stroke_at(&self, world_pos: Vec2) -> Option<Stroke> {
+        if self.sandbox() {
+            return (self.sandbox_tool == SandboxTool::PlaceTile).then_some(Stroke::Place);
+        }
+        let kind = self.build_kind()?;
+        let t = tile_at(world_pos);
+        if self
+            .build_sites
+            .iter()
+            .any(|s| s.tile == t && s.kind == kind)
+        {
+            Some(Stroke::Cancel)
+        } else {
+            Some(Stroke::Place)
+        }
+    }
+
+    /// Carry a drag on to tile `t`: order the current mode's structure there
+    /// (or, on the testing ground, paint the brush), or cancel the matching
+    /// pending order, by `stroke`. Unlike a click it never flips a tile the
+    /// other way, so sweeping back over a line leaves it as it is. Returns
+    /// whether anything changed.
+    pub fn stroke_build(&mut self, t: Tile, stroke: Stroke) -> bool {
+        if self.sandbox() {
+            if self.sandbox_tool != SandboxTool::PlaceTile {
+                return false;
+            }
+            self.place_tile(t, self.place_brush);
+            return true;
+        }
+        let Some(kind) = self.build_kind() else {
+            return false;
+        };
+        let pending = self.build_sites.iter().any(|s| s.tile == t);
+        match stroke {
+            Stroke::Place if !pending => self.order_build(t, kind),
+            Stroke::Cancel if pending => self.order_build(t, kind),
+            _ => false,
         }
     }
 
@@ -12050,6 +12145,63 @@ mod tests {
         assert!(game.try_build(tile_center(spot)));
         assert!(game.build_sites().is_empty());
         assert_eq!((game.wood, game.stone, game.money), (50, 50, 50));
+    }
+
+    #[test]
+    fn tile_paths_step_edge_to_edge() {
+        assert!(tile_path((3, 3), (3, 3)).is_empty());
+        assert_eq!(tile_path((0, 0), (3, 0)), vec![(1, 0), (2, 0), (3, 0)]);
+        assert_eq!(tile_path((0, 0), (0, -2)), vec![(0, -1), (0, -2)]);
+        for &(a, b) in &[((0, 0), (5, 2)), ((2, 7), (-4, 1)), ((0, 0), (-3, 3))] {
+            let path = tile_path(a, b);
+            assert_eq!(path.len() as i32, (b.0 - a.0).abs() + (b.1 - a.1).abs());
+            assert_eq!(path.last(), Some(&b));
+            let mut prev = a;
+            for &t in &path {
+                assert_eq!((t.0 - prev.0).abs() + (t.1 - prev.1).abs(), 1);
+                prev = t;
+            }
+        }
+    }
+
+    #[test]
+    fn dragging_lays_a_line_of_orders_and_erases_it_again() {
+        let mut game = Game::new(1);
+        game.wood = 1000;
+        game.stone = 1000;
+        game.money = 1000;
+        let (hx, hy) = game.player_houses()[0];
+        let (a, b) = ((hx + 2, hy + 3), (hx + 7, hy + 3));
+        game.world.clear_tile(a.0, a.1);
+        for (x, y) in tile_path(a, b) {
+            game.world.clear_tile(x, y);
+        }
+
+        // Flags and the like act on the press alone.
+        game.build_mode = BuildMode::Rally;
+        assert_eq!(game.stroke_at(tile_center(a)), None);
+
+        game.build_mode = BuildMode::Wall;
+        assert_eq!(game.stroke_at(tile_center(a)), Some(Stroke::Place));
+        assert!(game.try_build(tile_center(a)));
+        for t in tile_path(a, b) {
+            assert!(game.stroke_build(t, Stroke::Place));
+        }
+        assert_eq!(game.build_sites().len(), 6);
+        // Sweeping back over the line doesn't cancel what it just laid.
+        for t in tile_path(b, a) {
+            assert!(!game.stroke_build(t, Stroke::Place));
+        }
+        assert_eq!(game.build_sites().len(), 6);
+
+        // A drag that starts on a pending order cancels the line instead.
+        assert_eq!(game.stroke_at(tile_center(b)), Some(Stroke::Cancel));
+        assert!(game.try_build(tile_center(b)));
+        for t in tile_path(b, a) {
+            assert!(game.stroke_build(t, Stroke::Cancel));
+        }
+        assert!(game.build_sites().is_empty());
+        assert_eq!((game.wood, game.stone, game.money), (1000, 1000, 1000));
     }
 
     #[test]
