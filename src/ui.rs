@@ -15,16 +15,17 @@ use crate::game::{
     BUILD_NEAR_RADIUS, BUILDER_WAGE, Brush, BuildMode, Command, ESCORT_HIRE_COST, Faction, Game,
     GatherPriority, HORSEMAN_GOLD_COST, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
     HUT_GOLD_COST, Job, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, LEVY_SERVICE, LaunchRefusal, MAX_ESCORTS,
-    MINE_GOLD_COST, MINE_STONE_COST, Priority, RealmId, Relation, SETTLER_CIVILIANS,
-    SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST, SETTLER_WOOD_COST,
-    STONE_PRICE, SandboxTool, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST, TROOP_WOOD_COST,
-    WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST,
-    WARSHIP_WOOD_COST, WOOD_PRICE,
+    MAX_SLOTS, MINE_GOLD_COST, MINE_STONE_COST, MatchSettings, Priority, RealmId, Relation,
+    SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST,
+    SETTLER_WOOD_COST, STONE_PRICE, SandboxTool, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST,
+    TROOP_WOOD_COST, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST,
+    WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
 pub enum Action {
-    CreateWorld(i32),
+    /// Start a new world with this seed and match setup.
+    CreateWorld(i32, MatchSettings),
     /// Open the testing ground: an empty gray grid to place units on.
     CreateSandbox,
     /// Load the named save slot.
@@ -59,6 +60,9 @@ pub struct View {
 #[derive(Default)]
 pub struct MenuState {
     pub seed_text: String,
+    /// How the next world is set up: how many realms, and whether the
+    /// computer's may ally.
+    pub settings: MatchSettings,
     /// The slot a first click on Delete has marked; a second click on the
     /// same slot's button actually removes it.
     pub confirm_delete: Option<String>,
@@ -255,6 +259,20 @@ fn menu_ui(
                         menu.seed_text = pseudo_random_seed().to_string();
                     }
                     ui.end_row();
+
+                    ui.label("Realms:");
+                    ui.add(egui::Slider::new(&mut menu.settings.slots, 1..=MAX_SLOTS));
+                    ui.small("Seats the computer fills").on_hover_text(
+                        "Every realm starts with one village and plays by your rules. \
+                             Each seat beyond yours is run by the computer.",
+                    );
+                    ui.end_row();
+
+                    if menu.settings.slots > 1 {
+                        ui.label("Alliances:");
+                        ui.checkbox(&mut menu.settings.ai_may_ally, "Computer realms may ally");
+                        ui.end_row();
+                    }
                 });
 
             ui.add_space(12.0);
@@ -263,7 +281,7 @@ fn menu_ui(
                 .clicked()
             {
                 let seed = parse_seed(&menu.seed_text);
-                action = Some(Action::CreateWorld(seed));
+                action = Some(Action::CreateWorld(seed, menu.settings));
             }
 
             if has_game && ui.button((icon(ui, icons::PLAY), "Resume")).clicked() {
@@ -1004,7 +1022,7 @@ fn color32(c: [f32; 4]) -> Color32 {
 
 fn faction_color32(colors: &MapColors, f: Faction) -> Color32 {
     color32(match f {
-        Faction::Realm(_) => colors.player,
+        Faction::Realm(r) => colors.realm(r),
         Faction::Enemy => colors.enemy,
         Faction::Ally => colors.ally,
     })

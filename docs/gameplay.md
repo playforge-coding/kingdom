@@ -18,6 +18,13 @@ Everything starts at the main menu:
   and enemy placements. Leave the field blank (or press **:lucide-dices: Random**) to roll a
   random one. Text that isn't a number is hashed into a seed, so `"my castle"`
   is a valid seed too.
+- **Realms:** how many empires share the world, from one (the usual
+  single-player game) up to the cap. Every realm starts the same way, with
+  one coastal village of five houses and a handful of people, planted well
+  apart from the others; yours is the first, and the computer runs the rest
+  (see **[Multiplayer](multiplayer.md)**). With more than one realm you can
+  also choose whether the computer's realms may make **alliances**. Each
+  realm draws its units, houses and flags in its own color.
 - **:lucide-folder-open: Load Saved World:** restore your last save (enabled only when one exists).
 - **:lucide-play: Resume:** jump back into the session you left when you opened the menu.
 - **:lucide-flask-conical: Testing Ground:** open an empty gray grid instead of

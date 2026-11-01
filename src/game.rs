@@ -2572,59 +2572,109 @@ pub struct Game {
     rng: Rng,
 }
 
+/// How a match is set up: the choices a room's creator makes, within the
+/// limits the server sets (see the Multiplayer page of the docs). A
+/// single-player world is a match of one seat.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct MatchSettings {
+    /// How many realms share the map. People take seats; the computer fills
+    /// the rest. At least one.
+    pub slots: u8,
+    /// May the computer's realms make alliances?
+    pub ai_may_ally: bool,
+}
+
+/// The most seats a match may have. A practical cap on what one server
+/// can simulate, not a limit anything is sized by: raising it is the whole
+/// change.
+pub const MAX_SLOTS: u8 = 8;
+
+impl Default for MatchSettings {
+    fn default() -> Self {
+        MatchSettings {
+            slots: 1,
+            ai_may_ally: true,
+        }
+    }
+}
+
+/// How far out from the origin the capitals of a match's further realms are
+/// planted, in tiles. Inside the home continent's guaranteed land, beyond the
+/// first realm's coast, and far enough apart on the ring that even eight
+/// capitals keep more than a village's spacing between them.
+const CAPITAL_RING: i32 = 85;
+
 impl Game {
+    /// A single-player world: one realm, yours, with the computer's rival
+    /// camps and the allies around it. The app goes through `new_match`; this
+    /// is the tests' shorthand.
+    #[cfg(test)]
     pub fn new(seed: i32) -> Self {
+        Game::new_match(seed, MatchSettings::default())
+    }
+
+    /// A world for a match of `settings.slots` realms. The first seat is a
+    /// person's (the local player, or the room's host); the rest are the
+    /// computer's until someone takes them. Every realm starts the same way:
+    /// one coastal village of five houses, four civilians and two knights.
+    pub fn new_match(seed: i32, settings: MatchSettings) -> Self {
+        let slots = settings.slots.clamp(1, MAX_SLOTS) as usize;
         let mut world = World::new(seed);
         world.ensure_region(-ENSURE_MARGIN, -ENSURE_MARGIN, ENSURE_MARGIN, ENSURE_MARGIN);
 
         let mut entities = Vec::new();
 
-        // The player starts controlling a single village on the coast nearest
-        // the origin, right by the water so their cargo port has a shore to
-        // launch from, and expands inland from there. Fall back to the nearest
-        // open land if (improbably) no coast is close.
+        // The first realm starts on the coast nearest the origin, right by the
+        // water so its cargo port has a shore to launch from, and expands
+        // inland from there. Fall back to the nearest open land if
+        // (improbably) no coast is close.
         let anchor = coastal_start(&mut world, 200).unwrap_or_else(|| {
             open_tiles_near(&world, 0, 0, 24)
                 .into_iter()
                 .min_by_key(|(x, y)| x.abs() + y.abs())
                 .unwrap_or((0, 0))
         });
-        // Lay the capital's houses on real open land around the anchor: the
-        // coast cuts off some directions, so pick actual grass tiles (nearest
-        // first, kept a couple tiles apart) rather than fixed offsets that could
-        // drop a house in the sea.
-        let mut player_house_tiles: Vec<Tile> = Vec::new();
-        let mut candidates = open_tiles_near(&world, anchor.0, anchor.1, 5);
-        candidates.sort_by_key(|&(x, y)| (x - anchor.0).abs() + (y - anchor.1).abs());
-        for (x, y) in candidates {
-            if player_house_tiles.len() >= 5 {
-                break;
-            }
-            let spaced = player_house_tiles
+        let mut capitals = vec![anchor];
+        // Further realms go around a ring, evenly spaced and turned by a
+        // seed-chosen angle, each on the coast nearest its spot so every
+        // realm has a harbor. A spot with no coast within reach takes land.
+        let mut crng = Rng::new(seed as u64 ^ 0x5851F42D4C957F2D);
+        let turn = crng.range(0, 62832) as f32 / 10000.0;
+        for k in 1..slots {
+            let ang = turn + std::f32::consts::TAU * k as f32 / slots as f32;
+            let target = (
+                (ang.cos() * CAPITAL_RING as f32) as i32,
+                (ang.sin() * CAPITAL_RING as f32) as i32,
+            );
+            let spot = find_ocean_coast_anchor(&mut world, target, 30)
+                .or_else(|| find_land_anchor(&mut world, target, 30))
+                .unwrap_or(target);
+            capitals.push(spot);
+        }
+        let mut realms = Vec::with_capacity(slots);
+        for (k, &capital) in capitals.iter().enumerate() {
+            let faction = Faction::Realm(k as RealmId);
+            plant_capital(&mut world, &mut entities, faction, capital);
+            let controller = if k == 0 {
+                Controller::Human
+            } else {
+                Controller::Ai
+            };
+            // Each realm's home landmass is mapped so allied camps can be kept
+            // off it (reaching the allies must mean a sea voyage).
+            let home = home_continent_tiles(&mut world, capital, 300, 60_000);
+            realms.push(Realm::new(controller, Some(home)));
+        }
+        let home = realms[0].home_continent.clone().unwrap_or_default();
+        let near_capital = |t: Tile| {
+            capitals
                 .iter()
-                .all(|&(hx, hy)| (hx - x).abs().max((hy - y).abs()) >= 2);
-            if spaced {
-                world.set_house(x, y, owner_of(Faction::Realm(0)));
-                player_house_tiles.push((x, y));
-            }
-        }
-
-        // The capital sits by the water. If that water is a small inland lake
-        // rather than the open sea, dig a river from it out to the coast so a
-        // cargo ship launched here can still reach the allied shores.
-        if let Some(w) = nearest_water(&mut world, anchor.0, anchor.1, 8) {
-            carve_river_to_sea(&mut world, w, &player_house_tiles);
-        }
-
-        // Villagers: civilians to gather, knights to defend.
-        let spawns = open_tiles_near(&world, anchor.0, anchor.1, 8);
-        for (k, &t) in spawns.iter().step_by(3).take(6).enumerate() {
-            let job = if k < 4 { Job::Civilian } else { Job::Knight };
-            entities.push(Entity::new(Faction::Realm(0), job, t));
-        }
+                .any(|&(cx, cy)| (cx - t.0).abs().max((cy - t.1).abs()) < VILLAGE_SPACING)
+        };
 
         // Enemy settlements: several villages scattered around the map, each
-        // seeded with its own civilians (>3, so it can grow) and knights.
+        // seeded with its own civilians (>3, so it can grow) and knights, and
+        // none of them on top of a realm's capital.
         let mut erng = Rng::new(seed as u64 ^ 0xA24BAED4963EE407);
         let dirs = [
             (1.0, 0.2),
@@ -2647,6 +2697,9 @@ impl Game {
             let Some(anchor) = find_land_anchor(&mut world, target, 16) else {
                 continue;
             };
+            if near_capital(anchor) {
+                continue;
+            }
             let houses = world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
             if houses.is_empty() {
                 continue;
@@ -2669,17 +2722,23 @@ impl Game {
         }
 
         // Allied settlements: a friendly trade partner, planted on far-off coasts
-        // *across the sea* from the player. They keep their own civilians and
-        // knights, harass the enemy, but never join the player's fights.
+        // *across the sea* from the first realm. They keep their own civilians
+        // and knights, harass the enemy, but never join a realm's fights.
         //
-        // Map out the player's home landmass first so allied camps can be kept
-        // off it. A village you could just walk to would make the cargo ships
-        // pointless. Reaching an ally must mean crossing open water.
-        let home = home_continent_tiles(&mut world, anchor, 300, 60_000);
+        // The realms' home landmasses were mapped above so allied camps can be
+        // kept off them. A village you could just walk to would make the cargo
+        // ships pointless. Reaching an ally must mean crossing open water.
         // Rather than guess a direction and hope a ship can get there, sail out
-        // from the player's own port and settle allies only on coasts the ships
-        // actually reach, spaced apart, and nearest first for short, reliable
-        // trade routes.
+        // from the first realm's own port and settle allies only on coasts the
+        // ships actually reach, spaced apart, and nearest first for short,
+        // reliable trade routes.
+        let on_any_home = |c: Tile, realms: &[Realm]| {
+            realms.iter().any(|r| {
+                r.home_continent.as_ref().is_some_and(|home| {
+                    (-5..=5).any(|dy| (-5..=5).any(|dx| home.contains(&(c.0 + dx, c.1 + dy))))
+                })
+            })
+        };
         let mut ally_anchors: Vec<Tile> = Vec::new();
         if let Some(port) = nearest_water(&mut world, anchor.0, anchor.1, 12) {
             // Explore as far as a ship itself could sail, so every coast we find
@@ -2696,12 +2755,10 @@ impl Game {
                 if (c.0 - port.0).abs() + (c.1 - port.1).abs() < 24 {
                     continue;
                 }
-                let on_home =
-                    (-5..=5).any(|dy| (-5..=5).any(|dx| home.contains(&(c.0 + dx, c.1 + dy))));
                 let spaced = ally_anchors
                     .iter()
                     .all(|&(ax, ay)| (ax - c.0).abs().max((ay - c.1).abs()) >= VILLAGE_SPACING);
-                if !on_home && spaced {
+                if !on_any_home(c, &realms) && !near_capital(c) && spaced {
                     ally_anchors.push(c);
                 }
             }
@@ -2720,8 +2777,9 @@ impl Game {
             }
         }
 
-        let realm = Realm::new(Controller::Human, Some(home));
-        Game::assemble(world, entities, vec![realm], seed)
+        let mut game = Game::assemble(world, entities, realms, seed);
+        game.diplomacy.ai_may_ally = settings.ai_may_ally;
+        game
     }
 
     /// The testing ground: a flat, featureless grid with nobody on it. Nothing
@@ -9502,6 +9560,45 @@ fn home_continent_tiles(
 /// land with open water within a few tiles, but not so surrounded by sea that a
 /// village's houses would spill into it. Used to plant the player's capital on
 /// the coast. Returns `None` only if no land near origin is close to water.
+/// Plant a realm's starting village around `anchor`: five houses on real open
+/// land (the coast cuts off some directions, so actual grass tiles are picked,
+/// nearest first and kept a couple of tiles apart, rather than fixed offsets
+/// that could drop a house in the sea), a river out to the open sea if the
+/// water by the capital is only a lake, and four civilians and two knights to
+/// start it off.
+fn plant_capital(world: &mut World, entities: &mut Vec<Entity>, faction: Faction, anchor: Tile) {
+    world.ensure_region(anchor.0 - 12, anchor.1 - 12, anchor.0 + 12, anchor.1 + 12);
+    let mut houses: Vec<Tile> = Vec::new();
+    let mut candidates = open_tiles_near(world, anchor.0, anchor.1, 5);
+    candidates.sort_by_key(|&(x, y)| (x - anchor.0).abs() + (y - anchor.1).abs());
+    for (x, y) in candidates {
+        if houses.len() >= 5 {
+            break;
+        }
+        let spaced = houses
+            .iter()
+            .all(|&(hx, hy)| (hx - x).abs().max((hy - y).abs()) >= 2);
+        if spaced {
+            world.set_house(x, y, owner_of(faction));
+            houses.push((x, y));
+        }
+    }
+
+    // The capital sits by the water. If that water is a small inland lake
+    // rather than the open sea, dig a river from it out to the coast so a
+    // cargo ship launched here can still reach the allied shores.
+    if let Some(w) = nearest_water(world, anchor.0, anchor.1, 8) {
+        carve_river_to_sea(world, w, &houses);
+    }
+
+    // Villagers: civilians to gather, knights to defend.
+    let spawns = open_tiles_near(world, anchor.0, anchor.1, 8);
+    for (k, &t) in spawns.iter().step_by(3).take(6).enumerate() {
+        let job = if k < 4 { Job::Civilian } else { Job::Knight };
+        entities.push(Entity::new(faction, job, t));
+    }
+}
+
 fn coastal_start(world: &mut World, r: i32) -> Option<Tile> {
     world.ensure_region(-r, -r, r, r);
     let mut best: Option<(Tile, i32)> = None;
@@ -12204,6 +12301,63 @@ mod tests {
         // Orders naming no realm, or oneself, change nothing.
         assert!(!game.apply(0, Command::ProposeAlliance(0)));
         assert!(!game.apply(0, Command::ProposeAlliance(7)));
+    }
+
+    /// A match of several seats plants one capital per realm, spaced well
+    /// apart and each with its own people, with the first seat a person's and
+    /// the rest the computer's, and every pair of realms at war to start.
+    #[test]
+    fn a_match_plants_a_capital_for_every_seat() {
+        for seed in [1, 3, 7] {
+            let settings = MatchSettings {
+                slots: 4,
+                ai_may_ally: false,
+            };
+            let game = Game::new_match(seed, settings);
+            assert_eq!(game.realm_count(), 4, "seed {seed}");
+            assert_eq!(game.realm(0).controller, Controller::Human);
+            assert!(
+                (1..4).all(|r| game.realm(r).controller == Controller::Ai),
+                "seed {seed}: the computer fills the open seats"
+            );
+            assert!(!game.diplomacy().ai_may_ally);
+            let mut centers = Vec::new();
+            for r in 0..4 {
+                assert_eq!(game.houses(r).len(), 5, "seed {seed}: realm {r}'s capital");
+                assert_eq!(
+                    game.population(r),
+                    6,
+                    "seed {seed}: realm {r}'s first villagers"
+                );
+                centers.push(game.start_center(r));
+            }
+            for a in 0..4 {
+                for b in 0..a {
+                    let d = centers[a].distance(centers[b]);
+                    assert!(
+                        d >= VILLAGE_SPACING as f32,
+                        "seed {seed}: capitals {a} and {b} are only {d:.0} tiles apart"
+                    );
+                    assert!(
+                        game.hostile(Faction::Realm(a as RealmId), Faction::Realm(b as RealmId))
+                    );
+                }
+            }
+            // No rival camp was planted on top of a capital.
+            for enemy in cluster(game.world.houses_of(owner_of(Faction::Enemy))) {
+                let c = village_center(&enemy);
+                assert!(
+                    centers
+                        .iter()
+                        .all(|&k| k.distance(c) >= VILLAGE_SPACING as f32 - 8.0),
+                    "seed {seed}: an enemy camp crowds a capital"
+                );
+            }
+        }
+        // One seat is the single-player world as it always was.
+        let solo = Game::new_match(3, MatchSettings::default());
+        assert_eq!(solo.realm_count(), 1);
+        assert_eq!(solo.houses(0), Game::new(3).houses(0));
     }
 
     /// Orders are how everything reaches a realm: the switches and settings

@@ -57,8 +57,66 @@ pub struct Renderer {
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
     texture_bg: wgpu::BindGroup,
+    /// Kept so `set_atlas` can bind a new atlas texture the same way.
+    texture_bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
 
     egui_renderer: egui_wgpu::Renderer,
+}
+
+/// Upload `atlas` as a texture and bind it with `sampler` under `layout`.
+fn atlas_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    atlas: &Atlas,
+) -> wgpu::BindGroup {
+    let tex_size = wgpu::Extent3d {
+        width: atlas.width,
+        height: atlas.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("atlas"),
+        size: tex_size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &atlas.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * atlas.width),
+            rows_per_image: Some(atlas.height),
+        },
+        tex_size,
+    );
+    let tex_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("texture_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&tex_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }
 
 impl Renderer {
@@ -122,37 +180,6 @@ impl Renderer {
         surface.configure(&device, &config);
 
         // --- atlas texture -------------------------------------------------
-        let tex_size = wgpu::Extent3d {
-            width: atlas.width,
-            height: atlas.height,
-            depth_or_array_layers: 1,
-        };
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("atlas"),
-            size: tex_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &atlas.rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * atlas.width),
-                rows_per_image: Some(atlas.height),
-            },
-            tex_size,
-        );
-        let tex_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("nearest"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -211,20 +238,7 @@ impl Renderer {
                 resource: camera_buf.as_entire_binding(),
             }],
         });
-        let texture_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("texture_bg"),
-            layout: &texture_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&tex_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
+        let texture_bg = atlas_bind_group(&device, &queue, &texture_bgl, &sampler, atlas);
 
         // --- pipeline ------------------------------------------------------
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -322,8 +336,22 @@ impl Renderer {
             camera_buf,
             camera_bg,
             texture_bg,
+            texture_bgl,
+            sampler,
             egui_renderer,
         }
+    }
+
+    /// Swap in a different atlas, as when a match needs sprites for more
+    /// realms than the one built at startup holds.
+    pub fn set_atlas(&mut self, atlas: &Atlas) {
+        self.texture_bg = atlas_bind_group(
+            &self.device,
+            &self.queue,
+            &self.texture_bgl,
+            &self.sampler,
+            atlas,
+        );
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
