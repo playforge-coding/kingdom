@@ -16,8 +16,8 @@ use winit::window::{Window, WindowId};
 use crate::atlas::{self, Atlas, MapColors};
 use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
 use crate::game::{
-    AUTO_ZONE_RADIUS, Anim, AxeWork, CamState, Dir, Entity, Faction, Game, Job, MissileKind,
-    RealmId, SandboxTool, SiteKind, Stroke, tile_at, tile_path,
+    AUTO_ZONE_RADIUS, Anim, AxeWork, BuildMode, CamState, Dir, Entity, Faction, Game, Job,
+    MissileKind, RealmId, SandboxTool, SiteKind, Stroke, tile_at, tile_path,
 };
 use crate::gfx::{Instance, Renderer};
 use crate::save;
@@ -175,6 +175,9 @@ pub struct State {
     /// single-player world has one, and the testing ground's units of
     /// "yours" are its.
     me: RealmId,
+    /// What a left-click on the map orders (see `BuildMode`). HUD state,
+    /// not the game's: it is never saved and never leaves this machine.
+    build_mode: BuildMode,
     /// The save-slot name the HUD's save box edits: prefilled from the slot a
     /// world was loaded from, or with a fresh name when one is created.
     save_name: String,
@@ -205,6 +208,7 @@ impl State {
             menu: MenuState::default(),
             game: None,
             me: 0,
+            build_mode: BuildMode::House,
             save_name: String::new(),
             autosave_timer: 0.0,
             input: Input::default(),
@@ -325,11 +329,13 @@ impl State {
         if let Some(game) = &mut self.game {
             // Settled before the press acts, since the press may cancel the
             // very order that makes this drag an eraser.
-            self.input.drag = game.stroke_at(self.me, world).map(|s| (tile_at(world), s));
+            self.input.drag = game
+                .stroke_at(self.me, self.build_mode, world)
+                .map(|s| (tile_at(world), s));
             if game.sandbox() {
                 game.sandbox_click(world);
             } else {
-                game.try_build(self.me, world);
+                game.try_build(self.me, self.build_mode, world);
             }
         }
     }
@@ -355,7 +361,7 @@ impl State {
         }
         if let Some(game) = &mut self.game {
             for t in tile_path(last, to) {
-                game.stroke_build(self.me, t, stroke);
+                game.stroke_build(self.me, self.build_mode, t, stroke);
             }
         }
     }
@@ -451,6 +457,11 @@ impl State {
                 }
             }
             Action::ToggleOverview => self.toggle_overview(),
+            Action::Order(command) => {
+                if let Some(game) = &mut self.game {
+                    game.apply(self.me, command);
+                }
+            }
         }
     }
 
@@ -1163,6 +1174,7 @@ impl State {
                     UiScene::Game {
                         game,
                         me: self.me,
+                        build_mode: &mut self.build_mode,
                         view,
                         colors: &self.colors,
                         save_name: &mut self.save_name,
