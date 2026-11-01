@@ -86,7 +86,10 @@ The format is versioned so it can grow without stranding anyone: a newer build
 keeps loading the saves older supported versions wrote, filling in whatever
 they predate with sensible defaults (a save from before settler ships simply
 loads with none at sea, and one from before the enemy and allied navies loads
-every warship as yours). Only a save written by a *newer* build than the one
+every warship as yours). Where a section changed shape, the loader converts
+it: saves from before version 20 stored houses as three separate layers (yours,
+the enemy's, and the allies'), which are folded into the single per-tile owner
+layer the world keeps now. Only a save written by a *newer* build than the one
 loading it, or one older than the loader still supports, is refused.
 
 ## Where they live

@@ -29,11 +29,18 @@ pub struct Node {
     pub amount: u32,
 }
 
-/// A defensive wall tile. `owner` is a faction tag (0 = player, 1 = enemy);
-/// walls block the *other* faction and take a while to break down.
+/// Who a structure belongs to, as the world stores it on each tile. The
+/// mapping to factions lives in `game` (`owner_of` / `faction_of`): 0 is the
+/// first realm, 1 the enemy, 2 the allies, and 3 upward further realms.
+/// Widening this type is the one change needed to allow more owners than a
+/// byte can tell apart; nothing else is sized by it.
+pub type Owner = u8;
+
+/// A defensive wall tile. Walls block every owner but their own and take a
+/// while to break down.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Wall {
-    pub owner: u8,
+    pub owner: Owner,
     pub hp: f32,
 }
 
@@ -41,22 +48,22 @@ pub struct Wall {
 /// while to destroy; `occupants` is how many farmers are sheltering within.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Hut {
-    pub owner: u8,
+    pub owner: Owner,
     pub hp: f32,
     pub occupants: u8,
 }
 
-/// Owner value used by faction-agnostic queries so that *any* wall blocks.
-pub const NO_OWNER: u8 = 255;
+/// Owner value used by faction-agnostic queries so that *any* wall blocks,
+/// and the value of an empty slot in the per-tile owner layers.
+pub const NO_OWNER: Owner = 255;
 
 pub struct Chunk {
     pub tiles: Vec<Tile>,
     pub nodes: Vec<Option<Node>>,
-    pub houses: Vec<bool>,
-    pub enemy_houses: Vec<bool>,
-    /// Allied houses: a friendly third faction that trades with the player and
-    /// fights the enemy, but never joins the player's own battles.
-    pub ally_houses: Vec<bool>,
+    /// Who holds the house on each tile, or `NO_OWNER` where there is none.
+    /// A single layer for every faction, so a village can change hands by
+    /// rewriting the owner and any number of realms can share the map.
+    pub house_owner: Vec<Owner>,
     pub bridges: Vec<bool>,
     pub walls: Vec<Option<Wall>>,
     /// Player-built mines: bottomless stone sources farmers work at.
@@ -74,9 +81,7 @@ impl Chunk {
         Chunk {
             tiles: vec![Tile::Grass; CHUNK_TILES],
             nodes: vec![None; CHUNK_TILES],
-            houses: vec![false; CHUNK_TILES],
-            enemy_houses: vec![false; CHUNK_TILES],
-            ally_houses: vec![false; CHUNK_TILES],
+            house_owner: vec![NO_OWNER; CHUNK_TILES],
             bridges: vec![false; CHUNK_TILES],
             walls: vec![None; CHUNK_TILES],
             caves: vec![false; CHUNK_TILES],
@@ -91,9 +96,7 @@ impl Chunk {
     fn same_content(&self, other: &Chunk) -> bool {
         self.tiles == other.tiles
             && self.nodes == other.nodes
-            && self.houses == other.houses
-            && self.enemy_houses == other.enemy_houses
-            && self.ally_houses == other.ally_houses
+            && self.house_owner == other.house_owner
             && self.bridges == other.bridges
             && self.walls == other.walls
             && self.caves == other.caves
@@ -117,10 +120,10 @@ fn li(lx: i32, ly: i32) -> usize {
 pub struct World {
     seed: i32,
     chunks: HashMap<(i32, i32), Chunk>,
-    /// Global tiles occupied by enemy houses, for spawning.
-    pub enemy_house_tiles: Vec<(i32, i32)>,
-    /// Global tiles occupied by allied houses, for spawning and sea trade.
-    pub ally_house_tiles: Vec<(i32, i32)>,
+    /// Every house tile on the map by owner, kept in step with the chunks'
+    /// `house_owner` layers, so spawning, trade and village surveys never
+    /// scan the whole world. Read through `houses_of`.
+    house_tiles: HashMap<Owner, Vec<(i32, i32)>>,
     /// A flat world: every chunk is bare, endless grass with no water, trees,
     /// rocks or settlements, instead of terrain generated from the seed. This
     /// is the testing ground's empty grid (see `Game::new_sandbox`).
@@ -132,8 +135,7 @@ impl World {
         World {
             seed,
             chunks: HashMap::default(),
-            enemy_house_tiles: Vec::new(),
-            ally_house_tiles: Vec::new(),
+            house_tiles: HashMap::default(),
             flat: false,
         }
     }
@@ -159,8 +161,7 @@ impl World {
             return;
         }
         self.chunks.clear();
-        self.enemy_house_tiles.clear();
-        self.ally_house_tiles.clear();
+        self.house_tiles.clear();
     }
 
     /// Rebuild a world from a saved seed + explicit chunks (used on load).
@@ -173,8 +174,7 @@ impl World {
             chunk.dirty = !chunk.same_content(&generate_chunk(seed, cx, cy));
             w.chunks.insert((cx, cy), chunk);
         }
-        w.rescan_enemy_houses();
-        w.rescan_ally_houses();
+        w.rescan_houses();
         w
     }
 
@@ -201,35 +201,44 @@ impl World {
         out
     }
 
-    pub fn rescan_enemy_houses(&mut self) {
-        self.enemy_house_tiles.clear();
-        let coords: Vec<(i32, i32)> = self.chunks.keys().copied().collect();
-        for (cx, cy) in coords {
-            let chunk = &self.chunks[&(cx, cy)];
+    /// Every house tile `owner` holds, in the order they were raised (or
+    /// found by the last rescan). Empty for an owner with no houses.
+    pub fn houses_of(&self, owner: Owner) -> &[(i32, i32)] {
+        self.house_tiles.get(&owner).map_or(&[], Vec::as_slice)
+    }
+
+    /// Rebuild the per-owner house lists from the loaded chunks. The lists
+    /// come out sorted by tile, so a rescanned world reads the same whatever
+    /// order its chunks were loaded in.
+    pub fn rescan_houses(&mut self) {
+        self.house_tiles.clear();
+        for (&(cx, cy), chunk) in &self.chunks {
             for ly in 0..CHUNK {
                 for lx in 0..CHUNK {
-                    if chunk.enemy_houses[li(lx, ly)] {
-                        self.enemy_house_tiles
+                    let owner = chunk.house_owner[li(lx, ly)];
+                    if owner != NO_OWNER {
+                        self.house_tiles
+                            .entry(owner)
+                            .or_default()
                             .push((cx * CHUNK + lx, cy * CHUNK + ly));
                     }
                 }
             }
         }
+        for tiles in self.house_tiles.values_mut() {
+            tiles.sort_unstable();
+        }
     }
 
-    pub fn rescan_ally_houses(&mut self) {
-        self.ally_house_tiles.clear();
-        let coords: Vec<(i32, i32)> = self.chunks.keys().copied().collect();
-        for (cx, cy) in coords {
-            let chunk = &self.chunks[&(cx, cy)];
-            for ly in 0..CHUNK {
-                for lx in 0..CHUNK {
-                    if chunk.ally_houses[li(lx, ly)] {
-                        self.ally_house_tiles
-                            .push((cx * CHUNK + lx, cy * CHUNK + ly));
-                    }
-                }
-            }
+    /// Note a house tile in `owner`'s list, moving it out of any other owner's.
+    fn track_house(&mut self, x: i32, y: i32, owner: Owner) {
+        self.untrack_house(x, y);
+        self.house_tiles.entry(owner).or_default().push((x, y));
+    }
+
+    fn untrack_house(&mut self, x: i32, y: i32) {
+        for tiles in self.house_tiles.values_mut() {
+            tiles.retain(|&t| t != (x, y));
         }
     }
 
@@ -327,17 +336,15 @@ impl World {
         self.chunk_at(x, y)
             .and_then(|c| c.nodes[li(local_of(x), local_of(y))])
     }
+    /// Who holds the house on this tile, if anyone does.
+    pub fn house_owner(&self, x: i32, y: i32) -> Option<Owner> {
+        self.chunk_at(x, y)
+            .map(|c| c.house_owner[li(local_of(x), local_of(y))])
+            .filter(|&o| o != NO_OWNER)
+    }
+    /// Is there a house of any owner on this tile?
     pub fn is_house(&self, x: i32, y: i32) -> bool {
-        self.chunk_at(x, y)
-            .is_some_and(|c| c.houses[li(local_of(x), local_of(y))])
-    }
-    pub fn is_enemy_house(&self, x: i32, y: i32) -> bool {
-        self.chunk_at(x, y)
-            .is_some_and(|c| c.enemy_houses[li(local_of(x), local_of(y))])
-    }
-    pub fn is_ally_house(&self, x: i32, y: i32) -> bool {
-        self.chunk_at(x, y)
-            .is_some_and(|c| c.ally_houses[li(local_of(x), local_of(y))])
+        self.house_owner(x, y).is_some()
     }
     pub fn is_bridge(&self, x: i32, y: i32) -> bool {
         self.chunk_at(x, y)
@@ -378,9 +385,7 @@ impl World {
         }
         c.tiles[i] == Tile::Grass
             && c.nodes[i].is_none()
-            && !c.houses[i]
-            && !c.enemy_houses[i]
-            && !c.ally_houses[i]
+            && c.house_owner[i] == NO_OWNER
             && !c.caves[i]
             && c.huts[i].is_none()
     }
@@ -401,9 +406,7 @@ impl World {
             return true;
         }
         c.tiles[i] == Tile::Grass
-            && !c.houses[i]
-            && !c.enemy_houses[i]
-            && !c.ally_houses[i]
+            && c.house_owner[i] == NO_OWNER
             && !c.caves[i]
             && c.huts[i].is_none()
     }
@@ -415,9 +418,7 @@ impl World {
         let i = li(local_of(x), local_of(y));
         c.tiles[i] == Tile::Grass
             && c.nodes[i].is_none()
-            && !c.houses[i]
-            && !c.enemy_houses[i]
-            && !c.ally_houses[i]
+            && c.house_owner[i] == NO_OWNER
             && !c.bridges[i]
             && c.walls[i].is_none()
             && !c.caves[i]
@@ -434,29 +435,27 @@ impl World {
 
     // --- mutators ----------------------------------------------------------
 
-    pub fn set_house(&mut self, x: i32, y: i32, v: bool) {
+    /// Put `owner`'s house on a tile: raising a new one, or handing over the
+    /// house already standing there (how a captured village changes hands).
+    /// Whatever else was on the tile is left alone; callers check it is open
+    /// grass first.
+    pub fn set_house(&mut self, x: i32, y: i32, owner: Owner) {
         self.ensure(chunk_of(x), chunk_of(y));
         if let Some(c) = self.chunk_at_mut(x, y) {
-            c.houses[li(local_of(x), local_of(y))] = v;
-        }
-    }
-    /// Convert a single house tile to a faction (0 = player, 1 = enemy).
-    pub fn convert_house(&mut self, x: i32, y: i32, to_owner: u8) {
-        self.ensure(chunk_of(x), chunk_of(y));
-        if let Some(c) = self.chunk_at_mut(x, y) {
-            let i = li(local_of(x), local_of(y));
-            if to_owner == 0 {
-                c.enemy_houses[i] = false;
-                c.houses[i] = true;
-            } else {
-                c.houses[i] = false;
-                c.enemy_houses[i] = true;
-            }
+            c.house_owner[li(local_of(x), local_of(y))] = owner;
+            self.track_house(x, y, owner);
         }
     }
 
     /// Re-own any walls within `radius` of `(x, y)` that belong to `from_owner`.
-    pub fn reown_walls_near(&mut self, x: i32, y: i32, radius: i32, from_owner: u8, to_owner: u8) {
+    pub fn reown_walls_near(
+        &mut self,
+        x: i32,
+        y: i32,
+        radius: i32,
+        from_owner: Owner,
+        to_owner: Owner,
+    ) {
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 let (nx, ny) = (x + dx, y + dy);
@@ -483,16 +482,13 @@ impl World {
             let i = li(local_of(x), local_of(y));
             c.tiles[i] = Tile::Grass;
             c.nodes[i] = None;
-            c.houses[i] = false;
-            c.enemy_houses[i] = false;
-            c.ally_houses[i] = false;
+            c.house_owner[i] = NO_OWNER;
             c.bridges[i] = false;
             c.walls[i] = None;
             c.caves[i] = false;
             c.huts[i] = None;
         }
-        self.enemy_house_tiles.retain(|&t| t != (x, y));
-        self.ally_house_tiles.retain(|&t| t != (x, y));
+        self.untrack_house(x, y);
     }
 
     /// Turn a tile into open water, clearing whatever sat on it. Used to carve
@@ -515,7 +511,7 @@ impl World {
     }
 
     /// Raise a hut (clearing whatever node was on the tile).
-    pub fn set_hut(&mut self, x: i32, y: i32, owner: u8, hp: f32) {
+    pub fn set_hut(&mut self, x: i32, y: i32, owner: Owner, hp: f32) {
         self.ensure(chunk_of(x), chunk_of(y));
         if let Some(c) = self.chunk_at_mut(x, y) {
             let i = li(local_of(x), local_of(y));
@@ -564,7 +560,7 @@ impl World {
         None
     }
 
-    pub fn set_wall(&mut self, x: i32, y: i32, owner: u8, hp: f32) {
+    pub fn set_wall(&mut self, x: i32, y: i32, owner: Owner, hp: f32) {
         self.ensure(chunk_of(x), chunk_of(y));
         if let Some(c) = self.chunk_at_mut(x, y) {
             c.walls[li(local_of(x), local_of(y))] = Some(Wall { owner, hp });
@@ -615,60 +611,50 @@ impl World {
         Some(kind)
     }
 
-    /// Plant a camp near a tile, spacing houses on grass. `owner` tags the camp
-    /// (1 = enemy, 2 = ally). Used once at world creation so there is always a
-    /// rival (and a trade partner) established on the island.
-    pub fn plant_camp(&mut self, center: (i32, i32), count: usize, owner: u8) {
+    /// Plant a camp near a tile, spacing `count` of `owner`'s houses on grass,
+    /// and return the tiles they went on. Used at world creation so there is
+    /// always a rival (and a trade partner) established on the island, and
+    /// whenever a new village is founded afterward.
+    pub fn plant_camp(
+        &mut self,
+        center: (i32, i32),
+        count: usize,
+        owner: Owner,
+    ) -> Vec<(i32, i32)> {
         let (cx0, cy0) = center;
         self.ensure_region(cx0 - 6, cy0 - 6, cx0 + 6, cy0 + 6);
-        let mut placed = 0;
+        let mut placed = Vec::new();
         'outer: for ry in -4..=4i32 {
             for rx in -4..=4i32 {
-                if placed >= count {
+                if placed.len() >= count {
                     break 'outer;
                 }
                 if rx.rem_euclid(3) != 0 || ry.rem_euclid(3) != 0 {
                     continue;
                 }
                 let (x, y) = (cx0 + rx, cy0 + ry);
-                if self.tile(x, y) == Tile::Grass {
-                    if let Some(c) = self.chunk_at_mut(x, y) {
-                        let i = li(local_of(x), local_of(y));
-                        c.nodes[i] = None;
-                        if owner == 2 {
-                            c.ally_houses[i] = true;
-                        } else {
-                            c.enemy_houses[i] = true;
-                        }
-                    }
-                    if owner == 2 {
-                        self.ally_house_tiles.push((x, y));
-                    } else {
-                        self.enemy_house_tiles.push((x, y));
-                    }
-                    placed += 1;
+                if self.plant_house(x, y, owner) {
+                    placed.push((x, y));
                 }
             }
         }
 
         // Give the camp a couple of huts for its farmers to shelter in.
         self.plant_camp_huts(center, owner);
+        placed
     }
 
-    /// Raise a single faction house on open grass: how an established camp
-    /// grows. `owner` tags it as in `plant_camp` (1 = enemy, 2 = ally).
-    pub fn plant_faction_house(&mut self, x: i32, y: i32, owner: u8) {
+    /// Raise a single house for `owner` on a grass tile, felling whatever tree
+    /// or rock stood there: how an established camp grows. False, and nothing
+    /// changed, if the tile is water.
+    pub fn plant_house(&mut self, x: i32, y: i32, owner: Owner) -> bool {
         self.ensure(chunk_of(x), chunk_of(y));
         let planted = match self.chunk_at_mut(x, y) {
             Some(c) => {
                 let i = li(local_of(x), local_of(y));
                 if c.tiles[i] == Tile::Grass {
                     c.nodes[i] = None;
-                    if owner == 2 {
-                        c.ally_houses[i] = true;
-                    } else {
-                        c.enemy_houses[i] = true;
-                    }
+                    c.house_owner[i] = owner;
                     true
                 } else {
                     false
@@ -677,16 +663,13 @@ impl World {
             None => false,
         };
         if planted {
-            if owner == 2 {
-                self.ally_house_tiles.push((x, y));
-            } else {
-                self.enemy_house_tiles.push((x, y));
-            }
+            self.track_house(x, y, owner);
         }
+        planted
     }
 
     /// Scatter a couple of huts around a camp for its farmers to shelter in.
-    fn plant_camp_huts(&mut self, center: (i32, i32), owner: u8) {
+    fn plant_camp_huts(&mut self, center: (i32, i32), owner: Owner) {
         let (cx0, cy0) = center;
         let mut huts = 0;
         'huts: for ry in -4..=4i32 {
@@ -695,9 +678,8 @@ impl World {
                     break 'huts;
                 }
                 let (x, y) = (cx0 + rx, cy0 + ry);
-                let taken = self.is_enemy_house(x, y) || self.is_ally_house(x, y);
                 if self.tile(x, y) == Tile::Grass
-                    && !taken
+                    && !self.is_house(x, y)
                     && self.hut(x, y).is_none()
                     && (rx != 0 || ry != 0)
                     && rx.rem_euclid(2) == 0

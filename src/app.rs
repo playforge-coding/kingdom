@@ -537,12 +537,13 @@ impl State {
                 if world.is_bridge(x, y) {
                     bridges.push((x, y));
                 }
-                if world.is_house(x, y) {
-                    out.push(quad(p, [1.0, 1.0], house));
-                } else if world.is_enemy_house(x, y) {
-                    out.push(quad(p, [1.0, 1.0], enemy_house));
-                } else if world.is_ally_house(x, y) {
-                    out.push(quad(p, [1.0, 1.0], ally_house));
+                if let Some(owner) = world.house_owner(x, y) {
+                    let uv = match owner {
+                        0 => house,
+                        2 => ally_house,
+                        _ => enemy_house,
+                    };
+                    out.push(quad(p, [1.0, 1.0], uv));
                 } else if world.is_cave(x, y) {
                     out.push(quad(p, [1.0, 1.0], cave));
                 } else if let Some(h) = world.hut(x, y) {
@@ -990,10 +991,10 @@ impl State {
         for &t in game.player_houses() {
             house(t, c.player, mark);
         }
-        for &t in &world.enemy_house_tiles {
+        for &t in world.houses_of(1) {
             house(t, c.enemy, mark);
         }
-        for &t in &world.ally_house_tiles {
+        for &t in world.houses_of(2) {
             house(t, c.ally, mark);
         }
         for &(x, y) in game.huts() {
