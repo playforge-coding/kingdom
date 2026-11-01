@@ -10948,7 +10948,12 @@ impl Game {
         first.auto_zones = auto_zones;
         first.bridges = bridges;
         let mut realms = vec![first];
-        if version >= 20 {
+        // The realm section. The first builds to write version 20 (the
+        // per-tile house owner layer) ended the file before it, and the
+        // section came in under the same number, so a version 20 file that
+        // ends here is that earlier layout: one realm, as the header says.
+        let realm_section = version >= 21 || (version == 20 && r.p < data.len());
+        if realm_section {
             let count = r.u8()? as usize;
             let mut saved = Vec::with_capacity(count);
             for _ in 0..count {
@@ -11577,6 +11582,37 @@ mod tests {
             loaded.world.houses_of(owner_of(Faction::Realm(0))).len(),
             game.world.houses_of(owner_of(Faction::Realm(0))).len()
         );
+    }
+
+    /// The first builds to write version 20 (the per-tile house owner layer)
+    /// ended the file where the realm section now begins, and that section
+    /// came in under the same version number. Such a file must still load,
+    /// as the one realm its header describes.
+    #[test]
+    fn loads_a_v20_save_written_before_the_realm_section() {
+        let mut game = Game::new(3);
+        game.realm_mut(0).money = 321;
+        game.realm_mut(0).wood = 45;
+        let mut bytes = game.to_bytes(CAM);
+        // The realm and owner sections, and the v21 diplomacy after them.
+        bytes.truncate(bytes.len() - v20_tail_len(&game));
+        bytes[4] = 20;
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("an early v20 save no longer loads");
+        assert_eq!(loaded.realm_count(), 1);
+        assert_eq!(loaded.realm(0).money, 321);
+        assert_eq!(loaded.realm(0).wood, 45);
+        assert_eq!(loaded.houses(0).len(), game.houses(0).len());
+        assert_eq!(loaded.entities.len(), game.entities.len());
+
+        // A version 20 file that does carry the realm section still reads it.
+        let mut bytes = game.to_bytes(CAM);
+        let n = game.realms.len();
+        let rel = &game.diplomacy;
+        let diplomacy = n * n + (4 + 2 * rel.proposals.len()) + (4 + 6 * rel.notices.len()) + 1;
+        bytes.truncate(bytes.len() - diplomacy);
+        bytes[4] = 20;
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("a later v20 save no longer loads");
+        assert_eq!(loaded.realm(0).money, 321);
     }
 
     #[test]
