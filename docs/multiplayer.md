@@ -13,9 +13,26 @@ single-player world plays.
 
 ## Hosting a server
 
-The server is its own program, `kingdom-server`, in the same repository. It
-runs headless, so any machine on the network can host, including one without
-a screen. Build and start it with:
+### From the game
+
+The native game can host a server itself. In the main menu's
+**Multiplayer** section, pick a port (7777 unless you change it) and press
+**Host**. The game starts a server in the background, connects you to it,
+and shows the address to give the others, such as `192.168.1.20:7777`. From
+there you open a room like anyone else. **Stop Hosting** shuts the server
+down and ends every match on it, and so does quitting the game.
+
+A server hosted this way uses the default limits from the table below. The
+first time you host, your system may ask whether the game may accept
+incoming connections; allow it, or nobody else can reach you. The web build
+can't host, because a browser page can't listen for connections.
+
+### On its own
+
+The server is also its own program, `kingdom-server`, in the same
+repository. It runs headless, so any machine on the network can host,
+including one without a screen, and it can serve the web build. Build and
+start it with:
 
 ```sh
 trunk build --release                                # the web build, into dist/
@@ -43,7 +60,8 @@ saved, so stopping it ends them.
 
 ## Joining a match
 
-The main menu has a **Multiplayer** section. Type the server's address (the
+If you host from the game, you are already connected. Otherwise, the main
+menu has a **Multiplayer** section. Type the server's address (the
 port defaults to 7777, so `192.168.1.20` is enough), pick a name, and press
 **Connect**. Nothing touches the network until you do.
 

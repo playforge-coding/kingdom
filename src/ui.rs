@@ -53,6 +53,14 @@ pub enum Action {
     },
     /// Close the connection to the match server.
     Disconnect,
+    /// Start a match server inside the game on this port (as typed) and
+    /// connect to it under this name. Native builds only.
+    Host {
+        port: String,
+        name: String,
+    },
+    /// Shut down the server this game hosts.
+    StopHosting,
     /// Something for the match server's lobby: open, join or leave a room,
     /// or start the match.
     Lobby(ClientMsg),
@@ -66,6 +74,20 @@ pub struct View {
     pub half: Vec2,
     /// Zoomed out past full detail.
     pub overview: bool,
+}
+
+/// Whether this game can host a match server itself, and whether it is.
+#[derive(Clone, Debug, PartialEq)]
+// The web build only ever says `Unavailable`.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub enum Hosting {
+    /// The web build, which can't listen for connections.
+    Unavailable,
+    Off,
+    /// Hosting; `share` is the address to give the other players.
+    On {
+        share: String,
+    },
 }
 
 /// Mutable state backing the menu's widgets.
@@ -85,6 +107,8 @@ pub struct MenuState {
     /// The name and setup of a room this player opens on a server.
     pub room_name: String,
     pub room_settings: MatchSettings,
+    /// The port to host a server on, as typed.
+    pub host_port: String,
     /// Why the last attempt to connect could not even begin (a malformed
     /// address, say). A connection that fails later says why itself.
     pub connect_error: Option<String>,
@@ -96,6 +120,7 @@ impl MenuState {
             server: crate::online::default_server(),
             player_name: "Player".into(),
             room_name: "My room".into(),
+            host_port: crate::online::DEFAULT_PORT.to_string(),
             room_settings: MatchSettings {
                 slots: 2,
                 ..MatchSettings::default()
@@ -161,6 +186,7 @@ pub enum Scene<'a> {
         has_game: bool,
         /// The connection to a match server, if the player made one.
         online: Option<&'a Online>,
+        hosting: Hosting,
     },
     Game {
         game: &'a mut Game,
@@ -247,7 +273,8 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
             slots,
             has_game,
             online,
-        } => menu_ui(ui, menu, slots, *has_game, *online),
+            hosting,
+        } => menu_ui(ui, menu, slots, *has_game, *online, hosting),
         Scene::Game {
             game,
             me,
@@ -278,6 +305,7 @@ fn menu_ui(
     slots: &[String],
     has_game: bool,
     online: Option<&Online>,
+    hosting: &Hosting,
 ) -> Option<Action> {
     let mut action = None;
     egui::CentralPanel::default().show(ui, |ui| {
@@ -391,7 +419,7 @@ fn menu_ui(
                     ui.add_space(24.0);
                     ui.separator();
                     ui.add_space(8.0);
-                    if let Some(a) = multiplayer_ui(ui, menu, online) {
+                    if let Some(a) = multiplayer_ui(ui, menu, online, hosting) {
                         action = Some(a);
                     }
                     ui.add_space(24.0);
@@ -407,6 +435,7 @@ fn multiplayer_ui(
     ui: &mut egui::Ui,
     menu: &mut MenuState,
     online: Option<&Online>,
+    hosting: &Hosting,
 ) -> Option<Action> {
     let mut action = None;
     ui.add(WidgetAtom::new((
@@ -414,6 +443,19 @@ fn multiplayer_ui(
         RichText::new("Multiplayer").strong(),
     )));
     ui.add_space(4.0);
+    if let Hosting::On { share } = hosting {
+        ui.horizontal(|ui| {
+            ui.label(format!("Hosting a server. Others connect to {share}"));
+            if ui
+                .button((icon(ui, icons::X), "Stop Hosting"))
+                .on_hover_text("Shuts the server down, ending every match on it.")
+                .clicked()
+            {
+                action = Some(Action::StopHosting);
+            }
+        });
+        ui.add_space(4.0);
+    }
 
     let Some(online) = online.filter(|o| o.status == Status::Connected) else {
         // Not connected (or still trying): the address and name to use.
@@ -447,6 +489,27 @@ fn multiplayer_ui(
                 name: menu.player_name.clone(),
             });
         }
+        if *hosting == Hosting::Off {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Or host a server here, on port");
+                ui.add(egui::TextEdit::singleline(&mut menu.host_port).desired_width(48.0));
+                if ui
+                    .button((icon(ui, icons::PLUS), "Host"))
+                    .on_hover_text(
+                        "Runs a match server inside the game and connects you to it. \
+                         Others on your network join with your address. It stops when \
+                         you stop hosting or quit.",
+                    )
+                    .clicked()
+                {
+                    action = Some(Action::Host {
+                        port: menu.host_port.clone(),
+                        name: menu.player_name.clone(),
+                    });
+                }
+            });
+        }
         let failed = match online.map(|o| &o.status) {
             Some(Status::Failed(why)) => Some(why),
             _ => menu.connect_error.as_ref(),
@@ -456,10 +519,13 @@ fn multiplayer_ui(
             ui.colored_label(ui.visuals().warn_fg_color, why);
         }
         ui.add_space(4.0);
-        ui.small(
+        ui.small(if *hosting == Hosting::Unavailable {
             "Run kingdom-server on any machine to host rooms. Every seat nobody \
-             takes is played by the computer.",
-        );
+             takes is played by the computer."
+        } else {
+            "Host from here, or run kingdom-server on any machine. Every seat \
+             nobody takes is played by the computer."
+        });
         return action;
     };
 
