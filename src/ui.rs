@@ -12,7 +12,7 @@ use winit::window::Window;
 use crate::atlas::MapColors;
 use crate::game::{
     AXEMAN_GOLD_COST, AlertKind, AlertResponse, BOWMAN_GOLD_COST, BRIDGE_WOOD_COST,
-    BUILD_NEAR_RADIUS, BUILDER_WAGE, Brush, BuildMode, ESCORT_HIRE_COST, Faction, Game,
+    BUILD_NEAR_RADIUS, BUILDER_WAGE, Brush, BuildMode, Command, ESCORT_HIRE_COST, Faction, Game,
     GatherPriority, HORSEMAN_GOLD_COST, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
     HUT_GOLD_COST, Job, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, LEVY_SERVICE, LaunchRefusal, MAX_ESCORTS,
     MINE_GOLD_COST, MINE_STONE_COST, Priority, RealmId, SETTLER_CIVILIANS,
@@ -41,6 +41,8 @@ pub enum Action {
         zoom_in: bool,
     },
     ToggleOverview,
+    /// Give the player's realm an order.
+    Order(Command),
 }
 
 /// Where the camera is looking, for the minimap and the village list.
@@ -122,6 +124,8 @@ pub enum Scene<'a> {
         /// The realm this player runs: whose stockpile, flags and alerts the
         /// HUD shows and whose orders its buttons give.
         me: RealmId,
+        /// What a left-click on the map orders; the HUD's radio buttons set it.
+        build_mode: &'a mut BuildMode,
         view: View,
         colors: &'a MapColors,
         /// The slot name the HUD's save box edits.
@@ -202,6 +206,7 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
         Scene::Game {
             game,
             me,
+            build_mode,
             view,
             colors,
             save_name,
@@ -214,7 +219,7 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
                 let alert = alerts_ui(&ctx, game, *me, *view);
                 return hud.or(alert);
             }
-            let hud = game_ui(&ctx, game, *me, save_name);
+            let hud = game_ui(&ctx, game, *me, build_mode, save_name);
             let realm = realm_ui(&ctx, game, *me, *view, colors, minimap);
             let alert = alerts_ui(&ctx, game, *me, *view);
             hud.or(realm).or(alert)
@@ -476,11 +481,17 @@ fn sandbox_ui(
 
 fn game_ui(
     ctx: &egui::Context,
-    game: &mut Game,
+    game: &Game,
     me: RealmId,
+    build_mode: &mut BuildMode,
     save_name: &mut String,
 ) -> Option<Action> {
     let mut action = None;
+    // Every button that changes the realm goes through an order, so the
+    // panel reads the game and never writes it. The last order of a frame
+    // wins, which is fine: a frame holds one click.
+    let mut ordered = None;
+    let mut order = |cmd: Command| ordered = Some(cmd);
     egui::Window::new("Kingdom")
         .default_pos([12.0, 12.0])
         .resizable(false)
@@ -511,29 +522,32 @@ fn game_ui(
             ui.separator();
 
             ui.heading("Priority");
-            let realm = game.realm_mut(me);
+            let mut priority = realm.priority;
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut realm.priority, Priority::Agriculture,
+                ui.selectable_value(&mut priority, Priority::Agriculture,
                     (icon(ui, icons::WHEAT), "Agriculture"),
                 );
-                ui.selectable_value(&mut realm.priority, Priority::Military,
+                ui.selectable_value(&mut priority, Priority::Military,
                     (icon(ui, icons::SWORDS), "Military"),
                 );
             });
+            if priority != realm.priority {
+                order(Command::SetPriority(priority));
+            }
+            let mut gather = realm.gather_priority;
             ui.horizontal(|ui| {
                 ui.label("Gather:");
-                ui.selectable_value(
-                    &mut realm.gather_priority,
-                    GatherPriority::Balanced,
-                    "Balanced",
-                );
-                ui.selectable_value(&mut realm.gather_priority, GatherPriority::Wood,
+                ui.selectable_value(&mut gather, GatherPriority::Balanced, "Balanced");
+                ui.selectable_value(&mut gather, GatherPriority::Wood,
                     (icon(ui, icons::TREE_PINE), "Wood"),
                 );
-                ui.selectable_value(&mut realm.gather_priority, GatherPriority::Stone,
+                ui.selectable_value(&mut gather, GatherPriority::Stone,
                     (icon(ui, icons::MOUNTAIN), "Stone"),
                 );
             });
+            if gather != realm.gather_priority {
+                order(Command::SetGatherPriority(gather));
+            }
             ui.separator();
 
             ui.heading("Proclamations");
@@ -545,7 +559,7 @@ fn game_ui(
                 )
                 .clicked()
             {
-                game.proclaim_draft(me);
+                order(Command::ProclaimDraft);
             }
             if let Some(secs) = game.realm(me).levy_term_remaining() {
                 icon_label(
@@ -581,7 +595,7 @@ fn game_ui(
                  it). Click a pending site to cancel and refund it."
             ));
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::House,
                 format!(
                     "House  ({HOUSE_WOOD_COST} wood, {HOUSE_STONE_COST} stone, {} gold)",
@@ -589,12 +603,12 @@ fn game_ui(
                 ),
             );
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::Bridge,
                 format!("Bridge  ({BRIDGE_WOOD_COST} wood)"),
             );
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::Mine,
                 (
                     icon(ui, icons::PICKAXE),
@@ -605,7 +619,7 @@ fn game_ui(
                 ),
             );
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::Wall,
                 (
                     icon(ui, icons::BRICK_WALL),
@@ -616,7 +630,7 @@ fn game_ui(
                 ),
             );
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::Hut,
                 (
                     icon(ui, icons::TENT),
@@ -624,24 +638,27 @@ fn game_ui(
                 ),
             );
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::AutoZone,
                 (
                     icon(ui, icons::MAP),
                     "Builder zone  (click to mark or clear an area)",
                 ),
             );
-            ui.checkbox(
-                &mut game.realm_mut(me).auto_build,
-                "Let builders build on their own in zones",
-            );
+            let mut auto_build = realm.auto_build;
+            if ui
+                .checkbox(&mut auto_build, "Let builders build on their own in zones")
+                .changed()
+            {
+                order(Command::SetAutoBuild(auto_build));
+            }
             ui.small("While this is on, builders keep raising houses inside your zones.");
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::Rally,
                 (icon(ui, icons::FLAG), "Rally knights"),
             );
-            let flags = game.realm(me).rallies().len();
+            let flags = realm.rallies().len();
             if flags > 0
                 && ui
                     .button((
@@ -650,7 +667,7 @@ fn game_ui(
                     ))
                     .clicked()
             {
-                game.realm_mut(me).clear_rally();
+                order(Command::ClearRallies);
             }
             ui.small(
                 "Plant as many flags as you like: your soldiers split up among them, nearest \
@@ -658,7 +675,7 @@ fn game_ui(
                  arrives.",
             );
             // Hired help: an allied company that answers the flag.
-            if game.realm(me).player_flag()
+            if realm.player_flag()
                 && ui
                     .button((
                         icon(ui, icons::SWORDS),
@@ -669,7 +686,7 @@ fn game_ui(
                     ))
                     .clicked()
             {
-                game.hire_mercenaries(me);
+                order(Command::HireMercenaries);
             }
             let mercs = game.mercenaries(me);
             let companies = game
@@ -699,7 +716,7 @@ fn game_ui(
 
             ui.heading("Trade");
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::Ship,
                 (
                     icon(ui, icons::SHIP),
@@ -708,25 +725,28 @@ fn game_ui(
             );
             // Adjust the cargo the next ship carries. Load is capped to the
             // stockpile when the ship is actually dispatched.
-            let realm = game.realm_mut(me);
+            let (mut wood, mut stone) = (realm.ship_wood, realm.ship_stone);
             ui.horizontal(|ui| {
-                icon_label(ui, icons::TREE_PINE, format!("Wood: {}", realm.ship_wood));
+                icon_label(ui, icons::TREE_PINE, format!("Wood: {wood}"));
                 if ui.small_button(icon(ui, icons::MINUS)).clicked() {
-                    realm.ship_wood = realm.ship_wood.saturating_sub(5);
+                    wood = wood.saturating_sub(5);
                 }
                 if ui.small_button(icon(ui, icons::PLUS)).clicked() {
-                    realm.ship_wood += 5;
+                    wood += 5;
                 }
             });
             ui.horizontal(|ui| {
-                icon_label(ui, icons::MOUNTAIN, format!("Stone: {}", realm.ship_stone));
+                icon_label(ui, icons::MOUNTAIN, format!("Stone: {stone}"));
                 if ui.small_button(icon(ui, icons::MINUS)).clicked() {
-                    realm.ship_stone = realm.ship_stone.saturating_sub(5);
+                    stone = stone.saturating_sub(5);
                 }
                 if ui.small_button(icon(ui, icons::PLUS)).clicked() {
-                    realm.ship_stone += 5;
+                    stone += 5;
                 }
             });
+            if (wood, stone) != (realm.ship_wood, realm.ship_stone) {
+                order(Command::SetCargo { wood, stone });
+            }
             icon_label(
                 ui,
                 icons::COINS,
@@ -736,16 +756,19 @@ fn game_ui(
                 ),
             );
             ui.small("Ships sail to the nearest allied coast, banking gold on arrival.");
-            ui.checkbox(
-                &mut realm.auto_trade,
-                "Send cargo ships out on their own",
-            );
+            let mut auto_trade = realm.auto_trade;
+            if ui
+                .checkbox(&mut auto_trade, "Send cargo ships out on their own")
+                .changed()
+            {
+                order(Command::SetAutoTrade(auto_trade));
+            }
             ui.small("While this is on, a ship launches with the load above whenever the stockpile covers it in full.");
             ui.separator();
 
             ui.heading("Colonies");
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::Settle,
                 (
                     icon(ui, icons::GLOBE),
@@ -783,7 +806,7 @@ fn game_ui(
 
             ui.heading("Navy");
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::Warship,
                 (
                     icon(ui, icons::ANCHOR),
@@ -806,7 +829,7 @@ fn game_ui(
                 ))
                 .clicked()
             {
-                game.hire_escort(me);
+                order(Command::HireEscort);
             }
             let escorts = game.escorts(me);
             if escorts > 0 {
@@ -834,7 +857,7 @@ fn game_ui(
                 });
             }
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::LandTroops,
                 (
                     icon(ui, icons::SWORDS),
@@ -864,11 +887,11 @@ fn game_ui(
                 );
             }
             ui.radio_value(
-                &mut game.build_mode,
+                build_mode,
                 BuildMode::NavyRally,
                 (icon(ui, icons::FLAG), "Rally warships"),
             );
-            let flags = game.realm(me).navy_rallies().len();
+            let flags = realm.navy_rallies().len();
             if flags > 0
                 && ui
                     .button((
@@ -877,7 +900,7 @@ fn game_ui(
                     ))
                     .clicked()
             {
-                game.realm_mut(me).clear_navy_rally();
+                order(Command::ClearNavyRallies);
             }
             ui.small(
                 "Click open water to plant navy flags; the warships split up among them, \
@@ -949,7 +972,7 @@ fn game_ui(
                 });
                 });
         });
-    action
+    action.or(ordered.map(Action::Order))
 }
 
 /// On-screen size of the minimap, in points.
@@ -1312,7 +1335,7 @@ fn realm_ui(
                 });
         });
     if let Some(center) = call {
-        game.call_settlers(me, center);
+        action = Some(Action::Order(Command::CallSettlers(center)));
     }
     action
 }
@@ -1567,9 +1590,9 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, me: RealmId, view: View) -> O
             }
         });
     if let Some(i) = respond {
-        game.respond_to_alert(me, i);
+        action = Some(Action::Order(Command::RespondToAlert(i)));
     } else if let Some(i) = dismiss {
-        game.realm_mut(me).dismiss_alert(i);
+        action = Some(Action::Order(Command::DismissAlert(i)));
     }
     action
 }

@@ -49,7 +49,7 @@ flowchart LR
 | Stage | What it does | Status |
 | --- | --- | --- |
 | **Realms** | Every per-player thing (stockpile, flags, switches, alerts, hired help) lives in a `Realm`, and the game holds a list of them. Houses, ships and orders carry their owner. | Done |
-| **Orders** | Everything the HUD does becomes an order the game applies for a given realm, so a remote player and the computer can give the same orders a local one does. | Planned |
+| **Orders** | Everything the HUD does is a `Command` the game applies for a given realm (`Game::apply`), so a remote player and the computer can give the same orders a local one does. The HUD only reads the game and hands orders back. | Done |
 | **Diplomacy** | A relations table replaces the fixed "realms are always at war" rule, with proposals, acceptances and notice periods. | Planned |
 | **Match setup** | Worlds with several starting villages spaced apart, seats filled by people or the computer, and unit colors generated per realm. | Planned |
 | **Computer players** | A player that runs a realm through the same orders a person uses. | Planned |
