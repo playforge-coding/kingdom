@@ -1374,6 +1374,106 @@ pub enum BuildMode {
     NavyRally,
 }
 
+impl BuildMode {
+    /// The order a left-click on `tile` gives in this mode.
+    pub fn command(self, tile: Tile) -> Command {
+        match self {
+            BuildMode::House => Command::Order {
+                tile,
+                kind: SiteKind::House,
+            },
+            BuildMode::Bridge => Command::Order {
+                tile,
+                kind: SiteKind::Bridge,
+            },
+            BuildMode::Mine => Command::Order {
+                tile,
+                kind: SiteKind::Mine,
+            },
+            BuildMode::Wall => Command::Order {
+                tile,
+                kind: SiteKind::Wall,
+            },
+            BuildMode::Hut => Command::Order {
+                tile,
+                kind: SiteKind::Hut,
+            },
+            BuildMode::AutoZone => Command::ToggleZone(tile),
+            BuildMode::Rally => Command::ToggleRally(tile),
+            BuildMode::Ship => Command::LaunchCargo(tile),
+            BuildMode::Settle => Command::SendSettlers(tile),
+            BuildMode::LandTroops => Command::LandTroops(tile),
+            BuildMode::Warship => Command::LaunchWarship(tile),
+            BuildMode::NavyRally => Command::ToggleNavyRally(tile),
+        }
+    }
+
+    /// The structure this mode orders one tile at a time, if any: the modes
+    /// a drag lays along a line.
+    pub fn site_kind(self) -> Option<SiteKind> {
+        match self {
+            BuildMode::House => Some(SiteKind::House),
+            BuildMode::Bridge => Some(SiteKind::Bridge),
+            BuildMode::Mine => Some(SiteKind::Mine),
+            BuildMode::Wall => Some(SiteKind::Wall),
+            BuildMode::Hut => Some(SiteKind::Hut),
+            _ => None,
+        }
+    }
+}
+
+/// An order a realm gives: everything a player can do to their own realm,
+/// and nothing else. The HUD turns clicks and buttons into these, the
+/// computer's players issue them too, and over the wire they are all a
+/// remote player ever sends. `Game::apply` carries one out for a realm and
+/// says whether it went through.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Command {
+    /// Place a construction order of `kind` on `tile`, or cancel the pending
+    /// order of that kind already there.
+    Order {
+        tile: Tile,
+        kind: SiteKind,
+    },
+    /// Mark a builder zone around `tile`, or clear the zone it lies in.
+    ToggleZone(Tile),
+    /// Plant a rally flag on `tile`, or lift the one standing there.
+    ToggleRally(Tile),
+    /// Plant a navy rally flag on open water at `tile`, or lift the one
+    /// standing there.
+    ToggleNavyRally(Tile),
+    /// Launch a cargo ship, laden with the configured load, from open water
+    /// in the realm's harbor at `tile`.
+    LaunchCargo(Tile),
+    /// Lay down a warship on open water in the realm's harbor at `tile`.
+    LaunchWarship(Tile),
+    /// Send a settler ship to the shore around `tile`.
+    SendSettlers(Tile),
+    /// Send a troop ship to the shore around `tile`.
+    LandTroops(Tile),
+    SetPriority(Priority),
+    SetGatherPriority(GatherPriority),
+    /// The autonomous-building switch.
+    SetAutoBuild(bool),
+    /// The autonomous-trade switch.
+    SetAutoTrade(bool),
+    /// The load the next cargo ship carries.
+    SetCargo {
+        wood: u32,
+        stone: u32,
+    },
+    ProclaimDraft,
+    ClearRallies,
+    ClearNavyRallies,
+    HireMercenaries,
+    HireEscort,
+    /// Call settlers to the realm's village nearest this spot.
+    CallSettlers(Vec2),
+    /// Take the one-click action of the realm's alert at this index.
+    RespondToAlert(usize),
+    DismissAlert(usize),
+}
+
 /// What a left-button drag does on each tile it crosses after the press,
 /// settled by the press itself (see [`Game::stroke_at`]): a press that
 /// ordered (or tried to order) a structure lays the same order on every tile
@@ -1428,7 +1528,7 @@ impl Brush {
 }
 
 /// What a construction site will become once a builder finishes it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SiteKind {
     House,
     Bridge,
@@ -1921,7 +2021,7 @@ impl AlertKind {
 }
 
 /// Which kind of villager the player's houses favor raising.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Priority {
     /// Mostly civilians (grow the economy).
     Agriculture,
@@ -1930,7 +2030,7 @@ pub enum Priority {
 }
 
 /// Which resource the player's civilians prefer to gather.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GatherPriority {
     Balanced,
     Wood,
@@ -2250,7 +2350,6 @@ pub struct Game {
     /// Arrows and thrown axes in flight (transient, not saved).
     missiles: Vec<Missile>,
     pirate_spawn_timer: f32,
-    pub build_mode: BuildMode,
     /// What a click does on the testing ground. Meaningless in a real game.
     pub sandbox_tool: SandboxTool,
     /// The faction and type of unit the testing ground's clicks put down.
@@ -2488,7 +2587,6 @@ impl Game {
             cannonballs: Vec::new(),
             missiles: Vec::new(),
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
-            build_mode: BuildMode::House,
             sandbox_tool: SandboxTool::PlaceUnit,
             place_faction: Faction::Realm(0),
             place_job: Job::Knight,
@@ -5358,15 +5456,18 @@ impl Game {
     /// construction order (its cost set aside, builder's pay included) and a
     /// civilian walks over to work the site. Clicking a pending site of the
     /// same kind cancels it and refunds everything.
-    pub fn try_build(&mut self, realm: RealmId, world_pos: Vec2) -> bool {
-        let (x, y) = tile_at(world_pos);
-        match self.build_mode {
-            BuildMode::House => self.order_build(realm, (x, y), SiteKind::House),
-            BuildMode::Bridge => self.order_build(realm, (x, y), SiteKind::Bridge),
-            BuildMode::Mine => self.order_build(realm, (x, y), SiteKind::Mine),
-            BuildMode::Wall => self.order_build(realm, (x, y), SiteKind::Wall),
-            BuildMode::Hut => self.order_build(realm, (x, y), SiteKind::Hut),
-            BuildMode::AutoZone => {
+    /// Carry out an order for `realm`. Returns whether it went through; an
+    /// order that can't (a structure where none may go, a launch the
+    /// stockpile can't cover, an alert that no longer exists) changes
+    /// nothing. Orders that refuse for a reason the player should hear
+    /// raise a toast saying why.
+    pub fn apply(&mut self, realm: RealmId, command: Command) -> bool {
+        if realm as usize >= self.realms.len() {
+            return false;
+        }
+        match command {
+            Command::Order { tile, kind } => self.order_build(realm, tile, kind),
+            Command::ToggleZone((x, y)) => {
                 // Mark a builder zone, or clear the one the click landed in.
                 let zones = &mut self.realm_mut(realm).auto_zones;
                 if let Some(i) = zones.iter().position(|&(zx, zy)| {
@@ -5378,11 +5479,28 @@ impl Game {
                 }
                 true
             }
-            BuildMode::Rally => {
-                self.toggle_rally(realm, (x, y));
+            Command::ToggleRally(tile) => {
+                self.toggle_rally(realm, tile);
                 true
             }
-            BuildMode::Ship => {
+            Command::ToggleNavyRally((x, y)) => {
+                // Plant another navy rally flag on open water: the warships
+                // share the standing flags out among themselves, and each
+                // clears once a ship arrives. Clicking a flagged tile lifts
+                // that flag.
+                if !self.world.is_open_water(x, y) {
+                    return false;
+                }
+                let here = tile_center((x, y));
+                let flags = &mut self.realm_mut(realm).navy_rallies;
+                if let Some(k) = flags.iter().position(|&r| r == here) {
+                    flags.remove(k);
+                } else {
+                    flags.push(here);
+                }
+                true
+            }
+            Command::LaunchCargo((x, y)) => {
                 // Launch a laden cargo ship from open water in the village's own
                 // harbor. It needs a water route to an allied coast; with no
                 // reachable ally port the launch is refused (and the cargo kept).
@@ -5402,9 +5520,7 @@ impl Game {
                 self.dispatch_ship(realm, (x, y), path, wood, stone);
                 true
             }
-            BuildMode::Settle => self.order_settlers(realm, (x, y)),
-            BuildMode::LandTroops => self.order_troops(realm, (x, y)),
-            BuildMode::Warship => {
+            Command::LaunchWarship((x, y)) => {
                 // Lay down a warship in open water within the home harbor. No
                 // sea route is needed, since it patrols rather than voyaging.
                 if !self.world.is_open_water(x, y)
@@ -5416,52 +5532,83 @@ impl Game {
                 self.launch_warship(realm, (x, y));
                 true
             }
-            BuildMode::NavyRally => {
-                // Plant another navy rally flag on open water: the warships
-                // share the standing flags out among themselves, and each
-                // clears once a ship arrives. Clicking a flagged tile lifts
-                // that flag.
-                if !self.world.is_open_water(x, y) {
-                    return false;
-                }
-                let here = tile_center((x, y));
-                let flags = &mut self.realm_mut(realm).navy_rallies;
-                if let Some(k) = flags.iter().position(|&r| r == here) {
-                    flags.remove(k);
-                } else {
-                    flags.push(here);
-                }
+            Command::SendSettlers(tile) => self.order_settlers(realm, tile),
+            Command::LandTroops(tile) => self.order_troops(realm, tile),
+            Command::SetPriority(p) => {
+                self.realm_mut(realm).priority = p;
                 true
+            }
+            Command::SetGatherPriority(g) => {
+                self.realm_mut(realm).gather_priority = g;
+                true
+            }
+            Command::SetAutoBuild(on) => {
+                self.realm_mut(realm).auto_build = on;
+                true
+            }
+            Command::SetAutoTrade(on) => {
+                self.realm_mut(realm).auto_trade = on;
+                true
+            }
+            Command::SetCargo { wood, stone } => {
+                let r = self.realm_mut(realm);
+                r.ship_wood = wood;
+                r.ship_stone = stone;
+                true
+            }
+            Command::ProclaimDraft => {
+                self.proclaim_draft(realm);
+                true
+            }
+            Command::ClearRallies => {
+                self.realm_mut(realm).clear_rally();
+                true
+            }
+            Command::ClearNavyRallies => {
+                self.realm_mut(realm).clear_navy_rally();
+                true
+            }
+            Command::HireMercenaries => self.hire_mercenaries(realm),
+            Command::HireEscort => self.hire_escort(realm),
+            Command::CallSettlers(center) => self.call_settlers(realm, center),
+            Command::RespondToAlert(i) => {
+                let before = self.realm(realm).alerts.len();
+                self.respond_to_alert(realm, i);
+                self.realm(realm).alerts.len() < before
+            }
+            Command::DismissAlert(i) => {
+                let realm = self.realm_mut(realm);
+                let had = i < realm.alerts.len();
+                realm.dismiss_alert(i);
+                had
             }
         }
     }
 
-    /// The structure the current build mode orders one tile at a time, if any.
-    fn build_kind(&self) -> Option<SiteKind> {
-        match self.build_mode {
-            BuildMode::House => Some(SiteKind::House),
-            BuildMode::Bridge => Some(SiteKind::Bridge),
-            BuildMode::Mine => Some(SiteKind::Mine),
-            BuildMode::Wall => Some(SiteKind::Wall),
-            BuildMode::Hut => Some(SiteKind::Hut),
-            _ => None,
-        }
+    /// A left-click at `world_pos` in build mode `mode`: the order the mode
+    /// means, applied for `realm`.
+    pub fn try_build(&mut self, realm: RealmId, mode: BuildMode, world_pos: Vec2) -> bool {
+        self.apply(realm, mode.command(tile_at(world_pos)))
+    }
+
+    /// The pending construction order on `tile`, if any.
+    pub fn site_at(&self, tile: Tile) -> Option<&BuildSite> {
+        self.build_sites.iter().find(|s| s.tile == tile)
     }
 
     /// How a left-button drag starting with a press at `world_pos` carries
-    /// on, or `None` if the current mode acts on the press alone (flags,
-    /// zones, ships, placing units). Ask before handing the press to
-    /// `try_build`, since the press may cancel the very order this looks for.
-    pub fn stroke_at(&self, realm: RealmId, world_pos: Vec2) -> Option<Stroke> {
+    /// on, or `None` if `mode` acts on the press alone (flags, zones, ships,
+    /// placing units). Ask before handing the press to `try_build`, since
+    /// the press may cancel the very order this looks for.
+    pub fn stroke_at(&self, realm: RealmId, mode: BuildMode, world_pos: Vec2) -> Option<Stroke> {
         if self.sandbox() {
             return (self.sandbox_tool == SandboxTool::PlaceTile).then_some(Stroke::Place);
         }
-        let kind = self.build_kind()?;
+        let kind = mode.site_kind()?;
         let t = tile_at(world_pos);
         if self
-            .build_sites
-            .iter()
-            .any(|s| s.tile == t && s.kind == kind && s.realm == realm)
+            .site_at(t)
+            .is_some_and(|s| s.kind == kind && s.realm == realm)
         {
             Some(Stroke::Cancel)
         } else {
@@ -5469,12 +5616,18 @@ impl Game {
         }
     }
 
-    /// Carry a drag on to tile `t`: order the current mode's structure there
-    /// (or, on the testing ground, paint the brush), or cancel the matching
-    /// pending order, by `stroke`. Unlike a click it never flips a tile the
-    /// other way, so sweeping back over a line leaves it as it is. Returns
-    /// whether anything changed.
-    pub fn stroke_build(&mut self, realm: RealmId, t: Tile, stroke: Stroke) -> bool {
+    /// Carry a drag on to tile `t`: order `mode`'s structure there (or, on
+    /// the testing ground, paint the brush), or cancel the matching pending
+    /// order, by `stroke`. Unlike a click it never flips a tile the other
+    /// way, so sweeping back over a line leaves it as it is. Returns whether
+    /// anything changed.
+    pub fn stroke_build(
+        &mut self,
+        realm: RealmId,
+        mode: BuildMode,
+        t: Tile,
+        stroke: Stroke,
+    ) -> bool {
         if self.sandbox() {
             if self.sandbox_tool != SandboxTool::PlaceTile {
                 return false;
@@ -5482,10 +5635,10 @@ impl Game {
             self.place_tile(t, self.place_brush);
             return true;
         }
-        let Some(kind) = self.build_kind() else {
+        let Some(kind) = mode.site_kind() else {
             return false;
         };
-        let pending = self.build_sites.iter().any(|s| s.tile == t);
+        let pending = self.site_at(t).is_some();
         match stroke {
             Stroke::Place if !pending => self.order_build(realm, t, kind),
             Stroke::Cancel if pending => self.order_build(realm, t, kind),
@@ -9565,14 +9718,9 @@ impl Game {
         wu32(&mut b, first.ship_stone);
         wu32(&mut b, self.enemies_defeated);
         wu32(&mut b, first.units_lost);
-        wu8(
-            &mut b,
-            if self.build_mode == BuildMode::Bridge {
-                1
-            } else {
-                0
-            },
-        );
+        // Once the HUD's build mode (bridge or not); the mode is the client's
+        // business now, so the byte stays for layout and reads as "house".
+        wu8(&mut b, 0);
         wu8(&mut b, priority_u8(first.priority));
         wu8(&mut b, gather_u8(first.gather_priority));
         wf32(&mut b, cam.cx);
@@ -9830,11 +9978,8 @@ impl Game {
         let ship_stone = r.u32()?;
         let enemies_defeated = r.u32()?;
         let units_lost = r.u32()?;
-        let build_mode = if r.u8()? == 1 {
-            BuildMode::Bridge
-        } else {
-            BuildMode::House
-        };
+        // The HUD's build mode, which older saves kept and the client owns now.
+        r.u8()?;
         let priority = priority_of(r.u8()?);
         let gather_priority = gather_of(r.u8()?);
         let cam = CamState {
@@ -10296,7 +10441,6 @@ impl Game {
             cannonballs: Vec::new(),
             missiles: Vec::new(),
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
-            build_mode,
             sandbox_tool: SandboxTool::PlaceUnit,
             place_faction: Faction::Realm(0),
             place_job: Job::Knight,
@@ -10503,9 +10647,8 @@ mod tests {
             let expected = lw * WOOD_PRICE + ls * STONE_PRICE;
             assert!(expected > 0, "seed {seed}: nothing worth shipping");
 
-            game.build_mode = BuildMode::Ship;
             assert!(
-                game.try_build(0, tile_center(port)),
+                game.try_build(0, BuildMode::Ship, tile_center(port)),
                 "seed {seed}: failed to launch a ship toward the allied coast",
             );
             // Cargo is deducted from the stockpile immediately; gold isn't paid
@@ -10563,12 +10706,14 @@ mod tests {
             game.realm_mut(0).wood = SETTLER_WOOD_COST;
             game.realm_mut(0).stone = SETTLER_STONE_COST;
             game.realm_mut(0).money = SETTLER_GOLD_COST;
-            game.build_mode = BuildMode::Settle;
 
             // A fresh realm starts with too few civilians to crew an expedition
             // and still leave the spared core behind, so the order is refused
             // with nothing spent.
-            assert!(!game.try_build(0, tile_center(shore)), "seed {seed}");
+            assert!(
+                !game.try_build(0, BuildMode::Settle, tile_center(shore)),
+                "seed {seed}"
+            );
             assert_eq!(
                 (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
                 (SETTLER_WOOD_COST, SETTLER_STONE_COST, SETTLER_GOLD_COST),
@@ -10591,7 +10736,7 @@ mod tests {
             let civs0 = game.civilian_count(Faction::Realm(0));
             let houses0 = game.world.houses_of(owner_of(Faction::Realm(0))).len();
             assert!(
-                game.try_build(0, tile_center(shore)),
+                game.try_build(0, BuildMode::Settle, tile_center(shore)),
                 "seed {seed}: expedition refused",
             );
             assert_eq!(game.transports().len(), 1);
@@ -10808,11 +10953,13 @@ mod tests {
             game.realm_mut(0).wood = TROOP_WOOD_COST;
             game.realm_mut(0).stone = TROOP_STONE_COST;
             game.realm_mut(0).money = TROOP_GOLD_COST;
-            game.build_mode = BuildMode::LandTroops;
 
             // A fresh realm has too few standing knights for a landing party,
             // so the order is refused with nothing spent, and says why.
-            assert!(!game.try_build(0, tile_center(shore)), "seed {seed}");
+            assert!(
+                !game.try_build(0, BuildMode::LandTroops, tile_center(shore)),
+                "seed {seed}"
+            );
             assert_eq!(
                 (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
                 (TROOP_WOOD_COST, TROOP_STONE_COST, TROOP_GOLD_COST),
@@ -10833,7 +10980,7 @@ mod tests {
                     .push(Entity::new(Faction::Realm(0), Job::Knight, spot));
             }
             assert!(
-                game.try_build(0, tile_center(shore)),
+                game.try_build(0, BuildMode::LandTroops, tile_center(shore)),
                 "seed {seed}: landing refused",
             );
             assert_eq!(game.transports().len(), 1);
@@ -11201,8 +11348,7 @@ mod tests {
         }
         let Some(water) = water else { return };
         let (wood0, stone0) = (game.realm(0).wood, game.realm(0).stone);
-        game.build_mode = BuildMode::Ship;
-        assert!(!game.try_build(0, tile_center(water)));
+        assert!(!game.try_build(0, BuildMode::Ship, tile_center(water)));
         assert_eq!(game.ships().len(), 0);
         assert_eq!((game.realm(0).wood, game.realm(0).stone), (wood0, stone0));
     }
@@ -11348,15 +11494,13 @@ mod tests {
             game.realm_mut(0).wood = WARSHIP_WOOD_COST;
             game.realm_mut(0).stone = WARSHIP_STONE_COST;
             game.realm_mut(0).money = WARSHIP_GOLD_COST;
-            game.build_mode = BuildMode::Warship;
-            assert!(game.try_build(0, tile_center(spot)));
+            assert!(game.try_build(0, BuildMode::Warship, tile_center(spot)));
 
             // A flag out at sea, far enough that arriving means real sailing.
             let Some(flag) = open_water_at_range(&mut game, spot, 12.0) else {
                 continue;
             };
-            game.build_mode = BuildMode::NavyRally;
-            assert!(game.try_build(0, tile_center(flag)));
+            assert!(game.try_build(0, BuildMode::NavyRally, tile_center(flag)));
             assert_eq!(game.realm(0).navy_rallies(), &[tile_center(flag)]);
 
             game.entities.clear();
@@ -11614,6 +11758,46 @@ mod tests {
         assert!(!hostile(Faction::Ally, Faction::Ally));
     }
 
+    /// Orders are how everything reaches a realm: the switches and settings
+    /// land on the realm they name, nothing lands on a realm that doesn't
+    /// exist, and an order that can't go through says so.
+    #[test]
+    fn orders_apply_to_their_realm_alone() {
+        let mut game = Game::new(3);
+        game.realms.push(Realm::new(Controller::Ai, None));
+        assert!(game.apply(1, Command::SetCargo { wood: 7, stone: 3 }));
+        assert!(game.apply(1, Command::SetPriority(Priority::Military)));
+        assert!(game.apply(1, Command::SetAutoTrade(true)));
+        assert!(game.apply(0, Command::SetAutoBuild(true)));
+        assert_eq!((game.realm(1).ship_wood, game.realm(1).ship_stone), (7, 3));
+        assert_eq!(game.realm(1).priority, Priority::Military);
+        assert!(game.realm(1).auto_trade && !game.realm(0).auto_trade);
+        assert!(game.realm(0).auto_build && !game.realm(1).auto_build);
+        assert_eq!(game.realm(0).priority, Priority::Agriculture);
+        assert_eq!(
+            (game.realm(0).ship_wood, game.realm(0).ship_stone),
+            (20, 20)
+        );
+
+        // A flag planted by order stands for that realm only, and lifts by
+        // order too.
+        assert!(game.apply(1, Command::ToggleRally((5, 5))));
+        assert_eq!(game.realm(1).rallies().len(), 1);
+        assert!(game.realm(0).rallies().is_empty());
+        assert!(game.apply(1, Command::ClearRallies));
+        assert!(game.realm(1).rallies().is_empty());
+
+        // Nothing for a realm that isn't there, and nothing to dismiss when
+        // no alert stands.
+        assert!(!game.apply(9, Command::ProclaimDraft));
+        assert!(!game.apply(0, Command::DismissAlert(0)));
+        // A refused launch raises a toast, which can then be dismissed.
+        assert!(!game.apply(0, Command::HireMercenaries));
+        assert_eq!(game.realm(0).alerts().len(), 1);
+        assert!(game.apply(0, Command::DismissAlert(0)));
+        assert!(game.realm(0).alerts().is_empty());
+    }
+
     #[test]
     fn realms_are_at_war_with_each_other_but_not_themselves() {
         assert!(hostile(Faction::Realm(0), Faction::Realm(1)));
@@ -11726,16 +11910,14 @@ mod tests {
             game.realm_mut(0).ship_wood = 15;
             game.realm_mut(0).ship_stone = 35;
             game.realm_mut(0).auto_trade = true;
-            game.build_mode = BuildMode::Ship;
-            assert!(game.try_build(0, tile_center(port)));
+            assert!(game.try_build(0, BuildMode::Ship, tile_center(port)));
             assert_eq!(game.ships().len(), 1);
 
             // Also lay down a warship, so the navy round-trips too.
             game.realm_mut(0).wood += WARSHIP_WOOD_COST;
             game.realm_mut(0).stone += WARSHIP_STONE_COST;
             game.realm_mut(0).money += WARSHIP_GOLD_COST;
-            game.build_mode = BuildMode::Warship;
-            assert!(game.try_build(0, tile_center(port)));
+            assert!(game.try_build(0, BuildMode::Warship, tile_center(port)));
             assert_eq!(game.warships().len(), 1);
 
             let bytes = game.to_bytes(CAM);
@@ -11833,18 +12015,16 @@ mod tests {
             let Some(port) = find_player_port(&mut game) else {
                 continue;
             };
-            game.build_mode = BuildMode::Warship;
-
             // Broke: the launch is refused and nothing is spent.
             game.realm_mut(0).wood = WARSHIP_WOOD_COST;
             game.realm_mut(0).stone = WARSHIP_STONE_COST;
             game.realm_mut(0).money = WARSHIP_GOLD_COST - 1;
-            assert!(!game.try_build(0, tile_center(port)));
+            assert!(!game.try_build(0, BuildMode::Warship, tile_center(port)));
             assert_eq!(game.warships().len(), 0);
 
             // Funded: it lays down and the cost is deducted.
             game.realm_mut(0).money = WARSHIP_GOLD_COST;
-            assert!(game.try_build(0, tile_center(port)));
+            assert!(game.try_build(0, BuildMode::Warship, tile_center(port)));
             assert_eq!(game.warships().len(), 1);
             assert_eq!(
                 (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
@@ -11856,7 +12036,7 @@ mod tests {
             game.realm_mut(0).stone = WARSHIP_STONE_COST;
             game.realm_mut(0).money = WARSHIP_GOLD_COST;
             let land = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
-            assert!(!game.try_build(0, tile_center(land)));
+            assert!(!game.try_build(0, BuildMode::Warship, tile_center(land)));
             assert_eq!(game.warships().len(), 1);
             return;
         }
@@ -11887,8 +12067,7 @@ mod tests {
         game.realm_mut(0).stone = 100;
         game.realm_mut(0).money = 100;
         let spot = find_house_spot(&game);
-        game.build_mode = BuildMode::House;
-        assert!(game.try_build(0, tile_center(spot)));
+        assert!(game.try_build(0, BuildMode::House, tile_center(spot)));
 
         // Ring the site in trees two tiles out, so the only way in is to
         // chop through.
@@ -11953,8 +12132,7 @@ mod tests {
         let sim = (spot.0 - 20, spot.1 - 20, spot.0 + 20, spot.1 + 20);
         game.update(0.1, sim);
 
-        game.build_mode = BuildMode::House;
-        assert!(game.try_build(0, tile_center(spot)));
+        assert!(game.try_build(0, BuildMode::House, tile_center(spot)));
         for _ in 0..10 {
             game.update(0.1, sim);
         }
@@ -11973,8 +12151,7 @@ mod tests {
         game.realm_mut(0).stone = 100;
         game.realm_mut(0).money = 100;
         let spot = find_house_spot(&game);
-        game.build_mode = BuildMode::House;
-        assert!(game.try_build(0, tile_center(spot)));
+        assert!(game.try_build(0, BuildMode::House, tile_center(spot)));
         assert_eq!(game.build_sites().len(), 1);
         // Materials and the builder's pay are set aside up front...
         assert_eq!(game.realm(0).wood, 100 - HOUSE_WOOD_COST);
@@ -12043,8 +12220,7 @@ mod tests {
             }
         }
         let spot = spot.expect("no open ground 10+ tiles out");
-        game.build_mode = BuildMode::Wall;
-        assert!(game.try_build(0, tile_center(spot)));
+        assert!(game.try_build(0, BuildMode::Wall, tile_center(spot)));
         assert_eq!(game.build_sites().len(), 1);
     }
 
@@ -12086,8 +12262,7 @@ mod tests {
 
         // Plant the rally flag on the moated island. The only way there is
         // across the water, so the knight must lay its own bridges.
-        game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(0, tile_center((10, 0))));
+        assert!(game.try_build(0, BuildMode::Rally, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         let mut arrived = false;
@@ -12140,8 +12315,7 @@ mod tests {
         let mut game = Game::new(1);
         let k = horseman_on_a_lane(&mut game);
         moat(&mut game, HORSEMAN_JUMP_REACH);
-        game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(0, tile_center((10, 0))));
+        assert!(game.try_build(0, BuildMode::Rally, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         let (mut arrived, mut leapt) = (false, false);
@@ -12188,8 +12362,7 @@ mod tests {
         let mut game = Game::new(1);
         let k = horseman_on_a_lane(&mut game);
         moat(&mut game, HORSEMAN_JUMP_REACH + 1);
-        game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(0, tile_center((10, 0))));
+        assert!(game.try_build(0, BuildMode::Rally, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         let flag = tile_center((10, 0));
@@ -12225,8 +12398,7 @@ mod tests {
         for y in -6..=6 {
             game.world.set_node(5, y, Resource::Wood, 5);
         }
-        game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(0, tile_center((10, 0))));
+        assert!(game.try_build(0, BuildMode::Rally, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         for _ in 0..400 {
@@ -12707,8 +12879,7 @@ mod tests {
                 game.world.carve_water(x, y);
             }
         }
-        game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(0, tile_center((10, 0))));
+        assert!(game.try_build(0, BuildMode::Rally, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         let mut arrived = false;
@@ -12781,14 +12952,11 @@ mod tests {
         game.realm_mut(0).stone = 50;
         game.realm_mut(0).money = 50;
         let spot = find_house_spot(&game);
-        game.build_mode = BuildMode::House;
-        assert!(game.try_build(0, tile_center(spot)));
+        assert!(game.try_build(0, BuildMode::House, tile_center(spot)));
         // A different structure can't be ordered onto an occupied tile.
-        game.build_mode = BuildMode::Wall;
-        assert!(!game.try_build(0, tile_center(spot)));
+        assert!(!game.try_build(0, BuildMode::Wall, tile_center(spot)));
         // Clicking it again in its own mode cancels and refunds everything.
-        game.build_mode = BuildMode::House;
-        assert!(game.try_build(0, tile_center(spot)));
+        assert!(game.try_build(0, BuildMode::House, tile_center(spot)));
         assert!(game.build_sites().is_empty());
         assert_eq!(
             (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
@@ -12827,27 +12995,29 @@ mod tests {
         }
 
         // Flags and the like act on the press alone.
-        game.build_mode = BuildMode::Rally;
-        assert_eq!(game.stroke_at(0, tile_center(a)), None);
+        assert_eq!(game.stroke_at(0, BuildMode::Rally, tile_center(a)), None);
 
-        game.build_mode = BuildMode::Wall;
-        assert_eq!(game.stroke_at(0, tile_center(a)), Some(Stroke::Place));
-        assert!(game.try_build(0, tile_center(a)));
+        let wall = BuildMode::Wall;
+        assert_eq!(game.stroke_at(0, wall, tile_center(a)), Some(Stroke::Place));
+        assert!(game.try_build(0, wall, tile_center(a)));
         for t in tile_path(a, b) {
-            assert!(game.stroke_build(0, t, Stroke::Place));
+            assert!(game.stroke_build(0, wall, t, Stroke::Place));
         }
         assert_eq!(game.build_sites().len(), 6);
         // Sweeping back over the line doesn't cancel what it just laid.
         for t in tile_path(b, a) {
-            assert!(!game.stroke_build(0, t, Stroke::Place));
+            assert!(!game.stroke_build(0, wall, t, Stroke::Place));
         }
         assert_eq!(game.build_sites().len(), 6);
 
         // A drag that starts on a pending order cancels the line instead.
-        assert_eq!(game.stroke_at(0, tile_center(b)), Some(Stroke::Cancel));
-        assert!(game.try_build(0, tile_center(b)));
+        assert_eq!(
+            game.stroke_at(0, wall, tile_center(b)),
+            Some(Stroke::Cancel)
+        );
+        assert!(game.try_build(0, wall, tile_center(b)));
         for t in tile_path(b, a) {
-            assert!(game.stroke_build(0, t, Stroke::Cancel));
+            assert!(game.stroke_build(0, wall, t, Stroke::Cancel));
         }
         assert!(game.build_sites().is_empty());
         assert_eq!(
@@ -12865,8 +13035,7 @@ mod tests {
         game.realm_mut(0).money = 1000;
         let center = game.start_center(0);
         let anchor = (center.x.floor() as i32, center.y.floor() as i32);
-        game.build_mode = BuildMode::AutoZone;
-        assert!(game.try_build(0, tile_center(anchor)));
+        assert!(game.try_build(0, BuildMode::AutoZone, tile_center(anchor)));
         assert_eq!(game.realm(0).auto_zones().len(), 1);
 
         // The switch is off, so no orders appear on their own.
@@ -12902,8 +13071,7 @@ mod tests {
         assert!(grew, "autonomous builders never raised a house in the zone");
 
         // Clicking inside the zone again clears it.
-        game.build_mode = BuildMode::AutoZone;
-        assert!(game.try_build(0, tile_center(anchor)));
+        assert!(game.try_build(0, BuildMode::AutoZone, tile_center(anchor)));
         assert!(game.realm(0).auto_zones().is_empty());
     }
 
@@ -12914,10 +13082,8 @@ mod tests {
         game.realm_mut(0).stone = 100;
         game.realm_mut(0).money = 100;
         let spot = find_house_spot(&game);
-        game.build_mode = BuildMode::House;
-        assert!(game.try_build(0, tile_center(spot)));
-        game.build_mode = BuildMode::AutoZone;
-        assert!(game.try_build(0, tile_center(spot)));
+        assert!(game.try_build(0, BuildMode::House, tile_center(spot)));
+        assert!(game.try_build(0, BuildMode::AutoZone, tile_center(spot)));
         game.realm_mut(0).auto_build = true;
 
         let bytes = game.to_bytes(CAM);
@@ -14228,8 +14394,7 @@ mod tests {
         game.place_brush = Brush::Water;
         game.sandbox_tool = SandboxTool::PlaceTile;
         assert!(game.sandbox_click(tile_center((4, 4))));
-        game.build_mode = BuildMode::NavyRally;
-        assert!(game.try_build(0, tile_center((4, 4))));
+        assert!(game.try_build(0, BuildMode::NavyRally, tile_center((4, 4))));
         assert_eq!(game.realm(0).navy_rallies(), &[tile_center((8, 8))]);
     }
 
