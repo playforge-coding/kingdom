@@ -1977,7 +1977,6 @@ pub struct Game {
     /// levies stand down when it reaches `LEVY_STAND_DOWN`. Transient.
     levy_quiet: f32,
 
-    player_house_tiles: Vec<Tile>,
     /// Player-built mines (caves); civilians mine these for endless stone.
     cave_tiles: Vec<Tile>,
     /// Every hut tile in the world (both factions), for shelter lookup.
@@ -2071,7 +2070,7 @@ impl Game {
                 .iter()
                 .all(|&(hx, hy)| (hx - x).abs().max((hy - y).abs()) >= 2);
             if spaced {
-                world.set_house(x, y, true);
+                world.set_house(x, y, owner_of(Faction::Player));
                 player_house_tiles.push((x, y));
             }
         }
@@ -2114,9 +2113,7 @@ impl Game {
             let Some(anchor) = find_land_anchor(&mut world, target, 16) else {
                 continue;
             };
-            let before = world.enemy_house_tiles.len();
-            world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
-            let houses: Vec<Tile> = world.enemy_house_tiles[before..].to_vec();
+            let houses = world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
             if houses.is_empty() {
                 continue;
             }
@@ -2176,9 +2173,7 @@ impl Game {
             }
         }
         for ally_anchor in ally_anchors {
-            let before = world.ally_house_tiles.len();
-            world.plant_camp(ally_anchor, 4, owner_of(Faction::Ally));
-            let houses: Vec<Tile> = world.ally_house_tiles[before..].to_vec();
+            let houses = world.plant_camp(ally_anchor, 4, owner_of(Faction::Ally));
             if houses.is_empty() {
                 continue;
             }
@@ -2191,7 +2186,7 @@ impl Game {
             }
         }
 
-        Game::assemble(world, entities, player_house_tiles, Some(home), seed)
+        Game::assemble(world, entities, Some(home), seed)
     }
 
     /// The testing ground: a flat, featureless grid with nobody on it. Nothing
@@ -2202,7 +2197,7 @@ impl Game {
     pub fn new_sandbox() -> Self {
         let mut world = World::new_flat();
         world.ensure_region(-ENSURE_MARGIN, -ENSURE_MARGIN, ENSURE_MARGIN, ENSURE_MARGIN);
-        let mut game = Game::assemble(world, Vec::new(), Vec::new(), Some(HashSet::default()), 0);
+        let mut game = Game::assemble(world, Vec::new(), Some(HashSet::default()), 0);
         game.sandbox_tool = SandboxTool::PlaceUnit;
         game.place_faction = Faction::Player;
         game.place_job = Job::Knight;
@@ -2219,7 +2214,6 @@ impl Game {
     fn assemble(
         world: World,
         entities: Vec<Entity>,
-        player_house_tiles: Vec<Tile>,
         home_continent: Option<HashSet<Tile>>,
         seed: i32,
     ) -> Self {
@@ -2255,7 +2249,6 @@ impl Game {
             offscreen_cursor: 0,
             levy_term: 0.0,
             levy_quiet: 0.0,
-            player_house_tiles,
             cave_tiles: Vec::new(),
             hut_tiles,
             build_sites: Vec::new(),
@@ -2292,16 +2285,17 @@ impl Game {
     /// Where the camera should open on a fresh world: the center of the
     /// player's starting village (now planted on the coast, away from origin).
     pub fn start_center(&self) -> Vec2 {
-        if self.player_house_tiles.is_empty() {
+        if self.world.houses_of(owner_of(Faction::Player)).is_empty() {
             return Vec2::ZERO;
         }
         let (sx, sy) = self
-            .player_house_tiles
+            .world
+            .houses_of(owner_of(Faction::Player))
             .iter()
             .fold((0i64, 0i64), |(ax, ay), &(x, y)| {
                 (ax + x as i64, ay + y as i64)
             });
-        let n = self.player_house_tiles.len() as f32;
+        let n = self.world.houses_of(owner_of(Faction::Player)).len() as f32;
         Vec2::new(sx as f32 / n + 0.5, sy as f32 / n + 0.5)
     }
 
@@ -2354,7 +2348,8 @@ impl Game {
         let cap = if per_village > 0 {
             per_village
         } else {
-            VILLAGE_POP_BASE + self.player_house_tiles.len() * VILLAGE_POP_PER_HOUSE
+            VILLAGE_POP_BASE
+                + self.world.houses_of(owner_of(Faction::Player)).len() * VILLAGE_POP_PER_HOUSE
         };
         cap.min(PLAYER_POP_MAX)
     }
@@ -2362,18 +2357,24 @@ impl Game {
     /// Can a house be placed at `(x, y)`? That is, is it close enough to one the
     /// player already controls (their village or a house they built)?
     pub fn near_player_house(&self, x: i32, y: i32) -> bool {
-        self.player_house_tiles.iter().any(|&(hx, hy)| {
-            (hx - x).abs() <= BUILD_NEAR_RADIUS && (hy - y).abs() <= BUILD_NEAR_RADIUS
-        })
+        self.world
+            .houses_of(owner_of(Faction::Player))
+            .iter()
+            .any(|&(hx, hy)| {
+                (hx - x).abs() <= BUILD_NEAR_RADIUS && (hy - y).abs() <= BUILD_NEAR_RADIUS
+            })
     }
 
     /// Is `(x, y)` a launch spot within the player's home port, close enough to
     /// one of their houses that ships set sail from the village, not from some
     /// random far-off stretch of coast.
     pub fn near_player_dock(&self, x: i32, y: i32) -> bool {
-        self.player_house_tiles.iter().any(|&(hx, hy)| {
-            (hx - x).abs() <= SHIP_NEAR_RADIUS && (hy - y).abs() <= SHIP_NEAR_RADIUS
-        })
+        self.world
+            .houses_of(owner_of(Faction::Player))
+            .iter()
+            .any(|&(hx, hy)| {
+                (hx - x).abs() <= SHIP_NEAR_RADIUS && (hy - y).abs() <= SHIP_NEAR_RADIUS
+            })
     }
 
     /// Is there a bridge *you placed* within a couple of tiles, so a span can
@@ -2718,7 +2719,7 @@ impl Game {
                 // then it gets no farm context and putters about like any
                 // other villager (see `ai_step`).
                 (Faction::Player, Job::Civilian)
-                    if !sandbox || !self.player_house_tiles.is_empty() =>
+                    if !sandbox || !self.world.houses_of(owner_of(Faction::Player)).is_empty() =>
                 {
                     let mut farm = FarmCtx {
                         caves: &self.cave_tiles,
@@ -2737,7 +2738,7 @@ impl Game {
                         acting[i],
                         close_foe[i],
                         under,
-                        &self.player_house_tiles,
+                        self.world.houses_of(owner_of(Faction::Player)),
                         pref,
                         rally,
                         &self.hut_tiles,
@@ -2755,7 +2756,7 @@ impl Game {
                     acting[i],
                     close_foe[i],
                     under,
-                    &self.player_house_tiles,
+                    self.world.houses_of(owner_of(Faction::Player)),
                     pref,
                     rally,
                     &self.hut_tiles,
@@ -2772,7 +2773,7 @@ impl Game {
                     acting[i],
                     close_foe[i],
                     under,
-                    &self.world.enemy_house_tiles,
+                    self.world.houses_of(owner_of(Faction::Enemy)),
                     None,
                     None,
                     &self.hut_tiles,
@@ -2794,7 +2795,7 @@ impl Game {
                         acting[i],
                         close_foe[i],
                         under && !merc,
-                        &self.world.ally_house_tiles,
+                        self.world.houses_of(owner_of(Faction::Ally)),
                         None,
                         if merc { rally } else { None },
                         &self.hut_tiles,
@@ -3242,8 +3243,7 @@ impl Game {
                 }
             }
             for &(x, y) in &houses {
-                self.world.set_house(x, y, true);
-                self.player_house_tiles.push((x, y));
+                self.world.set_house(x, y, owner_of(Faction::Player));
             }
         }
         // Everyone steps ashore beside the new houses (or onto the anchor tile
@@ -3287,7 +3287,7 @@ impl Game {
         }
         let target = self
             .world
-            .enemy_house_tiles
+            .houses_of(owner_of(Faction::Enemy))
             .iter()
             .map(|&h| tile_center(h))
             .min_by(|a, b| {
@@ -3981,15 +3981,19 @@ impl Game {
     /// an opposing unit stands in it, the attacker converts that village's
     /// houses (and nearby walls) to their own.
     fn resolve_captures(&mut self) {
-        let mut changed = false;
-
         // Enemy villages overrun by the player. Only the player can take enemy
         // ground; an allied unit passing through never flips it.
-        for village in cluster(&self.world.enemy_house_tiles) {
+        for village in cluster(self.world.houses_of(owner_of(Faction::Enemy))) {
             if self.village_taken(&village, Faction::Enemy, Faction::Player) {
                 for &(x, y) in &village {
-                    self.world.convert_house(x, y, 0);
-                    self.world.reown_walls_near(x, y, 4, 1, 0);
+                    self.world.set_house(x, y, owner_of(Faction::Player));
+                    self.world.reown_walls_near(
+                        x,
+                        y,
+                        4,
+                        owner_of(Faction::Enemy),
+                        owner_of(Faction::Player),
+                    );
                 }
                 let center = village_center(&village);
                 self.push_alert(AlertKind::VillageCaptured, center);
@@ -3997,16 +4001,21 @@ impl Game {
                 if self.incorporate_civilians(center, Faction::Enemy, Faction::Player) > 0 {
                     self.push_alert(AlertKind::PeopleIncorporated, center);
                 }
-                changed = true;
             }
         }
         // Player villages overrun by the enemy.
-        let player_tiles = self.player_house_tiles.clone();
+        let player_tiles = self.world.houses_of(owner_of(Faction::Player)).to_vec();
         for village in cluster(&player_tiles) {
             if self.village_taken(&village, Faction::Player, Faction::Enemy) {
                 for &(x, y) in &village {
-                    self.world.convert_house(x, y, 1);
-                    self.world.reown_walls_near(x, y, 4, 0, 1);
+                    self.world.set_house(x, y, owner_of(Faction::Enemy));
+                    self.world.reown_walls_near(
+                        x,
+                        y,
+                        4,
+                        owner_of(Faction::Player),
+                        owner_of(Faction::Enemy),
+                    );
                 }
                 // Sound the alarm: rally the knights near the fallen village to
                 // come to their allies' aid and retake it. Knights farther out
@@ -4018,13 +4027,7 @@ impl Game {
                     self.push_alert(AlertKind::PeopleLost, center);
                 }
                 log::info!("village lost, knights rallying to retake it");
-                changed = true;
             }
-        }
-
-        if changed {
-            self.world.rescan_enemy_houses();
-            self.rescan_player_houses();
         }
     }
 
@@ -4178,9 +4181,18 @@ impl Game {
         let threat2 = reach * reach;
         let mut villages = Vec::new();
         for (faction, tiles) in [
-            (Faction::Player, &self.player_house_tiles),
-            (Faction::Enemy, &self.world.enemy_house_tiles),
-            (Faction::Ally, &self.world.ally_house_tiles),
+            (
+                Faction::Player,
+                &self.world.houses_of(owner_of(Faction::Player)),
+            ),
+            (
+                Faction::Enemy,
+                &self.world.houses_of(owner_of(Faction::Enemy)),
+            ),
+            (
+                Faction::Ally,
+                &self.world.houses_of(owner_of(Faction::Ally)),
+            ),
         ] {
             for houses in cluster(tiles) {
                 let min = houses
@@ -4380,7 +4392,7 @@ impl Game {
     /// The first open-water tile in the home harbor (within `SHIP_NEAR_RADIUS`
     /// of one of the player's houses), where a summoned warship can launch.
     fn harbor_water(&self) -> Option<Tile> {
-        for &(hx, hy) in &self.player_house_tiles {
+        for &(hx, hy) in self.world.houses_of(owner_of(Faction::Player)) {
             for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                 for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                     let t = (hx + dx, hy + dy);
@@ -4394,27 +4406,12 @@ impl Game {
     }
 
     pub fn player_houses(&self) -> &[Tile] {
-        &self.player_house_tiles
+        self.world.houses_of(owner_of(Faction::Player))
     }
 
     /// Every hut on the map, all factions.
     pub fn huts(&self) -> &[Tile] {
         &self.hut_tiles
-    }
-
-    /// Rebuild the cached list of player-owned house tiles from the world.
-    fn rescan_player_houses(&mut self) {
-        self.player_house_tiles.clear();
-        for ((cx, cy), chunk) in self.world.chunks_iter() {
-            for ly in 0..CHUNK {
-                for lx in 0..CHUNK {
-                    if chunk.houses[(ly * CHUNK + lx) as usize] {
-                        self.player_house_tiles
-                            .push((cx * CHUNK + lx, cy * CHUNK + ly));
-                    }
-                }
-            }
-        }
     }
 
     /// Generate the land around every entity stepped this frame. Each unit gets
@@ -4523,9 +4520,9 @@ impl Game {
         let (min, max) = (self.villages[pick].min, self.villages[pick].max);
         let big = self.villages[pick].houses >= CAMP_HORSEMAN_MIN_HOUSES;
         let houses: Vec<Tile> = match faction {
-            Faction::Player => &self.player_house_tiles,
-            Faction::Enemy => &self.world.enemy_house_tiles,
-            Faction::Ally => &self.world.ally_house_tiles,
+            Faction::Player => self.world.houses_of(owner_of(Faction::Player)),
+            Faction::Enemy => self.world.houses_of(owner_of(Faction::Enemy)),
+            Faction::Ally => self.world.houses_of(owner_of(Faction::Ally)),
         }
         .iter()
         .copied()
@@ -4744,9 +4741,9 @@ impl Game {
                 (hx - anchor.0).abs() >= VILLAGE_SPACING || (hy - anchor.1).abs() >= VILLAGE_SPACING
             })
         };
-        spaced(&self.world.enemy_house_tiles)
-            && spaced(&self.world.ally_house_tiles)
-            && spaced(&self.player_house_tiles)
+        spaced(self.world.houses_of(owner_of(Faction::Enemy)))
+            && spaced(self.world.houses_of(owner_of(Faction::Ally)))
+            && spaced(self.world.houses_of(owner_of(Faction::Player)))
     }
 
     /// Like `village_spot_clear`, but only against enemy and allied houses:
@@ -4758,13 +4755,15 @@ impl Game {
                 (hx - anchor.0).abs() >= VILLAGE_SPACING || (hy - anchor.1).abs() >= VILLAGE_SPACING
             })
         };
-        spaced(&self.world.enemy_house_tiles) && spaced(&self.world.ally_house_tiles)
+        spaced(self.world.houses_of(owner_of(Faction::Enemy)))
+            && spaced(self.world.houses_of(owner_of(Faction::Ally)))
     }
 
     /// Is a player house within reinforcement range of this anchor? Settlers
     /// landing here join the standing village instead of founding a new one.
     fn near_player_village(&self, anchor: Tile) -> bool {
-        self.player_house_tiles
+        self.world
+            .houses_of(owner_of(Faction::Player))
             .iter()
             .any(|&(hx, hy)| (hx - anchor.0).abs().max((hy - anchor.1).abs()) <= REINFORCE_RADIUS)
     }
@@ -4774,7 +4773,8 @@ impl Game {
     fn ensure_home_set(&mut self) {
         if self.home_continent.is_none() {
             let seed_tile = self
-                .player_house_tiles
+                .world
+                .houses_of(owner_of(Faction::Player))
                 .iter()
                 .min_by_key(|(x, y)| x.abs() + y.abs())
                 .copied()
@@ -4812,7 +4812,7 @@ impl Game {
         let (min, max) = (self.villages[pick].min, self.villages[pick].max);
         let houses: Vec<Tile> = self
             .world
-            .enemy_house_tiles
+            .houses_of(owner_of(Faction::Enemy))
             .iter()
             .copied()
             .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
@@ -4830,8 +4830,7 @@ impl Game {
             ] {
                 let (x, y) = (hx + dx, hy + dy);
                 if self.world.is_open_grass(x, y) {
-                    self.world
-                        .plant_faction_house(x, y, owner_of(Faction::Enemy));
+                    self.world.plant_house(x, y, owner_of(Faction::Enemy));
                     return;
                 }
             }
@@ -5059,10 +5058,8 @@ impl Game {
             if !self.village_spot_clear(anchor) {
                 continue;
             }
-            let before = self.world.enemy_house_tiles.len();
-            self.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
+            let houses = self.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
             self.hut_tiles = self.world.all_hut_tiles();
-            let houses: Vec<Tile> = self.world.enemy_house_tiles[before..].to_vec();
             if houses.is_empty() {
                 continue;
             }
@@ -5106,10 +5103,8 @@ impl Game {
             if self.on_home_continent(anchor) {
                 continue;
             }
-            let before = self.world.ally_house_tiles.len();
-            self.world.plant_camp(anchor, 4, owner_of(Faction::Ally));
+            let houses = self.world.plant_camp(anchor, 4, owner_of(Faction::Ally));
             self.hut_tiles = self.world.all_hut_tiles();
-            let houses: Vec<Tile> = self.world.ally_house_tiles[before..].to_vec();
             if houses.is_empty() {
                 continue;
             }
@@ -5167,7 +5162,7 @@ impl Game {
                 if wood + stone == 0 {
                     return false;
                 }
-                let allies = self.world.ally_house_tiles.clone();
+                let allies = self.world.houses_of(owner_of(Faction::Ally)).to_vec();
                 let Some((_, path)) = plan_trade_route(&mut self.world, &[(x, y)], &allies) else {
                     return false;
                 };
@@ -5319,13 +5314,9 @@ impl Game {
                 self.world.set_bridge(x, y, true);
                 self.player_bridges.push(t);
             }
-            Brush::House => match self.place_faction {
-                Faction::Player => {
-                    self.world.set_house(x, y, true);
-                    self.player_house_tiles.push(t);
-                }
-                Faction::Enemy | Faction::Ally => self.world.plant_faction_house(x, y, owner),
-            },
+            Brush::House => {
+                self.world.plant_house(x, y, owner);
+            }
             Brush::Wall => self.world.set_wall(x, y, owner, WALL_MAX_HP),
             Brush::Hut => {
                 self.world.set_hut(x, y, owner, HUT_MAX_HP);
@@ -5342,7 +5333,6 @@ impl Game {
     /// list it (houses, mines, huts, bridges, saplings, orders).
     fn clear_tile(&mut self, t: Tile) {
         self.world.clear_tile(t.0, t.1);
-        self.player_house_tiles.retain(|&h| h != t);
         self.cave_tiles.retain(|&c| c != t);
         self.hut_tiles.retain(|&h| h != t);
         self.player_bridges.retain(|&b| b != t);
@@ -5362,7 +5352,6 @@ impl Game {
     /// Wipe the whole testing ground back to bare grass, keeping the units.
     pub fn clear_terrain(&mut self) {
         self.world.wipe_flat();
-        self.player_house_tiles.clear();
         self.cave_tiles.clear();
         self.hut_tiles.clear();
         self.player_bridges.clear();
@@ -5612,7 +5601,7 @@ impl Game {
     fn collect_docks(&mut self) -> Vec<Tile> {
         let mut seen: HashSet<Tile> = HashSet::default();
         let mut docks = Vec::new();
-        let houses = self.player_house_tiles.clone();
+        let houses = self.world.houses_of(owner_of(Faction::Player)).to_vec();
         for (hx, hy) in houses {
             self.world.ensure_region(
                 hx - SHIP_NEAR_RADIUS,
@@ -5680,7 +5669,7 @@ impl Game {
     /// village saying why, when no other village can spare anyone or neither
     /// road nor sea reaches it.
     pub fn call_settlers(&mut self, center: Vec2) -> bool {
-        let villages = cluster(&self.player_house_tiles);
+        let villages = cluster(self.world.houses_of(owner_of(Faction::Player)));
         let centers: Vec<Vec2> = villages.iter().map(|v| village_center(v)).collect();
         let Some(target) = (0..villages.len()).min_by(|&a, &b| {
             centers[a]
@@ -5877,7 +5866,12 @@ impl Game {
             .iter()
             .filter(|e| e.is_soldier() && hostile(e.faction, Faction::Player))
             .map(|e| e.tile())
-            .chain(self.world.enemy_house_tiles.iter().copied())
+            .chain(
+                self.world
+                    .houses_of(owner_of(Faction::Enemy))
+                    .iter()
+                    .copied(),
+            )
             .filter(near_road)
             .collect();
         road.iter().all(|&(x, y)| {
@@ -5899,7 +5893,10 @@ impl Game {
             let Some(dest) = e.migrate_to else { continue };
             if e.faction != Faction::Player
                 || e.job != Job::Civilian
-                || !self.player_house_tiles.contains(&dest)
+                || !self
+                    .world
+                    .houses_of(owner_of(Faction::Player))
+                    .contains(&dest)
             {
                 e.migrate_to = None;
                 continue;
@@ -5971,7 +5968,7 @@ impl Game {
     /// If the village drawn has no sea route, the whole realm's docks go into
     /// one search as before, so trade never stalls on an unlucky draw.
     fn plan_harbor_route(&mut self) -> Option<(Tile, Vec<Tile>)> {
-        let allies = self.world.ally_house_tiles.clone();
+        let allies = self.world.houses_of(owner_of(Faction::Ally)).to_vec();
         let mine: Vec<usize> = (0..self.villages.len())
             .filter(|&i| self.villages[i].faction == Faction::Player)
             .collect();
@@ -6001,7 +5998,8 @@ impl Game {
         };
         let (min, max) = (v.min, v.max);
         let houses: Vec<Tile> = self
-            .player_house_tiles
+            .world
+            .houses_of(owner_of(Faction::Player))
             .iter()
             .copied()
             .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
@@ -6102,8 +6100,7 @@ impl Game {
             SiteKind::House => {
                 let ok = self.world.is_open_grass(x, y);
                 if ok {
-                    self.world.set_house(x, y, true);
-                    self.player_house_tiles.push((x, y));
+                    self.world.set_house(x, y, owner_of(Faction::Player));
                 }
                 ok
             }
@@ -6188,7 +6185,8 @@ impl Game {
                         continue;
                     }
                     let spaced = self
-                        .player_house_tiles
+                        .world
+                        .houses_of(owner_of(Faction::Player))
                         .iter()
                         .all(|&(hx, hy)| (hx - t.0).abs().max((hy - t.1).abs()) >= 2);
                     if !spaced {
@@ -6320,7 +6318,7 @@ impl Game {
         let (min, max) = (self.villages[vi].min, self.villages[vi].max);
         let houses: Vec<Tile> = self
             .world
-            .ally_house_tiles
+            .houses_of(owner_of(Faction::Ally))
             .iter()
             .copied()
             .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
@@ -6427,7 +6425,7 @@ impl Game {
         };
         // Every allied port goes into one search, so the escort leaves from
         // whichever truly connects, and the nearest one at that.
-        let houses = self.world.ally_house_tiles.clone();
+        let houses = self.world.houses_of(owner_of(Faction::Ally)).to_vec();
         let docks = self.docks_near(&houses);
         let Some((port, path)) = plan_voyage(&mut self.world, &docks, harbor) else {
             return refuse(self, LaunchRefusal::NoRoute);
@@ -6560,7 +6558,7 @@ impl Game {
         let (min, max) = (self.villages[vi].min, self.villages[vi].max);
         let houses: Vec<Tile> = self
             .world
-            .enemy_house_tiles
+            .houses_of(owner_of(Faction::Enemy))
             .iter()
             .copied()
             .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
@@ -9097,7 +9095,7 @@ const MAGIC: &[u8; 4] = b"KGDM";
 /// version listed in `from_bytes` loadable: new sections go at the tail of the
 /// blob and default to empty when a save predates them, so upgrading the game
 /// never strands a player's world.
-const VERSION: u8 = 19;
+const VERSION: u8 = 20;
 /// Oldest save version `from_bytes` still accepts. Version 13 is the last
 /// format before transports (it has no transport section to read), v14's
 /// transports carried only settlers (no per-ship knight count), v15 predates
@@ -9333,14 +9331,8 @@ impl Game {
                     }
                 }
             }
-            for &h in &chunk.houses {
-                wu8(&mut b, h as u8);
-            }
-            for &h in &chunk.enemy_houses {
-                wu8(&mut b, h as u8);
-            }
-            for &h in &chunk.ally_houses {
-                wu8(&mut b, h as u8);
+            for &h in &chunk.house_owner {
+                wu8(&mut b, h);
             }
             for &h in &chunk.bridges {
                 wu8(&mut b, h as u8);
@@ -9628,9 +9620,7 @@ impl Game {
             let mut chunk = crate::world::Chunk {
                 tiles: Vec::with_capacity(n_tiles),
                 nodes: Vec::with_capacity(n_tiles),
-                houses: Vec::with_capacity(n_tiles),
-                enemy_houses: Vec::with_capacity(n_tiles),
-                ally_houses: Vec::with_capacity(n_tiles),
+                house_owner: Vec::with_capacity(n_tiles),
                 bridges: Vec::with_capacity(n_tiles),
                 walls: Vec::with_capacity(n_tiles),
                 caves: Vec::with_capacity(n_tiles),
@@ -9661,14 +9651,26 @@ impl Game {
                     _ => None,
                 });
             }
-            for _ in 0..n_tiles {
-                chunk.houses.push(r.u8()? != 0);
-            }
-            for _ in 0..n_tiles {
-                chunk.enemy_houses.push(r.u8()? != 0);
-            }
-            for _ in 0..n_tiles {
-                chunk.ally_houses.push(r.u8()? != 0);
+            if version >= 20 {
+                for _ in 0..n_tiles {
+                    chunk.house_owner.push(r.u8()?);
+                }
+            } else {
+                // Before v20 the houses came as three boolean layers, one per
+                // faction (player, enemy, ally), in that order. Fold them into
+                // the single owner layer.
+                chunk.house_owner.resize(n_tiles, crate::world::NO_OWNER);
+                for owner in [
+                    owner_of(Faction::Player),
+                    owner_of(Faction::Enemy),
+                    owner_of(Faction::Ally),
+                ] {
+                    for slot in chunk.house_owner.iter_mut() {
+                        if r.u8()? != 0 {
+                            *slot = owner;
+                        }
+                    }
+                }
             }
             for _ in 0..n_tiles {
                 chunk.bridges.push(r.u8()? != 0);
@@ -9803,8 +9805,7 @@ impl Game {
             }
         }
 
-        // Rebuild the player-tile lists (houses, mines, huts) by scanning chunks.
-        let mut player_house_tiles = Vec::new();
+        // Rebuild the tile lists (mines, huts) by scanning chunks.
         let mut cave_tiles = Vec::new();
         let mut hut_tiles = Vec::new();
         for ((cx, cy), chunk) in &chunks {
@@ -9812,9 +9813,6 @@ impl Game {
                 for lx in 0..CHUNK {
                     let i = (ly * CHUNK + lx) as usize;
                     let tile = (cx * CHUNK + lx, cy * CHUNK + ly);
-                    if chunk.houses[i] {
-                        player_house_tiles.push(tile);
-                    }
                     if chunk.caves[i] {
                         cave_tiles.push(tile);
                     }
@@ -9837,8 +9835,8 @@ impl Game {
                 .unwrap_or(0);
             (((far - FOUND_BASE_RADIUS).max(0) / FOUND_RADIUS_STEP) as u32) + 1
         };
-        let enemy_villages_founded = frontier(&world.enemy_house_tiles);
-        let ally_villages_founded = frontier(&world.ally_house_tiles);
+        let enemy_villages_founded = frontier(world.houses_of(owner_of(Faction::Enemy)));
+        let ally_villages_founded = frontier(world.houses_of(owner_of(Faction::Ally)));
         let game = Game {
             world,
             entities,
@@ -9870,7 +9868,6 @@ impl Game {
             offscreen_cursor: 0,
             levy_term: 0.0,
             levy_quiet: 0.0,
-            player_house_tiles,
             cave_tiles,
             hut_tiles,
             build_sites,
@@ -9916,6 +9913,59 @@ mod tests {
         view_height: 28.0,
     };
 
+    /// Rewrite a current save's chunk section the way saves before v20 laid
+    /// it out: the one house-owner layer becomes three boolean layers (the
+    /// player's, the enemy's, and the allies' houses, in that order). The
+    /// tests that fake older saves by relabeling a fresh one go through here,
+    /// since everything before and after the chunks kept its layout.
+    fn with_legacy_houses(bytes: &[u8]) -> Vec<u8> {
+        let mut r = Reader { d: bytes, p: 0 };
+        // Header: magic, version, seed, seven counters, three mode bytes, and
+        // the camera.
+        r.p = 4 + 1 + 4 + 7 * 4 + 3 + 3 * 4;
+        let skip = |r: &mut Reader, n: usize| r.p += n;
+        let count = |r: &mut Reader| r.u32().expect("truncated save") as usize;
+        let n = count(&mut r);
+        skip(&mut r, 21 * n); // entities
+        let n = count(&mut r);
+        skip(&mut r, 8 * n); // bridges
+        skip(&mut r, 1); // auto_trade
+        for _ in 0..count(&mut r) {
+            skip(&mut r, 8 + 5 * 4);
+            let plen = count(&mut r);
+            skip(&mut r, 8 * plen);
+        }
+        let n = count(&mut r);
+        skip(&mut r, 12 * n); // warships
+        skip(&mut r, 1); // auto_build
+        let n = count(&mut r);
+        skip(&mut r, 8 * n); // zones
+        let n = count(&mut r);
+        skip(&mut r, 14 * n); // sites
+        let mut out = bytes[..r.p].to_vec();
+        let tiles = (CHUNK * CHUNK) as usize;
+        let chunks = count(&mut r);
+        wu32(&mut out, chunks as u32);
+        for _ in 0..chunks {
+            out.extend_from_slice(&bytes[r.p..r.p + 8 + 3 * tiles]);
+            skip(&mut r, 8 + 3 * tiles);
+            let owners = &bytes[r.p..r.p + tiles];
+            for owner in [
+                owner_of(Faction::Player),
+                owner_of(Faction::Enemy),
+                owner_of(Faction::Ally),
+            ] {
+                out.extend(owners.iter().map(|&o| (o == owner) as u8));
+            }
+            skip(&mut r, tiles);
+            let rest = 2 * tiles + 5 * tiles + 6 * tiles;
+            out.extend_from_slice(&bytes[r.p..r.p + rest]);
+            skip(&mut r, rest);
+        }
+        out.extend_from_slice(&bytes[r.p..]);
+        out
+    }
+
     /// Clear the board for a long, isolated run: every unit removed and every
     /// player house razed, so the realm neither gathers nor raises anyone while
     /// thousands of ticks play out. Removing the units alone no longer does it,
@@ -9923,8 +9973,8 @@ mod tests {
     /// deadlock for want of the very hands it produces.
     fn strip_realm(game: &mut Game) {
         game.entities.clear();
-        for (x, y) in std::mem::take(&mut game.player_house_tiles) {
-            game.world.set_house(x, y, false);
+        for (x, y) in game.world.houses_of(owner_of(Faction::Player)).to_vec() {
+            game.world.clear_tile(x, y);
         }
         game.survey_villages();
     }
@@ -9932,7 +9982,7 @@ mod tests {
     /// Find a water tile touching an allied house, the destination coast a ship
     /// sails to. Returns `None` if no allied coast exists.
     fn find_ally_port(game: &Game) -> Option<Tile> {
-        for &(hx, hy) in &game.world.ally_house_tiles {
+        for &(hx, hy) in game.world.houses_of(owner_of(Faction::Ally)) {
             for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                 let (wx, wy) = (hx + dx, hy + dy);
                 if game.world.is_open_water(wx, wy) {
@@ -10085,14 +10135,14 @@ mod tests {
             );
 
             // Crew up and sail.
-            let (hx, hy) = game.player_house_tiles[0];
+            let (hx, hy) = game.world.houses_of(owner_of(Faction::Player))[0];
             let spot = adjacent_walkable(&game.world, hx, hy).expect("no walkable tile by home");
             for _ in 0..(SETTLER_CIVILIANS + SETTLER_CIVILIANS_SPARED) {
                 game.entities
                     .push(Entity::new(Faction::Player, Job::Civilian, spot));
             }
             let civs0 = game.civilian_count(Faction::Player);
-            let houses0 = game.player_house_tiles.len();
+            let houses0 = game.world.houses_of(owner_of(Faction::Player)).len();
             assert!(
                 game.try_build(tile_center(shore)),
                 "seed {seed}: expedition refused",
@@ -10141,7 +10191,7 @@ mod tests {
                 "seed {seed}: ship never landed"
             );
             assert_eq!(
-                game.player_house_tiles.len(),
+                game.world.houses_of(owner_of(Faction::Player)).len(),
                 houses0 + COLONY_HOUSES,
                 "seed {seed}: the colony's houses never went up",
             );
@@ -10234,13 +10284,14 @@ mod tests {
         bytes.truncate(bytes.len() - (4 + n)); // origins
         assert_eq!(&bytes[bytes.len() - 4..], &[0, 0, 0, 0]);
         bytes.truncate(bytes.len() - 4); // empty transport count
+        let mut bytes = with_legacy_houses(&bytes);
         bytes[4] = 13;
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v13 save no longer loads");
         assert!(loaded.transports().is_empty());
         assert_eq!(loaded.money, game.money);
         assert_eq!(
-            loaded.player_house_tiles.len(),
-            game.player_house_tiles.len()
+            loaded.world.houses_of(owner_of(Faction::Player)).len(),
+            game.world.houses_of(owner_of(Faction::Player)).len()
         );
     }
 
@@ -10260,6 +10311,7 @@ mod tests {
         bytes.truncate(bytes.len() - (4 + n)); // unit flags
         bytes.truncate(bytes.len() - (4 + n)); // origins
         bytes.truncate(bytes.len() - 4); // drop the empty transport section
+        let mut bytes = with_legacy_houses(&bytes);
         bytes[4] = 14;
         wu32(&mut bytes, 1);
         wf32(&mut bytes, 12.5); // pos
@@ -10317,7 +10369,7 @@ mod tests {
             );
 
             // Muster a party and sail. Levies must not count toward it.
-            let (hx, hy) = game.player_house_tiles[0];
+            let (hx, hy) = game.world.houses_of(owner_of(Faction::Player))[0];
             let spot = adjacent_walkable(&game.world, hx, hy).expect("no walkable tile by home");
             for _ in 0..TROOP_KNIGHTS {
                 game.entities
@@ -10339,7 +10391,7 @@ mod tests {
 
             // Strip the land war so the voyage is all that runs, then sail.
             game.entities.clear();
-            let houses0 = game.player_house_tiles.len();
+            let houses0 = game.world.houses_of(owner_of(Faction::Player)).len();
             let sim = (port.0 - 6, port.1 - 6, port.0 + 6, port.1 + 6);
             let mut steps = 0;
             while !game.transports().is_empty() && steps < 20_000 {
@@ -10360,7 +10412,7 @@ mod tests {
                 "seed {seed}: the party should go ashore",
             );
             assert_eq!(
-                game.player_house_tiles.len(),
+                game.world.houses_of(owner_of(Faction::Player)).len(),
                 houses0,
                 "seed {seed}: a troop landing must not found a colony",
             );
@@ -10384,9 +10436,7 @@ mod tests {
         // four knights in it with its defenders gone: it flips to the player,
         // and with no enemy anywhere near, all but one knight settles down.
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
-        let before = game.world.enemy_house_tiles.len();
-        game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
-        let houses: Vec<Tile> = game.world.enemy_house_tiles[before..].to_vec();
+        let houses = game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
         assert!(!houses.is_empty(), "camp failed to plant");
         for k in 0..4 {
             let (hx, hy) = houses[k % houses.len()];
@@ -10399,7 +10449,10 @@ mod tests {
             assert!(game.world.is_house(x, y), "a captured house didn't convert");
         }
         assert!(
-            game.player_house_tiles.iter().any(|t| houses.contains(t)),
+            game.world
+                .houses_of(owner_of(Faction::Player))
+                .iter()
+                .any(|t| houses.contains(t)),
             "captured houses never joined the player's",
         );
         assert_eq!(game.civilian_count(Faction::Player), 3);
@@ -10428,10 +10481,10 @@ mod tests {
         // capture radius: a lone knight takes the undefended village, and most
         // of the villagers change hands with it.
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
-        let before = game.world.enemy_house_tiles.len();
+        let before = game.world.houses_of(owner_of(Faction::Enemy)).len();
         game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
         assert!(
-            game.world.enemy_house_tiles.len() > before,
+            game.world.houses_of(owner_of(Faction::Enemy)).len() > before,
             "camp failed to plant"
         );
         let outside = (anchor.0 + 12, anchor.1);
@@ -10493,9 +10546,10 @@ mod tests {
         // A small outpost falls with its people nearby: the enemy incorporates
         // most of them into its own realm.
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land");
-        game.world.set_house(anchor.0, anchor.1, true);
-        game.world.set_house(anchor.0 + 1, anchor.1, true);
-        game.rescan_player_houses();
+        game.world
+            .set_house(anchor.0, anchor.1, owner_of(Faction::Player));
+        game.world
+            .set_house(anchor.0 + 1, anchor.1, owner_of(Faction::Player));
         let outside = (anchor.0 + 10, anchor.1);
         for _ in 0..3 {
             game.entities
@@ -10566,9 +10620,7 @@ mod tests {
         game.entities.clear();
 
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
-        let before = game.world.enemy_house_tiles.len();
-        game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
-        let houses: Vec<Tile> = game.world.enemy_house_tiles[before..].to_vec();
+        let houses = game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
         assert!(!houses.is_empty(), "camp failed to plant");
         for k in 0..4 {
             let (hx, hy) = houses[k % houses.len()];
@@ -10628,7 +10680,7 @@ mod tests {
         let from = tile_center(anchor);
         let expected = game
             .world
-            .enemy_house_tiles
+            .houses_of(owner_of(Faction::Enemy))
             .iter()
             .map(|&h| tile_center(h))
             .min_by(|a, b| {
@@ -10664,11 +10716,13 @@ mod tests {
         // Strip out the allies: with no coast to sail to, a launch must fail and
         // leave the cargo untouched. (Land-locked water also can't reach one.)
         let mut game = Game::new(3);
-        game.world.ally_house_tiles.clear();
+        for (x, y) in game.world.houses_of(owner_of(Faction::Ally)).to_vec() {
+            game.world.clear_tile(x, y);
+        }
         // Open water in the village's own harbor, so the launch is refused for
         // want of a route rather than for being too far from home.
         let mut water = None;
-        'find: for &(hx, hy) in &game.player_house_tiles {
+        'find: for &(hx, hy) in game.world.houses_of(owner_of(Faction::Player)) {
             for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                 for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                     if game.world.is_open_water(hx + dx, hy + dy) {
@@ -11030,12 +11084,12 @@ mod tests {
 
         // The save holds only the edited chunks, and a load restores the realm
         // (regenerating pristine terrain from the seed on demand).
-        let mut houses = game.player_house_tiles.clone();
+        let mut houses = game.world.houses_of(owner_of(Faction::Player)).to_vec();
         houses.sort_unstable();
         let bytes = game.to_bytes(CAM);
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
         assert_eq!(loaded.world.chunks_iter().count(), edited);
-        let mut loaded_houses = loaded.player_house_tiles.clone();
+        let mut loaded_houses = loaded.world.houses_of(owner_of(Faction::Player)).to_vec();
         loaded_houses.sort_unstable();
         assert_eq!(loaded_houses, houses);
         for &(x, y) in &houses {
@@ -11081,7 +11135,7 @@ mod tests {
             let Some(port) = find_player_port(&mut game) else {
                 continue;
             };
-            let ally_houses = game.world.ally_house_tiles.len();
+            let ally_houses = game.world.houses_of(owner_of(Faction::Ally)).len();
             game.money = 321;
             game.ship_wood = 15;
             game.ship_stone = 35;
@@ -11104,7 +11158,10 @@ mod tests {
             assert_eq!(loaded.ship_wood, 15);
             assert_eq!(loaded.ship_stone, 35);
             assert!(loaded.auto_trade, "trade switch lost across save");
-            assert_eq!(loaded.world.ally_house_tiles.len(), ally_houses);
+            assert_eq!(
+                loaded.world.houses_of(owner_of(Faction::Ally)).len(),
+                ally_houses
+            );
             assert_eq!(loaded.ships().len(), 1);
             assert_eq!(loaded.ships()[0].reward, game.ships()[0].reward);
             assert_eq!(loaded.ships()[0].pos, game.ships()[0].pos);
@@ -11165,7 +11222,7 @@ mod tests {
         let (mut waterside, mut total) = (0u32, 0u32);
         for seed in 0..12 {
             let game = Game::new(seed);
-            for &(hx, hy) in &game.world.enemy_house_tiles {
+            for &(hx, hy) in game.world.houses_of(owner_of(Faction::Enemy)) {
                 total += 1;
                 let near = (-8..=8)
                     .any(|dy| (-8..=8).any(|dx| game.world.is_open_water(hx + dx, hy + dy)));
@@ -11209,7 +11266,7 @@ mod tests {
             game.wood = WARSHIP_WOOD_COST;
             game.stone = WARSHIP_STONE_COST;
             game.money = WARSHIP_GOLD_COST;
-            let land = game.player_house_tiles[0];
+            let land = game.world.houses_of(owner_of(Faction::Player))[0];
             assert!(!game.try_build(tile_center(land)));
             assert_eq!(game.warships().len(), 1);
             return;
@@ -12480,6 +12537,7 @@ mod tests {
         let migrants = 4 + 9 * game.entities.len();
         let tail = migrants + 4 + (1 + 1 + 4 + 4 + 4);
         bytes.truncate(bytes.len() - tail);
+        let mut bytes = with_legacy_houses(&bytes);
         bytes[4] = 17;
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v17 save must load");
         assert_eq!(loaded.warships().len(), 1);
@@ -12766,7 +12824,7 @@ mod tests {
     fn survey_spots_a_raid_and_alerts_once() {
         let mut game = Game::new(1);
         game.entities.clear();
-        let house = game.player_house_tiles[0];
+        let house = game.world.houses_of(owner_of(Faction::Player))[0];
         let home_village = |game: &Game| {
             game.villages()
                 .iter()
@@ -12852,7 +12910,7 @@ mod tests {
     fn pop_cap_sums_per_village() {
         let mut game = Game::new(1);
         game.survey_villages();
-        let capital_houses = game.player_house_tiles.len();
+        let capital_houses = game.world.houses_of(owner_of(Faction::Player)).len();
         assert_eq!(
             game.pop_cap(),
             VILLAGE_POP_BASE + capital_houses * VILLAGE_POP_PER_HOUSE
@@ -12861,8 +12919,8 @@ mod tests {
         // A second village far away raises the kingdom-wide allowance by its
         // own cap.
         let anchor = (
-            game.player_house_tiles[0].0 + VILLAGE_SPACING + 20,
-            game.player_house_tiles[0].1,
+            game.world.houses_of(owner_of(Faction::Player))[0].0 + VILLAGE_SPACING + 20,
+            game.world.houses_of(owner_of(Faction::Player))[0].1,
         );
         game.world
             .ensure_region(anchor.0 - 20, anchor.1 - 20, anchor.0 + 20, anchor.1 + 20);
@@ -12871,11 +12929,10 @@ mod tests {
         };
         let spots = open_tiles_near(&game.world, anchor.0, anchor.1, 4);
         for &(x, y) in spots.iter().step_by(4).take(4) {
-            game.world.set_house(x, y, true);
+            game.world.set_house(x, y, owner_of(Faction::Player));
         }
-        game.rescan_player_houses();
         game.survey_villages();
-        let total_houses = game.player_house_tiles.len();
+        let total_houses = game.world.houses_of(owner_of(Faction::Player)).len();
         assert!(total_houses > capital_houses, "the camp must add houses");
         assert_eq!(
             game.pop_cap(),
@@ -12889,7 +12946,7 @@ mod tests {
         game.entities.clear();
         // Stuff one enemy village to its cap (with civilians, so the global
         // civilian gate stays open) and leave the others empty.
-        let full = cluster(&game.world.enemy_house_tiles)
+        let full = cluster(game.world.houses_of(owner_of(Faction::Enemy)))
             .into_iter()
             .next()
             .expect("seed 1 plants enemy villages");
@@ -12922,9 +12979,7 @@ mod tests {
         // it qualifies to grow, and the growth check raises one house, which
         // lifts the village's population cap on the next survey.
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
-        let before = game.world.enemy_house_tiles.len();
-        game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
-        let houses: Vec<Tile> = game.world.enemy_house_tiles[before..].to_vec();
+        let houses = game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
         assert!(!houses.is_empty(), "camp failed to plant");
         for _ in 0..enemy_village_cap(houses.len()) {
             let spot = adjacent_walkable(&game.world, houses[0].0, houses[0].1).expect("no spot");
@@ -12933,10 +12988,10 @@ mod tests {
         }
         game.survey_villages();
 
-        let count = game.world.enemy_house_tiles.len();
+        let count = game.world.houses_of(owner_of(Faction::Enemy)).len();
         game.grow_enemy_village();
         assert_eq!(
-            game.world.enemy_house_tiles.len(),
+            game.world.houses_of(owner_of(Faction::Enemy)).len(),
             count + 1,
             "a full, quiet village must raise a house"
         );
@@ -12955,10 +13010,10 @@ mod tests {
         game.entities
             .push(Entity::new(Faction::Player, Job::Knight, lurker));
         game.survey_villages();
-        let count = game.world.enemy_house_tiles.len();
+        let count = game.world.houses_of(owner_of(Faction::Enemy)).len();
         game.grow_enemy_village();
         assert_eq!(
-            game.world.enemy_house_tiles.len(),
+            game.world.houses_of(owner_of(Faction::Enemy)).len(),
             count,
             "a threatened village must not grow"
         );
@@ -12970,7 +13025,7 @@ mod tests {
         // cut down below the workforce floor must still be able to recover.
         let mut game = Game::new(1);
         game.entities.clear();
-        let (hx, hy) = game.player_house_tiles[0];
+        let (hx, hy) = game.world.houses_of(owner_of(Faction::Player))[0];
         let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot by the capital");
         game.entities
             .push(Entity::new(Faction::Player, Job::Civilian, spot));
@@ -13010,7 +13065,7 @@ mod tests {
         // that happens to lie nearest the allies.
         let mut game = Game::new(1);
         let port = find_ally_port(&game).expect("seed 1 plants allied coasts");
-        let capital = game.player_house_tiles[0];
+        let capital = game.world.houses_of(owner_of(Faction::Player))[0];
         // A colony on some other coast: walk out from the capital until open
         // water sits beside land far enough off to be its own village.
         let mut colony = None;
@@ -13031,8 +13086,8 @@ mod tests {
         let Some(colony) = colony else {
             return; // this seed offers no second coast; nothing to prove here
         };
-        game.world.set_house(colony.0, colony.1, true);
-        game.rescan_player_houses();
+        game.world
+            .set_house(colony.0, colony.1, owner_of(Faction::Player));
         game.survey_villages();
 
         // Launch many ships and note which village each sailed from.
@@ -13121,21 +13176,23 @@ mod tests {
             if !game.village_spot_clear(anchor) {
                 continue;
             }
-            let before = game.world.enemy_house_tiles.len();
+            let before = game.world.houses_of(owner_of(Faction::Enemy)).len();
             game.world.plant_camp(anchor, 4, owner_of(Faction::Enemy));
             'grid: for ry in (-6..=6).step_by(3) {
                 for rx in (-6..=6).step_by(3) {
-                    if game.world.enemy_house_tiles.len() - before >= ENEMY_BUD_MIN_HOUSES {
+                    if game.world.houses_of(owner_of(Faction::Enemy)).len() - before
+                        >= ENEMY_BUD_MIN_HOUSES
+                    {
                         break 'grid;
                     }
                     let (x, y) = (anchor.0 + rx, anchor.1 + ry);
                     if game.world.is_open_grass(x, y) {
-                        game.world
-                            .plant_faction_house(x, y, owner_of(Faction::Enemy));
+                        game.world.plant_house(x, y, owner_of(Faction::Enemy));
                     }
                 }
             }
-            let houses: Vec<Tile> = game.world.enemy_house_tiles[before..].to_vec();
+            let houses: Vec<Tile> =
+                game.world.houses_of(owner_of(Faction::Enemy))[before..].to_vec();
             if houses.len() < ENEMY_BUD_MIN_HOUSES {
                 continue;
             }
@@ -13193,7 +13250,7 @@ mod tests {
         );
         assert!(
             game.world
-                .enemy_house_tiles
+                .houses_of(owner_of(Faction::Enemy))
                 .iter()
                 .any(|&(x, y)| (x - site.0).abs() <= 5 && (y - site.1).abs() <= 5),
             "no village was founded at the party's site"
@@ -13208,7 +13265,7 @@ mod tests {
                 continue;
             }
             // Garrison the first allied village with a company to spare.
-            let (hx, hy) = game.world.ally_house_tiles[0];
+            let (hx, hy) = game.world.houses_of(owner_of(Faction::Ally))[0];
             let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot by the camp");
             for _ in 0..(MERC_KNIGHTS + MERC_GARRISON) {
                 game.entities
@@ -13301,8 +13358,8 @@ mod tests {
         // A player outpost held only by an allied knight: the enemy standing
         // in it doesn't take it, since the ally holds it for the player.
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land");
-        game.world.set_house(anchor.0, anchor.1, true);
-        game.rescan_player_houses();
+        game.world
+            .set_house(anchor.0, anchor.1, owner_of(Faction::Player));
         game.entities
             .push(Entity::new(Faction::Ally, Job::Knight, anchor));
         game.entities
@@ -13315,7 +13372,7 @@ mod tests {
 
         // An ally alone in an enemy village still never flips it: only the
         // player takes enemy ground.
-        let camp = cluster(&game.world.enemy_house_tiles)
+        let camp = cluster(game.world.houses_of(owner_of(Faction::Enemy)))
             .into_iter()
             .next()
             .expect("seed 3 plants enemy villages");
@@ -13324,7 +13381,7 @@ mod tests {
             .push(Entity::new(Faction::Ally, Job::Knight, camp[0]));
         game.resolve_captures();
         assert!(
-            game.world.is_enemy_house(camp[0].0, camp[0].1),
+            game.world.house_owner(camp[0].0, camp[0].1) == Some(owner_of(Faction::Enemy)),
             "allies never capture on the player's behalf"
         );
     }
@@ -13334,12 +13391,13 @@ mod tests {
         let mut game = Game::new(1);
         // A fresh outpost with empty homes: the next new villager is raised
         // there, not at the bustling capital.
-        let (cx, cy) = game.player_house_tiles[0];
+        let (cx, cy) = game.world.houses_of(owner_of(Faction::Player))[0];
         let anchor =
             find_land_anchor(&mut game.world, (cx + 100, cy), 30).expect("no land for an outpost");
-        game.world.set_house(anchor.0, anchor.1, true);
-        game.world.set_house(anchor.0 + 1, anchor.1, true);
-        game.rescan_player_houses();
+        game.world
+            .set_house(anchor.0, anchor.1, owner_of(Faction::Player));
+        game.world
+            .set_house(anchor.0 + 1, anchor.1, owner_of(Faction::Player));
         game.survey_villages();
 
         let before = game.entities.len();
@@ -13358,8 +13416,8 @@ mod tests {
         let mut game = Game::new(1);
         // Settlers dropping anchor by a village the player already holds join
         // it: more hands, no new houses, and the right toast.
-        let (hx, hy) = game.player_house_tiles[0];
-        let houses_before = game.player_house_tiles.len();
+        let (hx, hy) = game.world.houses_of(owner_of(Faction::Player))[0];
+        let houses_before = game.world.houses_of(owner_of(Faction::Player)).len();
         let civs_before = game.civilian_count(Faction::Player);
         game.land_transport(Transport {
             pos: tile_center((hx, hy)),
@@ -13373,7 +13431,7 @@ mod tests {
             facing: Dir::Right,
         });
         assert_eq!(
-            game.player_house_tiles.len(),
+            game.world.houses_of(owner_of(Faction::Player)).len(),
             houses_before,
             "a reinforcement must not found new houses"
         );
@@ -13396,7 +13454,7 @@ mod tests {
     fn lost_village_rallies_only_nearby_knights() {
         let mut game = Game::new(1);
         game.entities.clear();
-        let village = cluster(&game.player_house_tiles)
+        let village = cluster(game.world.houses_of(owner_of(Faction::Player)))
             .into_iter()
             .next()
             .expect("the player starts with a village");
@@ -13562,8 +13620,8 @@ mod tests {
         assert!(game.sandbox());
         assert!(game.entities.is_empty());
         assert!(game.player_houses().is_empty());
-        assert!(game.world.enemy_house_tiles.is_empty());
-        assert!(game.world.ally_house_tiles.is_empty());
+        assert!(game.world.houses_of(owner_of(Faction::Enemy)).is_empty());
+        assert!(game.world.houses_of(owner_of(Faction::Ally)).is_empty());
 
         // Every tile is bare grass, however far out, and it all walks.
         game.world.ensure_region(-200, -200, 200, 200);
@@ -13582,7 +13640,7 @@ mod tests {
         assert!(game.villages().is_empty());
         assert!(game.pirates().is_empty());
         assert!(game.transports().is_empty());
-        assert!(game.world.enemy_house_tiles.is_empty());
+        assert!(game.world.houses_of(owner_of(Faction::Enemy)).is_empty());
     }
 
     /// Knights placed on the testing ground at `player` and `enemy` tiles,
@@ -13936,8 +13994,8 @@ mod tests {
         assert_eq!(game.player_houses(), &[(3, 0)]);
         game.place_faction = Faction::Enemy;
         assert!(game.sandbox_click(at(4, 0)));
-        assert!(game.world.is_enemy_house(4, 0));
-        assert_eq!(game.world.enemy_house_tiles, vec![(4, 0)]);
+        assert_eq!(game.world.house_owner(4, 0), Some(owner_of(Faction::Enemy)));
+        assert_eq!(game.world.houses_of(owner_of(Faction::Enemy)), &[(4, 0)]);
         game.place_faction = Faction::Ally;
         game.place_brush = Brush::Wall;
         assert!(game.sandbox_click(at(5, 0)));
@@ -13960,8 +14018,8 @@ mod tests {
         // A right-click on an empty tile is the eraser, as is the grass
         // brush, and both drop the tile from every index.
         game.sandbox_erase(at(4, 0));
-        assert!(!game.world.is_enemy_house(4, 0));
-        assert!(game.world.enemy_house_tiles.is_empty());
+        assert!(!game.world.is_house(4, 0));
+        assert!(game.world.houses_of(owner_of(Faction::Enemy)).is_empty());
         game.place_brush = Brush::Grass;
         assert!(game.sandbox_click(at(3, 0)));
         assert!(game.player_houses().is_empty());
@@ -13983,7 +14041,7 @@ mod tests {
             assert!(game.world.is_open_grass(x, 0));
         }
         assert!(game.huts().is_empty());
-        assert!(game.world.ally_house_tiles.is_empty());
+        assert!(game.world.houses_of(owner_of(Faction::Ally)).is_empty());
     }
 
     #[test]
@@ -14014,8 +14072,7 @@ mod tests {
         let mut game = Game::new_sandbox();
         game.world.ensure_region(-30, -30, 90, 30);
         for t in [(0, 0), (3, 0), (60, 0), (63, 0)] {
-            game.world.set_house(t.0, t.1, true);
-            game.player_house_tiles.push(t);
+            game.world.set_house(t.0, t.1, owner_of(Faction::Player));
         }
         for i in 0..people {
             game.entities
@@ -14132,7 +14189,7 @@ mod tests {
     #[test]
     fn migrants_finish_the_trip_after_a_load() {
         let mut game = Game::new(1);
-        let house = game.player_house_tiles[0];
+        let house = game.world.houses_of(owner_of(Faction::Player))[0];
         game.entities[0].job = Job::Civilian;
         game.entities[0].migrate_to = Some(house);
         let bytes = game.to_bytes(CAM);
@@ -14143,6 +14200,7 @@ mod tests {
         // A v18 save predates migrants: it loads with nobody on the road.
         let mut bytes = game.to_bytes(CAM);
         bytes.truncate(bytes.len() - (4 + 9 * game.entities.len()));
+        let mut bytes = with_legacy_houses(&bytes);
         bytes[4] = 18;
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v18 save must load");
         assert_eq!(loaded.entities.len(), game.entities.len());
