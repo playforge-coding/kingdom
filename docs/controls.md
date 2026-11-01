@@ -155,6 +155,14 @@ kingdom:
   yet is dark. **Click or drag** on the minimap to move the camera there.
 - **:lucide-map: Overview (M):** toggles the [overview](#the-overview).
 - **Village count:** how many villages you, the enemy, and the allies hold.
+- **Diplomacy:** only when other realms share the map (see
+  [Multiplayer](multiplayer.md)). One row per other realm, saying whether it
+  is run by a person or the computer and how you stand: **At war** with a
+  **Propose alliance** button, **Proposal sent** with **Withdraw**, **Offers
+  an alliance** with **Accept** and **Decline**, **Allied** with **Leave**, or
+  the countdown once either side has given notice. An alliance needs both
+  sides to agree, and leaving one takes a minute to come into force, so
+  nobody can turn on an ally in the middle of a shared battle.
 - **Your villages:** one row per village, with where it is relative to the
   camera (for example *120 tiles northeast*, or *In view*), its houses, its
   population against its own cap, and the knights and civilians standing in it.
