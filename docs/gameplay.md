@@ -52,9 +52,14 @@ before it arrives and the village is never founded.
 
 ## Factions
 
-Three factions share the world:
+Three kinds of faction share the world:
 
-- **You** (blue): the settlement you grow and command.
+- **Realms** (yours is blue): empires run on the player's rules, growing,
+  trading and recruiting the way you do. In a single-player world there is
+  one, yours. The code is built for several (see
+  **[Multiplayer](multiplayer.md)**), each with its own stockpile, flags,
+  orders and alerts; realms are at war with one another unless they are the
+  same realm.
 - **The enemy** (red): hostile to everyone. Their villages raid you *and* the
   allies, and you capture ground by clearing their villages of defenders. Once
   a village of theirs grows large, it **raids by sea** too, landing knights by
