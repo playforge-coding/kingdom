@@ -1,5 +1,6 @@
 mod app;
 mod atlas;
+mod bot;
 mod camera;
 mod game;
 mod gfx;

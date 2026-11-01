@@ -2295,6 +2295,10 @@ pub struct Realm {
     /// to answer or a hostile in sight; they sail home at
     /// `ESCORT_STAND_DOWN`. Transient.
     escort_quiet: f32,
+    /// Seconds until a computer-run realm next thinks (see `bot`). Spread
+    /// out by seat so the realms take their turns on different frames.
+    /// Transient.
+    bot_timer: f32,
     /// The realm's home landmass, flood-filled once and cached, so allied
     /// villages can be kept off it (reaching them means a sea voyage).
     home_continent: Option<HashSet<Tile>>,
@@ -2333,6 +2337,7 @@ impl Realm {
             spawn_cycle: 0,
             merc_quiet: 0.0,
             escort_quiet: 0.0,
+            bot_timer: 1.0,
             home_continent,
             alerts: Vec::new(),
             alert_cooldowns: Vec::new(),
@@ -2663,7 +2668,9 @@ impl Game {
             // Each realm's home landmass is mapped so allied camps can be kept
             // off it (reaching the allies must mean a sea voyage).
             let home = home_continent_tiles(&mut world, capital, 300, 60_000);
-            realms.push(Realm::new(controller, Some(home)));
+            let mut realm = Realm::new(controller, Some(home));
+            realm.bot_timer = 1.0 + k as f32 * 0.7;
+            realms.push(realm);
         }
         let home = realms[0].home_continent.clone().unwrap_or_default();
         let near_capital = |t: Tile| {
@@ -3056,6 +3063,9 @@ impl Game {
         }
         self.grow_saplings(dt);
         self.tick_diplomacy(dt);
+        if !sandbox {
+            self.run_bots(dt);
+        }
 
         // Decide who is stepped this frame, and by how much. Everyone near the
         // view runs at the full frame rate; the rest of the realm accrues time
@@ -5938,6 +5948,74 @@ impl Game {
     /// The pending construction order on `tile`, if any.
     pub fn site_at(&self, tile: Tile) -> Option<&BuildSite> {
         self.build_sites.iter().find(|s| s.tile == tile)
+    }
+
+    /// A pending order of `kind` placed by `realm`, if it has one.
+    pub fn site_of(&self, realm: RealmId, kind: SiteKind) -> Option<&BuildSite> {
+        self.build_sites
+            .iter()
+            .find(|s| s.realm == realm && s.kind == kind)
+    }
+
+    /// Could `realm` order a house on `tile` right now: open grass by its
+    /// village, with no order already there and a tile's gap from its
+    /// standing houses? The rule `plan_auto_builds` fills zones by.
+    pub fn house_may_go(&self, realm: RealmId, tile: Tile) -> bool {
+        self.site_placeable(realm, tile, SiteKind::House)
+            && self.site_at(tile).is_none()
+            && self
+                .houses(realm)
+                .iter()
+                .all(|&(hx, hy)| (hx - tile.0).abs().max((hy - tile.1).abs()) >= 2)
+    }
+
+    /// How many huts `realm` holds.
+    pub fn realm_huts(&self, realm: RealmId) -> usize {
+        let owner = owner_of(Faction::Realm(realm));
+        self.hut_tiles
+            .iter()
+            .filter(|&&(x, y)| self.world.hut(x, y).is_some_and(|h| h.owner == owner))
+            .count()
+    }
+
+    /// A standing tree within `r` tiles of `near`, nearest first, if any.
+    pub fn tree_near(&self, near: Tile, r: i32) -> Option<Tile> {
+        let mut best: Option<(Tile, i32)> = None;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let t = (near.0 + dx, near.1 + dy);
+                if self.world.node(t.0, t.1).map(|n| n.kind) == Some(Resource::Wood) {
+                    let d = dx.abs() + dy.abs();
+                    if best.is_none_or(|(_, bd)| d < bd) {
+                        best = Some((t, d));
+                    }
+                }
+            }
+        }
+        best.map(|(t, _)| t)
+    }
+
+    /// Give every computer-run realm its turn to think when its clock comes
+    /// round, and carry out what it orders (see `bot::think`). Realms whose
+    /// clocks are spread apart think on different frames, so a match full
+    /// of them costs a little every frame rather than a lot every few.
+    fn run_bots(&mut self, dt: f32) {
+        for realm in self.realm_ids() {
+            let r = self.realm_mut(realm);
+            if r.controller != Controller::Ai {
+                continue;
+            }
+            r.bot_timer -= dt;
+            if r.bot_timer > 0.0 {
+                continue;
+            }
+            r.bot_timer = crate::bot::THINK_INTERVAL;
+            let mut rng = Rng::new(self.rng.next_u32() as u64 | 1);
+            let orders = crate::bot::think(self, realm, &mut rng);
+            for order in orders {
+                self.apply(realm, order);
+            }
+        }
     }
 
     /// How a left-button drag starting with a press at `world_pos` carries
@@ -12358,6 +12436,71 @@ mod tests {
         let solo = Game::new_match(3, MatchSettings::default());
         assert_eq!(solo.realm_count(), 1);
         assert_eq!(solo.houses(0), Game::new(3).houses(0));
+    }
+
+    /// A computer-run realm plays through orders: left to itself it switches
+    /// its automation on and zones its capital, and with a strike force to
+    /// spare it marches on a hostile village; a person's realm is left
+    /// alone.
+    #[test]
+    fn the_computer_runs_its_realm_through_orders() {
+        let settings = MatchSettings {
+            slots: 2,
+            ai_may_ally: true,
+        };
+        let mut game = Game::new_match(3, settings);
+        let sim = (-200, -200, 200, 200);
+        for _ in 0..100 {
+            game.update(0.1, sim);
+        }
+        let bot = game.realm(1);
+        assert!(
+            bot.auto_build,
+            "the computer never switched its builders on"
+        );
+        assert!(bot.auto_trade, "the computer never switched its harbor on");
+        assert_eq!(
+            bot.auto_zones().len(),
+            1,
+            "the computer never zoned its capital"
+        );
+        let me = game.realm(0);
+        assert!(
+            !me.auto_build && me.auto_zones().is_empty(),
+            "the computer ran my realm"
+        );
+
+        // Given a strike force, it picks the nearest hostile village in range
+        // and plants one flag on it.
+        let (hx, hy) = game.houses(1)[0];
+        let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot");
+        for _ in 0..12 {
+            game.entities
+                .push(Entity::new(Faction::Realm(1), Job::Knight, spot));
+        }
+        game.survey_villages();
+        let mut rng = Rng::new(5);
+        let orders = crate::bot::think(&game, 1, &mut rng);
+        let flags = orders
+            .iter()
+            .filter(|o| matches!(o, Command::ToggleRally(_)))
+            .count();
+        let in_range = game.villages().iter().any(|v| {
+            game.hostile(v.faction, Faction::Realm(1))
+                && v.center.distance(game.start_center(1)) <= 70.0
+        });
+        assert_eq!(flags, usize::from(in_range), "orders: {orders:?}");
+        // Outnumbered and allowed to, it sues for peace with the biggest
+        // realm; the person's realm hears the proposal.
+        for _ in 0..20 {
+            game.entities
+                .push(Entity::new(Faction::Realm(0), Job::Knight, spot));
+        }
+        let orders = crate::bot::think(&game, 1, &mut rng);
+        assert!(
+            orders.contains(&Command::ProposeAlliance(0)),
+            "orders: {orders:?}"
+        );
     }
 
     /// Orders are how everything reaches a realm: the switches and settings
