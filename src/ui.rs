@@ -15,11 +15,11 @@ use crate::game::{
     BUILD_NEAR_RADIUS, BUILDER_WAGE, Brush, BuildMode, ESCORT_HIRE_COST, Faction, Game,
     GatherPriority, HORSEMAN_GOLD_COST, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
     HUT_GOLD_COST, Job, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, LEVY_SERVICE, LaunchRefusal, MAX_ESCORTS,
-    MINE_GOLD_COST, MINE_STONE_COST, Priority, SETTLER_CIVILIANS, SETTLER_CIVILIANS_SPARED,
-    SETTLER_GOLD_COST, SETTLER_STONE_COST, SETTLER_WOOD_COST, STONE_PRICE, SandboxTool,
-    TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST, TROOP_WOOD_COST, WALL_GOLD_COST,
-    WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST, WARSHIP_WOOD_COST,
-    WOOD_PRICE,
+    MINE_GOLD_COST, MINE_STONE_COST, Priority, RealmId, SETTLER_CIVILIANS,
+    SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST, SETTLER_WOOD_COST,
+    STONE_PRICE, SandboxTool, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST, TROOP_WOOD_COST,
+    WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST,
+    WARSHIP_WOOD_COST, WOOD_PRICE,
 };
 
 /// An action the UI is requesting the app perform this frame.
@@ -119,6 +119,9 @@ pub enum Scene<'a> {
     },
     Game {
         game: &'a mut Game,
+        /// The realm this player runs: whose stockpile, flags and alerts the
+        /// HUD shows and whose orders its buttons give.
+        me: RealmId,
         view: View,
         colors: &'a MapColors,
         /// The slot name the HUD's save box edits.
@@ -198,6 +201,7 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
         } => menu_ui(ui, menu, slots, *has_game),
         Scene::Game {
             game,
+            me,
             view,
             colors,
             save_name,
@@ -206,13 +210,13 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
             // The testing ground has no stockpile, orders, or realm to keep
             // track of: its one panel is the unit picker.
             if game.sandbox() {
-                let hud = sandbox_ui(&ctx, game, colors);
-                let alert = alerts_ui(&ctx, game, *view);
+                let hud = sandbox_ui(&ctx, game, *me, colors);
+                let alert = alerts_ui(&ctx, game, *me, *view);
                 return hud.or(alert);
             }
-            let hud = game_ui(&ctx, game, save_name);
-            let realm = realm_ui(&ctx, game, *view, colors, minimap);
-            let alert = alerts_ui(&ctx, game, *view);
+            let hud = game_ui(&ctx, game, *me, save_name);
+            let realm = realm_ui(&ctx, game, *me, *view, colors, minimap);
+            let alert = alerts_ui(&ctx, game, *me, *view);
             hud.or(realm).or(alert)
         }
     }
@@ -317,7 +321,12 @@ fn menu_ui(
 /// The testing ground's panel: pick a faction and a unit type to place with
 /// left-click, a terrain or structure brush to paint instead, or the rally
 /// flag, and see who's on the grid.
-fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Option<Action> {
+fn sandbox_ui(
+    ctx: &egui::Context,
+    game: &mut Game,
+    me: RealmId,
+    colors: &MapColors,
+) -> Option<Action> {
     let mut action = None;
     egui::Window::new("Testing Ground")
         .default_pos([12.0, 12.0])
@@ -410,18 +419,16 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
                     RichText::new("Rally your knights").strong(),
                 ),
             );
-            if !game.rallies().is_empty()
+            let flags = game.realm(me).rallies().len();
+            if flags > 0
                 && ui
                     .button((
                         icon(ui, icons::X),
-                        format!(
-                            "Clear {}",
-                            plural(game.rallies().len(), "rally flag", "rally flags")
-                        ),
+                        format!("Clear {}", plural(flags, "rally flag", "rally flags")),
                     ))
                     .clicked()
             {
-                game.clear_rally();
+                game.realm_mut(me).clear_rally();
             }
             ui.small(
                 "Plant as many flags as you like: your soldiers split up among them, nearest \
@@ -433,7 +440,7 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
             let (yours, enemy, allied) = game.faction_counts();
             ui.label(
                 RichText::new(format!("Yours: {yours}"))
-                    .color(faction_color32(colors, Faction::Realm(0))),
+                    .color(faction_color32(colors, Faction::Realm(me))),
             );
             ui.label(
                 RichText::new(format!("Enemy: {enemy}"))
@@ -444,7 +451,7 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
                     .color(faction_color32(colors, Faction::Ally)),
             );
             ui.label(format!("Enemies defeated: {}", game.enemies_defeated));
-            ui.label(format!("Units lost: {}", game.units_lost));
+            ui.label(format!("Units lost: {}", game.realm(me).units_lost));
             ui.horizontal(|ui| {
                 if ui.button((icon(ui, icons::X), "Clear everyone")).clicked() {
                     game.clear_units();
@@ -467,7 +474,12 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
     action
 }
 
-fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Option<Action> {
+fn game_ui(
+    ctx: &egui::Context,
+    game: &mut Game,
+    me: RealmId,
+    save_name: &mut String,
+) -> Option<Action> {
     let mut action = None;
     egui::Window::new("Kingdom")
         .default_pos([12.0, 12.0])
@@ -478,45 +490,47 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
             egui::ScrollArea::vertical()
                 .max_height(ctx.content_rect().height() - 72.0)
                 .show(ui, |ui| {
+            let realm = game.realm(me);
             ui.heading("Stockpile");
-            icon_label(ui, icons::TREE_PINE, format!("Wood: {}", game.wood));
-            icon_label(ui, icons::MOUNTAIN, format!("Stone: {}", game.stone));
-            icon_label(ui, icons::COINS, format!("Gold: {}", game.money));
+            icon_label(ui, icons::TREE_PINE, format!("Wood: {}", realm.wood));
+            icon_label(ui, icons::MOUNTAIN, format!("Stone: {}", realm.stone));
+            icon_label(ui, icons::COINS, format!("Gold: {}", realm.money));
             ui.separator();
 
             ui.label(format!(
                 "Population: {} / {}",
-                game.population(),
-                game.pop_cap()
+                game.population(me),
+                game.pop_cap(me)
             ));
-            let (farming, mining, building) = game.role_counts();
+            let (farming, mining, building) = game.role_counts(me);
             ui.small(format!(
                 "Civilians: {farming} farming, {mining} mining, {building} building"
             ));
             ui.label(format!("Enemies defeated: {}", game.enemies_defeated));
-            ui.label(format!("Units lost: {}", game.units_lost));
+            ui.label(format!("Units lost: {}", realm.units_lost));
             ui.separator();
 
             ui.heading("Priority");
+            let realm = game.realm_mut(me);
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut game.priority, Priority::Agriculture,
+                ui.selectable_value(&mut realm.priority, Priority::Agriculture,
                     (icon(ui, icons::WHEAT), "Agriculture"),
                 );
-                ui.selectable_value(&mut game.priority, Priority::Military,
+                ui.selectable_value(&mut realm.priority, Priority::Military,
                     (icon(ui, icons::SWORDS), "Military"),
                 );
             });
             ui.horizontal(|ui| {
                 ui.label("Gather:");
                 ui.selectable_value(
-                    &mut game.gather_priority,
+                    &mut realm.gather_priority,
                     GatherPriority::Balanced,
                     "Balanced",
                 );
-                ui.selectable_value(&mut game.gather_priority, GatherPriority::Wood,
+                ui.selectable_value(&mut realm.gather_priority, GatherPriority::Wood,
                     (icon(ui, icons::TREE_PINE), "Wood"),
                 );
-                ui.selectable_value(&mut game.gather_priority, GatherPriority::Stone,
+                ui.selectable_value(&mut realm.gather_priority, GatherPriority::Stone,
                     (icon(ui, icons::MOUNTAIN), "Stone"),
                 );
             });
@@ -531,18 +545,18 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
                 )
                 .clicked()
             {
-                game.proclaim_draft();
+                game.proclaim_draft(me);
             }
-            if let Some(secs) = game.levy_term_remaining() {
+            if let Some(secs) = game.realm(me).levy_term_remaining() {
                 icon_label(
                     ui,
                     icons::SCROLL_TEXT,
                     format!("Levies serve {:.0}s more", secs.ceil()),
                 );
             }
-            let (levies, owed) = game.levies_owed();
+            let (levies, owed) = game.levies_owed(me);
             if levies > 0 {
-                let tint = if game.money >= owed { ui.visuals().text_color() } else { ALARM };
+                let tint = if game.realm(me).money >= owed { ui.visuals().text_color() } else { ALARM };
                 ui.horizontal(|ui| {
                     ui.add(icon(ui, icons::COINS).tint(tint));
                     ui.label(
@@ -618,7 +632,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
                 ),
             );
             ui.checkbox(
-                &mut game.auto_build,
+                &mut game.realm_mut(me).auto_build,
                 "Let builders build on their own in zones",
             );
             ui.small("While this is on, builders keep raising houses inside your zones.");
@@ -627,15 +641,16 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
                 BuildMode::Rally,
                 (icon(ui, icons::FLAG), "Rally knights"),
             );
-            if !game.rallies().is_empty()
+            let flags = game.realm(me).rallies().len();
+            if flags > 0
                 && ui
                     .button((
                         icon(ui, icons::X),
-                        format!("Clear {}", plural(game.rallies().len(), "rally flag", "rally flags")),
+                        format!("Clear {}", plural(flags, "rally flag", "rally flags")),
                     ))
                     .clicked()
             {
-                game.clear_rally();
+                game.realm_mut(me).clear_rally();
             }
             ui.small(
                 "Plant as many flags as you like: your soldiers split up among them, nearest \
@@ -643,7 +658,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
                  arrives.",
             );
             // Hired help: an allied company that answers the flag.
-            if game.player_flag()
+            if game.realm(me).player_flag()
                 && ui
                     .button((
                         icon(ui, icons::SWORDS),
@@ -654,13 +669,13 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
                     ))
                     .clicked()
             {
-                game.hire_mercenaries();
+                game.hire_mercenaries(me);
             }
-            let mercs = game.mercenaries();
+            let mercs = game.mercenaries(me);
             let companies = game
                 .transports()
                 .iter()
-                .filter(|t| t.faction == Faction::Ally)
+                .filter(|t| t.hired_by() == Some(me))
                 .count();
             if mercs > 0 || companies > 0 {
                 icon_label(
@@ -693,22 +708,23 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
             );
             // Adjust the cargo the next ship carries. Load is capped to the
             // stockpile when the ship is actually dispatched.
+            let realm = game.realm_mut(me);
             ui.horizontal(|ui| {
-                icon_label(ui, icons::TREE_PINE, format!("Wood: {}", game.ship_wood));
+                icon_label(ui, icons::TREE_PINE, format!("Wood: {}", realm.ship_wood));
                 if ui.small_button(icon(ui, icons::MINUS)).clicked() {
-                    game.ship_wood = game.ship_wood.saturating_sub(5);
+                    realm.ship_wood = realm.ship_wood.saturating_sub(5);
                 }
                 if ui.small_button(icon(ui, icons::PLUS)).clicked() {
-                    game.ship_wood += 5;
+                    realm.ship_wood += 5;
                 }
             });
             ui.horizontal(|ui| {
-                icon_label(ui, icons::MOUNTAIN, format!("Stone: {}", game.ship_stone));
+                icon_label(ui, icons::MOUNTAIN, format!("Stone: {}", realm.ship_stone));
                 if ui.small_button(icon(ui, icons::MINUS)).clicked() {
-                    game.ship_stone = game.ship_stone.saturating_sub(5);
+                    realm.ship_stone = realm.ship_stone.saturating_sub(5);
                 }
                 if ui.small_button(icon(ui, icons::PLUS)).clicked() {
-                    game.ship_stone += 5;
+                    realm.ship_stone += 5;
                 }
             });
             icon_label(
@@ -716,12 +732,12 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
                 icons::COINS,
                 format!(
                     "Payout: {} gold ({WOOD_PRICE} per wood, {STONE_PRICE} per stone)",
-                    game.ship_payout()
+                    realm.ship_payout()
                 ),
             );
             ui.small("Ships sail to the nearest allied coast, banking gold on arrival.");
             ui.checkbox(
-                &mut game.auto_trade,
+                &mut realm.auto_trade,
                 "Send cargo ships out on their own",
             );
             ui.small("While this is on, a ship launches with the load above whenever the stockpile covers it in full.");
@@ -751,7 +767,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
             let at_sea = game
                 .transports()
                 .iter()
-                .filter(|t| t.civilians > 0)
+                .filter(|t| t.faction == Faction::Realm(me) && t.civilians > 0)
                 .count();
             if at_sea > 0 {
                 icon_label(
@@ -790,9 +806,9 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
                 ))
                 .clicked()
             {
-                game.hire_escort();
+                game.hire_escort(me);
             }
-            let escorts = game.escorts();
+            let escorts = game.escorts(me);
             if escorts > 0 {
                 icon_label(
                     ui,
@@ -835,7 +851,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
             let landing = game
                 .transports()
                 .iter()
-                .filter(|t| t.faction == Faction::Realm(0) && t.knights > 0)
+                .filter(|t| t.faction == Faction::Realm(me) && t.knights > 0)
                 .count();
             if landing > 0 {
                 icon_label(
@@ -852,18 +868,16 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
                 BuildMode::NavyRally,
                 (icon(ui, icons::FLAG), "Rally warships"),
             );
-            if !game.navy_rallies().is_empty()
+            let flags = game.realm(me).navy_rallies().len();
+            if flags > 0
                 && ui
                     .button((
                         icon(ui, icons::X),
-                        format!(
-                            "Clear {}",
-                            plural(game.navy_rallies().len(), "navy flag", "navy flags")
-                        ),
+                        format!("Clear {}", plural(flags, "navy flag", "navy flags")),
                     ))
                     .clicked()
             {
-                game.clear_navy_rally();
+                game.realm_mut(me).clear_navy_rally();
             }
             ui.small(
                 "Click open water to plant navy flags; the warships split up among them, \
@@ -1036,6 +1050,7 @@ fn minimap_image(game: &Game, colors: &MapColors, area: (i32, i32, i32)) -> egui
 fn minimap_ui(
     ui: &mut egui::Ui,
     game: &Game,
+    me: RealmId,
     view: View,
     colors: &MapColors,
     minimap: &mut Minimap,
@@ -1081,7 +1096,7 @@ fn minimap_ui(
         let at = to_screen(v.center);
         let r = 2.0 + (v.houses as f32).sqrt();
         painter.circle_filled(at, r, faction_color32(colors, v.faction));
-        if v.faction == Faction::Realm(0) && v.threatened {
+        if v.faction == Faction::Realm(me) && v.threatened {
             painter.circle_stroke(at, r + 2.0 + pulse * 3.0, Stroke::new(1.5, ALARM));
         }
     }
@@ -1102,10 +1117,10 @@ fn minimap_ui(
     for p in game.pirates() {
         painter.circle_filled(to_screen(p.pos), 1.8, Color32::BLACK);
     }
-    for r in game.rallies() {
+    for r in game.realm(me).rallies() {
         painter.circle_stroke(to_screen(r.pos), 3.0, Stroke::new(1.5, CAUTION));
     }
-    for &r in game.navy_rallies() {
+    for &r in game.realm(me).navy_rallies() {
         painter.circle_stroke(to_screen(r), 3.0, Stroke::new(1.5, color32(colors.player)));
     }
 
@@ -1177,6 +1192,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 fn realm_ui(
     ctx: &egui::Context,
     game: &mut Game,
+    me: RealmId,
     view: View,
     colors: &MapColors,
     minimap: &mut Minimap,
@@ -1187,7 +1203,7 @@ fn realm_ui(
         .anchor(Align2::RIGHT_TOP, [-12.0, 12.0])
         .resizable(false)
         .show(ctx, |ui| {
-            action = minimap_ui(ui, game, view, colors, minimap);
+            action = minimap_ui(ui, game, me, view, colors, minimap);
             if ui
                 .add(egui::Button::selectable(
                     view.overview,
@@ -1201,7 +1217,7 @@ fn realm_ui(
             let count = |f: Faction| game.villages().iter().filter(|v| v.faction == f).count();
             ui.small(format!(
                 "Villages: {} yours, {} enemy, {} allied",
-                count(Faction::Realm(0)),
+                count(Faction::Realm(me)),
                 count(Faction::Enemy),
                 count(Faction::Ally)
             ));
@@ -1216,7 +1232,7 @@ fn realm_ui(
             let mut mine: Vec<_> = game
                 .villages()
                 .iter()
-                .filter(|v| v.faction == Faction::Realm(0))
+                .filter(|v| v.faction == Faction::Realm(me))
                 .collect();
             mine.sort_by(|a, b| {
                 let rank = |v: &crate::game::Village| (!v.threatened, v.knights + v.civilians > 0);
@@ -1229,7 +1245,7 @@ fn realm_ui(
             if mine.is_empty() {
                 ui.small("You hold no villages.");
             }
-            let migrants = game.migrants();
+            let migrants = game.migrants(me);
             if migrants > 0 {
                 icon_label(
                     ui,
@@ -1296,21 +1312,21 @@ fn realm_ui(
                 });
         });
     if let Some(center) = call {
-        game.call_settlers(center);
+        game.call_settlers(me, center);
     }
     action
 }
 
 /// Recent alerts, stacked at the top of the screen, newest first. Each one can
 /// jump the camera to where it happened or be dismissed.
-fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action> {
+fn alerts_ui(ctx: &egui::Context, game: &mut Game, me: RealmId, view: View) -> Option<Action> {
     let mut action = None;
     let mut dismiss = None;
     let mut respond = None;
     egui::Area::new(egui::Id::unique("alerts"))
         .anchor(Align2::CENTER_TOP, [0.0, 12.0])
         .show(ctx, |ui| {
-            for (i, alert) in game.alerts().iter().enumerate().rev() {
+            for (i, alert) in game.realm(me).alerts().iter().enumerate().rev() {
                 // Fade out over the last few seconds on screen.
                 let opacity = (alert.freshness() * 4.0).min(1.0);
                 ui.push_id(i, |ui| {
@@ -1514,7 +1530,7 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
                             // The alert's one-click action, only while the
                             // realm can actually afford to take it.
                             if let Some(r) = alert.kind.response()
-                                && game.can_respond(r)
+                                && game.can_respond(me, r)
                             {
                                 let (glyph, label, hover) = match r {
                                     AlertResponse::SummonWarship => (
@@ -1551,9 +1567,9 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, view: View) -> Option<Action>
             }
         });
     if let Some(i) = respond {
-        game.respond_to_alert(i);
+        game.respond_to_alert(me, i);
     } else if let Some(i) = dismiss {
-        game.dismiss_alert(i);
+        game.realm_mut(me).dismiss_alert(i);
     }
     action
 }

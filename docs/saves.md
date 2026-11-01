@@ -40,22 +40,24 @@ consequence-free experiments, since it never saves at all.
 A save captures everything needed to reconstruct your session exactly:
 
 - The world **seed**.
-- Your **stockpile** (wood, stone, and gold).
-- **Stats:** enemies defeated and units lost.
+- Every **realm**: who runs it (a person or the computer), its **stockpile**
+  (wood, stone, and gold), its priorities and switches, its builder zones and
+  the bridges it laid. A single-player world has one realm, yours.
+- **Stats:** enemies defeated, and each realm's units lost.
 - **Every unit:** position, faction, role, and state, including where settlers
   on the road between villages are headed, so they finish the trip after a
   load.
-- **Cargo ships** currently at sea, with their load and payout, plus the
-  **autonomous-trade switch** and the configured cargo load.
+- **Cargo ships** currently at sea, with their load, payout and owning realm,
+  plus each realm's **autonomous-trade switch** and configured cargo load.
 - **Settler and troop ships** under sail, with everyone aboard, their
-  destination, and their owner (yours, a hired allied company's, or an enemy
-  raid's).
-- **Warships** afloat, with their owner (yours, a hired allied escort, or the
-  enemy's), their remaining hull, any standing orders (an escort's crossing
-  or an enemy ship's landing), and how long an enemy ship has been out on its
-  sortie.
-- **Construction orders** in progress, your **builder zones**, and the
-  **autonomous-building switch**.
+  destination, and their owner (a realm's, a hired allied company's with the
+  realm that hired it, or an enemy raid's).
+- **Warships** afloat, with their owner (a realm's, a hired allied escort
+  with the realm that hired it, or the enemy's), their remaining hull, any
+  standing orders (an escort's crossing or an enemy ship's landing), and how
+  long an enemy ship has been out on its sortie.
+- **Construction orders** in progress with the realm that placed each, and
+  which realm hired each **mercenary** ashore.
 - **All edited chunks:** buildings, bridges, and depleted resources.
 
 Rally flags (the knights' and the navy's) are deliberately transient: they
@@ -89,7 +91,9 @@ loads with none at sea, and one from before the enemy and allied navies loads
 every warship as yours). Where a section changed shape, the loader converts
 it: saves from before version 20 stored houses as three separate layers (yours,
 the enemy's, and the allies'), which are folded into the single per-tile owner
-layer the world keeps now. Only a save written by a *newer* build than the one
+layer the world keeps now, and they described a single realm, which loads as
+the first (and only) realm owning every ship, order and hired unit. Only a save
+written by a *newer* build than the one
 loading it, or one older than the loader still supports, is refused.
 
 ## Where they live

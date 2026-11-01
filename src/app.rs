@@ -17,7 +17,7 @@ use crate::atlas::{self, Atlas, MapColors};
 use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
 use crate::game::{
     AUTO_ZONE_RADIUS, Anim, AxeWork, CamState, Dir, Entity, Faction, Game, Job, MissileKind,
-    SandboxTool, SiteKind, Stroke, tile_at, tile_path,
+    RealmId, SandboxTool, SiteKind, Stroke, tile_at, tile_path,
 };
 use crate::gfx::{Instance, Renderer};
 use crate::save;
@@ -171,6 +171,10 @@ pub struct State {
     scene: Scene,
     menu: MenuState,
     game: Option<Game>,
+    /// The realm this player runs. Always the first realm for now: a
+    /// single-player world has one, and the testing ground's units of
+    /// "yours" are its.
+    me: RealmId,
     /// The save-slot name the HUD's save box edits: prefilled from the slot a
     /// world was loaded from, or with a fresh name when one is created.
     save_name: String,
@@ -200,6 +204,7 @@ impl State {
             scene: Scene::Menu,
             menu: MenuState::default(),
             game: None,
+            me: 0,
             save_name: String::new(),
             autosave_timer: 0.0,
             input: Input::default(),
@@ -320,11 +325,11 @@ impl State {
         if let Some(game) = &mut self.game {
             // Settled before the press acts, since the press may cancel the
             // very order that makes this drag an eraser.
-            self.input.drag = game.stroke_at(world).map(|s| (tile_at(world), s));
+            self.input.drag = game.stroke_at(self.me, world).map(|s| (tile_at(world), s));
             if game.sandbox() {
                 game.sandbox_click(world);
             } else {
-                game.try_build(world);
+                game.try_build(self.me, world);
             }
         }
     }
@@ -350,7 +355,7 @@ impl State {
         }
         if let Some(game) = &mut self.game {
             for t in tile_path(last, to) {
-                game.stroke_build(t, stroke);
+                game.stroke_build(self.me, t, stroke);
             }
         }
     }
@@ -383,7 +388,7 @@ impl State {
         match action {
             Action::CreateWorld(seed) => {
                 let game = Game::new(seed);
-                self.camera.center = game.start_center();
+                self.camera.center = game.start_center(self.me);
                 self.game = Some(game);
                 self.camera.view_height = DEFAULT_VIEW_HEIGHT;
                 self.scene = Scene::Playing;
@@ -806,9 +811,10 @@ impl State {
         // Builder zones: a translucent plot over each marked area, brighter
         // while the autonomous-building switch is on, with a small center mark.
         let zone_span = (AUTO_ZONE_RADIUS * 2 + 1) as f32;
-        for &(zx, zy) in game.auto_zones() {
+        let me = game.realm(self.me);
+        for &(zx, zy) in me.auto_zones() {
             let mut fill = self.colors.player;
-            fill[3] = if game.auto_build { 0.16 } else { 0.08 };
+            fill[3] = if me.auto_build { 0.16 } else { 0.08 };
             out.push(tinted(
                 [
                     (zx - AUTO_ZONE_RADIUS) as f32,
@@ -848,14 +854,14 @@ impl State {
         }
 
         // Rally flags: the knights' waypoints, drawn on top of everything.
-        for r in game.rallies() {
+        for r in me.rallies() {
             let rally = self.atlas.uv("rally");
             out.push(quad([r.pos.x - 0.5, r.pos.y - 0.5], [1.0, 1.0], rally));
         }
 
         // Navy rally flags: the warships' waypoints, tinted the player's blue
         // to tell them apart from the knights' flags.
-        for r in game.navy_rallies() {
+        for r in me.navy_rallies() {
             let rally = self.atlas.uv("rally");
             let mut tint = self.colors.player;
             tint[3] = 1.0;
@@ -988,7 +994,7 @@ impl State {
             let off = (size - 1.0) * 0.5;
             out.push(solid([x as f32 - off, y as f32 - off], [size, size], col));
         };
-        for &t in game.player_houses() {
+        for &t in game.houses(self.me) {
             house(t, c.player, mark);
         }
         for &t in world.houses_of(1) {
@@ -1011,9 +1017,10 @@ impl State {
         // Builder zones as faint plots, so the overview shows where autonomous
         // building is permitted.
         let zone_span = (AUTO_ZONE_RADIUS * 2 + 1) as f32;
-        for &(zx, zy) in game.auto_zones() {
+        let me = game.realm(self.me);
+        for &(zx, zy) in me.auto_zones() {
             let mut fill = c.player;
-            fill[3] = if game.auto_build { 0.18 } else { 0.1 };
+            fill[3] = if me.auto_build { 0.18 } else { 0.1 };
             out.push(solid(
                 [
                     (zx - AUTO_ZONE_RADIUS) as f32,
@@ -1079,7 +1086,7 @@ impl State {
             });
         }
 
-        for r in game.rallies() {
+        for r in me.rallies() {
             let size = 1.5 * kf;
             out.push(sprite(
                 [r.pos.x - size * 0.5, r.pos.y - size * 0.5],
@@ -1089,7 +1096,7 @@ impl State {
         }
 
         // The navy's flags keep their player-blue tint out here too.
-        for r in game.navy_rallies() {
+        for r in me.navy_rallies() {
             let size = 1.5 * kf;
             let uv = self.atlas.uv("rally");
             let mut tint = c.player;
@@ -1155,6 +1162,7 @@ impl State {
                     window,
                     UiScene::Game {
                         game,
+                        me: self.me,
                         view,
                         colors: &self.colors,
                         save_name: &mut self.save_name,
@@ -1494,8 +1502,9 @@ impl ApplicationHandler<State> for App {
                         );
                         game.sandbox_erase(world);
                     } else {
-                        game.clear_rally();
-                        game.clear_navy_rally();
+                        let me = game.realm_mut(state.me);
+                        me.clear_rally();
+                        me.clear_navy_rally();
                     }
                 }
             }

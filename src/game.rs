@@ -256,9 +256,10 @@ pub struct Entity {
     /// A civilian called up by the draft and still owed `LEVY_GOLD_PAY`. Levies
     /// return to work (paid) or desert (unpaid) once the danger has passed.
     levy: bool,
-    /// An allied knight hired by the player (see `hire_mercenaries`). Mercenaries
-    /// answer the player's rally flag and sail home once the fighting is over.
-    mercenary: bool,
+    /// For an allied knight hired by a realm (see `hire_mercenaries`): the
+    /// realm whose rally flags it answers. Mercenaries sail home once the
+    /// fighting is over.
+    hired_by: Option<RealmId>,
     /// For an enemy or allied unit on a founding party: the spot the party is
     /// marching to, where it will plant a new village (see `bud_village`).
     /// Transient: a party caught by a save simply gives up the trip on load
@@ -421,7 +422,7 @@ impl Entity {
             build_site: None,
             sheltered: false,
             levy: false,
-            mercenary: false,
+            hired_by: None,
             found_at: None,
             migrate_to: None,
             pending: 0.0,
@@ -456,6 +457,12 @@ impl Entity {
     #[inline]
     pub fn is_soldier(&self) -> bool {
         self.job.is_soldier()
+    }
+
+    /// An allied knight hired by a realm (see `hire_mercenaries`).
+    #[inline]
+    pub fn mercenary(&self) -> bool {
+        self.hired_by.is_some()
     }
 
     /// How high a leaping horseman is drawn above the ground right now, in
@@ -1467,6 +1474,8 @@ impl SiteKind {
 pub struct BuildSite {
     pub tile: Tile,
     pub kind: SiteKind,
+    /// The realm that placed the order and paid for it.
+    pub realm: RealmId,
     /// Seconds of work left before the structure stands.
     left: f32,
     /// Placed by the autonomous builders; each zone queues one at a time.
@@ -1496,6 +1505,8 @@ struct Sapling {
 /// is sold and its `reward` in gold is banked.
 pub struct Ship {
     pub pos: Vec2,
+    /// The realm whose goods these are, and whose treasury the payout goes to.
+    pub realm: RealmId,
     /// Water tiles leading to the destination port (last tile is the port).
     path: Vec<Tile>,
     path_cursor: usize,
@@ -1514,10 +1525,12 @@ pub struct Ship {
 /// ship, is just as unarmored, and everyone aboard is lost if pirates sink it.
 pub struct Transport {
     pub pos: Vec2,
-    /// Whose ship and people these are: the player's settlers and troops, or
-    /// an allied company of mercenaries sailing to the player's aid. Public so
-    /// the renderer can tint the hull.
+    /// Whose ship and people these are: a realm's settlers and troops, an
+    /// allied company of mercenaries sailing to a realm's aid, or an enemy
+    /// raid. Public so the renderer can tint the hull.
     pub faction: Faction,
+    /// For an allied company: the realm that hired it.
+    hired_by: Option<RealmId>,
     /// Water tiles leading to the landing (last tile is where it drops anchor).
     path: Vec<Tile>,
     path_cursor: usize,
@@ -1533,6 +1546,13 @@ pub struct Transport {
     pub bob: f32,
     /// Heading, picking which directional sprite frame to draw.
     pub facing: Dir,
+}
+
+impl Transport {
+    /// For an allied company: the realm that hired it.
+    pub fn hired_by(&self) -> Option<RealmId> {
+        self.hired_by
+    }
 }
 
 /// A pirate ship: a rare raider that prowls the open ocean and lobs cannonballs
@@ -1568,6 +1588,9 @@ pub struct Warship {
     pub pos: Vec2,
     /// Whose guns these are. Public so the renderer can pick the hull sprite.
     pub faction: Faction,
+    /// For an allied escort: the realm that hired it, whose navy flags it
+    /// answers.
+    hired_by: Option<RealmId>,
     /// Heading, driving both movement and the directional sprite frame.
     pub facing: Dir,
     /// Smoothed water route the ship is following: straight line-of-sight legs
@@ -1602,6 +1625,7 @@ impl Warship {
         Warship {
             pos,
             faction,
+            hired_by: None,
             facing: Dir::Down,
             path: Vec::new(),
             path_cursor: 0,
@@ -1931,9 +1955,22 @@ pub struct CamState {
     pub view_height: f32,
 }
 
-pub struct Game {
-    pub world: World,
-    pub entities: Vec<Entity>,
+/// Who gives a realm its orders.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Controller {
+    /// A person: the player of a single-player game, or a seat in a match.
+    Human,
+    /// The computer, standing in for a seat nobody has taken.
+    Ai,
+}
+
+/// One empire run on the player's rules: its stockpile, its orders and
+/// switches, its flags, and the clocks that belong to it alone. Everything
+/// the HUD shows about "your realm" lives here, and every realm on the map,
+/// human or computer run, has one. The map itself, the units and the fleets
+/// are shared on `Game` and tagged with the realm they belong to.
+pub struct Realm {
+    pub controller: Controller,
     pub wood: u32,
     pub stone: u32,
     /// Gold: pays for new knights and most construction; earned by shipping
@@ -1943,16 +1980,268 @@ pub struct Game {
     /// to the stockpile at launch).
     pub ship_wood: u32,
     pub ship_stone: u32,
-    /// Cargo ships currently at sea, sailing out to sell their goods.
-    ships: Vec<Ship>,
     /// The switch letting the harbor send laden cargo ships out on its own.
     pub auto_trade: bool,
     /// Countdown to the next autonomous-trade check. Transient.
     trade_timer: f32,
+    pub priority: Priority,
+    pub gather_priority: GatherPriority,
+    /// Units of this realm that have died, drowned or been razed.
+    pub units_lost: u32,
+    /// The knights' rally flags, planted by the player or raised automatically
+    /// when a village is lost or a hut is raided. Soldiers share themselves
+    /// out among the standing flags (see `share_out`), and each flag lifts
+    /// once someone reaches it. Transient.
+    rallies: Vec<Rally>,
+    /// The navy's rally flags, planted by the player or raised by an alert's
+    /// one-click response. Warships share themselves out among them the same
+    /// way, and each lifts once a warship arrives. Transient.
+    navy_rallies: Vec<Vec2>,
+    /// Seconds left on the levies' term of service (0 when none is running).
+    /// A proclaimed draft calls civilians up at once and starts this clock;
+    /// the levies can't stand down until it runs out (see `stand_down_levies`).
+    /// Transient: the levies themselves are saved, but a loaded game's levies
+    /// are free to stand down as soon as the realm is quiet.
+    levy_term: f32,
+    /// Seconds since the term ended with no village of this realm under
+    /// threat; the levies stand down when it reaches `LEVY_STAND_DOWN`.
+    /// Transient.
+    levy_quiet: f32,
+    /// Builder-zone markers: areas where autonomous building is permitted.
+    auto_zones: Vec<Tile>,
+    /// The switch permitting builders to raise houses in the zones on their own.
+    pub auto_build: bool,
+    /// Countdown to the next autonomous-build check. Transient.
+    auto_timer: f32,
+    /// Bridges this realm has placed (anchors for extending spans).
+    bridges: Vec<Tile>,
+    spawn_timer: f32,
+    spawn_cycle: u32,
+    /// Seconds the company this realm hired has gone without a flag to answer
+    /// or an enemy near it; it sails home at `MERC_STAND_DOWN`. Transient.
+    merc_quiet: f32,
+    /// Seconds the warships this realm hired have gone without a navy flag
+    /// to answer or a hostile in sight; they sail home at
+    /// `ESCORT_STAND_DOWN`. Transient.
+    escort_quiet: f32,
+    /// The realm's home landmass, flood-filled once and cached, so allied
+    /// villages can be kept off it (reaching them means a sea voyage).
+    home_continent: Option<HashSet<Tile>>,
+    /// Toasts for the HUD, newest last (transient).
+    alerts: Vec<Alert>,
+    /// Recently alerted situations and the seconds until each may alert again,
+    /// so an ongoing raid raises one toast rather than one per frame.
+    alert_cooldowns: Vec<(AlertKind, Vec2, f32)>,
+}
+
+impl Realm {
+    /// A fresh realm with the starting stockpile and every clock at its first
+    /// interval.
+    fn new(controller: Controller, home_continent: Option<HashSet<Tile>>) -> Self {
+        Realm {
+            controller,
+            wood: 20,
+            stone: 20,
+            money: START_MONEY,
+            ship_wood: 20,
+            ship_stone: 20,
+            auto_trade: false,
+            trade_timer: 0.0,
+            priority: Priority::Agriculture,
+            gather_priority: GatherPriority::Balanced,
+            units_lost: 0,
+            rallies: Vec::new(),
+            navy_rallies: Vec::new(),
+            levy_term: 0.0,
+            levy_quiet: 0.0,
+            auto_zones: Vec::new(),
+            auto_build: false,
+            auto_timer: 0.0,
+            bridges: Vec::new(),
+            spawn_timer: PLAYER_SPAWN_INTERVAL,
+            spawn_cycle: 0,
+            merc_quiet: 0.0,
+            escort_quiet: 0.0,
+            home_continent,
+            alerts: Vec::new(),
+            alert_cooldowns: Vec::new(),
+        }
+    }
+
+    /// The knights' rally flags standing right now, for the HUD and the map.
+    pub fn rallies(&self) -> &[Rally] {
+        &self.rallies
+    }
+
+    /// The navy's rally flags standing right now, for the HUD and the map.
+    pub fn navy_rallies(&self) -> &[Vec2] {
+        &self.navy_rallies
+    }
+
+    /// Builder-zone markers, for rendering.
+    pub fn auto_zones(&self) -> &[Tile] {
+        &self.auto_zones
+    }
+
+    /// Alerts currently on screen, oldest first.
+    pub fn alerts(&self) -> &[Alert] {
+        &self.alerts
+    }
+
+    pub fn dismiss_alert(&mut self, i: usize) {
+        if i < self.alerts.len() {
+            self.alerts.remove(i);
+        }
+    }
+
+    /// Does a flag the player planted stand (rather than only auto-raised
+    /// alarms, or nothing)?
+    pub fn player_flag(&self) -> bool {
+        self.rallies.iter().any(Rally::planted)
+    }
+
+    /// Lift every rally flag; knights resume defending on their own.
+    pub fn clear_rally(&mut self) {
+        self.rallies.clear();
+    }
+
+    /// Lift every navy rally flag; warships resume hunting and patrolling.
+    pub fn clear_navy_rally(&mut self) {
+        self.navy_rallies.clear();
+    }
+
+    /// Seconds left on the levies' term of service, or `None` when none is
+    /// running.
+    pub fn levy_term_remaining(&self) -> Option<f32> {
+        (self.levy_term > 0.0).then_some(self.levy_term)
+    }
+
+    /// Gold the next dispatched ship would fetch, given the current load and
+    /// stockpile (each field clamped to what's actually available).
+    pub fn ship_payout(&self) -> u32 {
+        self.ship_wood.min(self.wood) * WOOD_PRICE + self.ship_stone.min(self.stone) * STONE_PRICE
+    }
+
+    /// Does the stockpile cover this much wood, stone and gold?
+    fn can_afford(&self, wood: u32, stone: u32, gold: u32) -> bool {
+        self.wood >= wood && self.stone >= stone && self.money >= gold
+    }
+
+    /// Take this much out of the stockpile. The caller has checked
+    /// `can_afford` first.
+    fn spend(&mut self, wood: u32, stone: u32, gold: u32) {
+        self.wood -= wood;
+        self.stone -= stone;
+        self.money -= gold;
+    }
+
+    /// Put this much back, as when an order is canceled or can't go through.
+    fn refund(&mut self, wood: u32, stone: u32, gold: u32) {
+        self.wood += wood;
+        self.stone += stone;
+        self.money += gold;
+    }
+
+    /// Can the realm cover a warship right now?
+    fn can_afford_warship(&self) -> bool {
+        self.can_afford(WARSHIP_WOOD_COST, WARSHIP_STONE_COST, WARSHIP_GOLD_COST)
+    }
+
+    /// Raise a rally flag at `pos`, unless one already stands close enough
+    /// that a soldier reaching one has reached the other: an alarm that fires
+    /// every frame (a hut under attack) must not plant a forest of flags.
+    fn raise_rally(&mut self, pos: Vec2, response: Option<f32>) {
+        let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
+        if self
+            .rallies
+            .iter()
+            .any(|r| r.pos.distance_squared(pos) <= r2)
+        {
+            return;
+        }
+        self.rallies.push(Rally { pos, response });
+    }
+
+    /// Raise a navy rally flag at `pos`, unless one already stands within a
+    /// warship's arrival range of it.
+    fn raise_navy_rally(&mut self, pos: Vec2) {
+        let r2 = NAVY_RALLY_ARRIVE * NAVY_RALLY_ARRIVE;
+        if self
+            .navy_rallies
+            .iter()
+            .any(|r| r.distance_squared(pos) <= r2)
+        {
+            return;
+        }
+        self.navy_rallies.push(pos);
+    }
+
+    /// Alert for a situation that lasts across frames, like a raid in progress:
+    /// toast it once, then stay quiet until it has been calm for
+    /// `ALERT_COOLDOWN` seconds.
+    fn alert_ongoing(&mut self, kind: AlertKind, pos: Vec2) {
+        let r2 = ALERT_MERGE_RADIUS * ALERT_MERGE_RADIUS;
+        if let Some(c) = self
+            .alert_cooldowns
+            .iter_mut()
+            .find(|(k, p, _)| *k == kind && p.distance_squared(pos) <= r2)
+        {
+            c.2 = ALERT_COOLDOWN;
+            return;
+        }
+        self.alert_cooldowns.push((kind, pos, ALERT_COOLDOWN));
+        self.push_alert(kind, pos);
+    }
+
+    /// Toast a one-off event. A repeat of one still on screen nearby just
+    /// refreshes it instead of stacking a duplicate.
+    fn push_alert(&mut self, kind: AlertKind, pos: Vec2) {
+        let r2 = ALERT_MERGE_RADIUS * ALERT_MERGE_RADIUS;
+        if let Some(a) = self
+            .alerts
+            .iter_mut()
+            .find(|a| a.kind == kind && a.pos.distance_squared(pos) <= r2)
+        {
+            a.age = 0.0;
+            a.pos = pos;
+            return;
+        }
+        self.alerts.push(Alert {
+            kind,
+            pos,
+            age: 0.0,
+        });
+        if self.alerts.len() > MAX_ALERTS {
+            self.alerts.remove(0);
+        }
+    }
+
+    fn age_alerts(&mut self, dt: f32) {
+        for a in &mut self.alerts {
+            a.age += dt;
+        }
+        self.alerts.retain(|a| a.age < ALERT_LIFETIME);
+        for c in &mut self.alert_cooldowns {
+            c.2 -= dt;
+        }
+        self.alert_cooldowns.retain(|c| c.2 > 0.0);
+    }
+}
+
+pub struct Game {
+    pub world: World,
+    pub entities: Vec<Entity>,
+    /// Every empire on the map, in seat order. Realm 0 is the player of a
+    /// single-player game. Never empty, and never reordered: units, fleets
+    /// and tiles refer to realms by index.
+    realms: Vec<Realm>,
+    /// Cargo ships currently at sea, sailing out to sell their goods.
+    ships: Vec<Ship>,
     /// Transports at sea: settler ships out to found new villages and troop
     /// ships carrying knights to a far shore.
     transports: Vec<Transport>,
-    /// The player's navy: warships patrolling the water.
+    /// Every warship afloat: the realms' navies, hired escorts and enemy
+    /// sorties alike.
     warships: Vec<Warship>,
     /// Pirate raiders prowling the open ocean (transient, not saved).
     pirates: Vec<Pirate>,
@@ -1969,53 +2258,24 @@ pub struct Game {
     pub place_job: Job,
     /// What the testing ground's tile brush paints.
     pub place_brush: Brush,
-    pub priority: Priority,
-    pub gather_priority: GatherPriority,
+    /// Enemy units that have fallen, to anyone's blade or guns.
     pub enemies_defeated: u32,
-    pub units_lost: u32,
-    /// The knights' rally flags, planted by the player or raised automatically
-    /// when a village is lost or a hut is raided. Soldiers share themselves
-    /// out among the standing flags (see `share_out`), and each flag lifts
-    /// once someone reaches it. Transient.
-    rallies: Vec<Rally>,
-    /// The navy's rally flags, planted by the player or raised by an alert's
-    /// one-click response. Warships share themselves out among them the same
-    /// way, and each lifts once a warship arrives. Transient.
-    navy_rallies: Vec<Vec2>,
     /// Round-robin position for stepping off-screen entities. Transient.
     offscreen_cursor: usize,
-    /// Seconds left on the levies' term of service (0 when none is running).
-    /// A proclaimed draft calls civilians up at once and starts this clock;
-    /// the levies can't stand down until it runs out (see `stand_down_levies`).
-    /// Transient: the levies themselves are saved, but a loaded game's levies
-    /// are free to stand down as soon as the realm is quiet.
-    levy_term: f32,
-    /// Seconds since the term ended with no player village under threat; the
-    /// levies stand down when it reaches `LEVY_STAND_DOWN`. Transient.
-    levy_quiet: f32,
 
-    /// Player-built mines (caves); civilians mine these for endless stone.
+    /// Realm-built mines (caves); civilians mine these for endless stone.
     cave_tiles: Vec<Tile>,
-    /// Every hut tile in the world (both factions), for shelter lookup.
+    /// Every hut tile in the world (all factions), for shelter lookup.
     hut_tiles: Vec<Tile>,
-    /// Construction orders awaiting a builder (or being built right now).
+    /// Construction orders awaiting a builder (or being built right now),
+    /// each tagged with the realm that placed it.
     build_sites: Vec<BuildSite>,
-    /// Builder-zone markers: areas where autonomous building is permitted.
-    auto_zones: Vec<Tile>,
-    /// The switch permitting builders to raise houses in the zones on their own.
-    pub auto_build: bool,
-    /// Countdown to the next autonomous-build check. Transient.
-    auto_timer: f32,
     /// Countdown to the next clean-chunk eviction sweep. Transient.
     evict_timer: f32,
     /// Saplings mid-growth (transient, not persisted across saves).
     saplings: Vec<Sapling>,
-    /// Bridges the player has placed (anchors for extending spans).
-    player_bridges: Vec<Tile>,
     enemy_spawn_timer: f32,
-    player_spawn_timer: f32,
     ally_spawn_timer: f32,
-    player_spawn_cycle: u32,
     enemy_spawn_cycle: u32,
     ally_spawn_cycle: u32,
     /// Countdown to the next check for an enemy village raising a new house
@@ -2025,13 +2285,6 @@ pub struct Game {
     /// Transient.
     enemy_bud_timer: f32,
     ally_bud_timer: f32,
-    /// Seconds the hired mercenaries have gone without a flag to answer or an
-    /// enemy near them; they sail home at `MERC_STAND_DOWN`. Transient.
-    merc_quiet: f32,
-    /// Seconds the hired allied warships have gone without a navy flag to
-    /// answer or a hostile in sight; they sail home at `ESCORT_STAND_DOWN`.
-    /// Transient.
-    escort_quiet: f32,
     /// Countdown to the enemy's next sea-raid check (see `enemy_sea_raid`).
     /// Transient.
     enemy_raid_timer: f32,
@@ -2042,16 +2295,8 @@ pub struct Game {
     ally_found_timer: f32,
     enemy_villages_founded: u32,
     ally_villages_founded: u32,
-    /// The player's home landmass, flood-filled once and cached, so allied
-    /// villages can be kept off it (reaching them means a sea voyage).
-    home_continent: Option<HashSet<Tile>>,
     /// Every settlement on the map, surveyed each frame (transient).
     villages: Vec<Village>,
-    /// Toasts for the HUD, newest last (transient).
-    alerts: Vec<Alert>,
-    /// Recently alerted situations and the seconds until each may alert again,
-    /// so an ongoing raid raises one toast rather than one per frame.
-    alert_cooldowns: Vec<(AlertKind, Vec2, f32)>,
     rng: Rng,
 }
 
@@ -2203,7 +2448,8 @@ impl Game {
             }
         }
 
-        Game::assemble(world, entities, Some(home), seed)
+        let realm = Realm::new(Controller::Human, Some(home));
+        Game::assemble(world, entities, vec![realm], seed)
     }
 
     /// The testing ground: a flat, featureless grid with nobody on it. Nothing
@@ -2214,7 +2460,8 @@ impl Game {
     pub fn new_sandbox() -> Self {
         let mut world = World::new_flat();
         world.ensure_region(-ENSURE_MARGIN, -ENSURE_MARGIN, ENSURE_MARGIN, ENSURE_MARGIN);
-        let mut game = Game::assemble(world, Vec::new(), Some(HashSet::default()), 0);
+        let realm = Realm::new(Controller::Human, Some(HashSet::default()));
+        let mut game = Game::assemble(world, Vec::new(), vec![realm], 0);
         game.sandbox_tool = SandboxTool::PlaceUnit;
         game.place_faction = Faction::Realm(0);
         game.place_job = Job::Knight;
@@ -2226,26 +2473,15 @@ impl Game {
         self.world.is_flat()
     }
 
-    /// A fresh game around a prepared world: the starting stockpile and every
-    /// timer at its first interval, with nothing yet at sea or under way.
-    fn assemble(
-        world: World,
-        entities: Vec<Entity>,
-        home_continent: Option<HashSet<Tile>>,
-        seed: i32,
-    ) -> Self {
+    /// A fresh game around a prepared world and its realms, every timer at
+    /// its first interval, with nothing yet at sea or under way.
+    fn assemble(world: World, entities: Vec<Entity>, realms: Vec<Realm>, seed: i32) -> Self {
         let hut_tiles = world.all_hut_tiles();
         Game {
             world,
             entities,
-            wood: 20,
-            stone: 20,
-            money: START_MONEY,
-            ship_wood: 20,
-            ship_stone: 20,
+            realms,
             ships: Vec::new(),
-            auto_trade: false,
-            trade_timer: 0.0,
             transports: Vec::new(),
             warships: Vec::new(),
             pirates: Vec::new(),
@@ -2257,69 +2493,71 @@ impl Game {
             place_faction: Faction::Realm(0),
             place_job: Job::Knight,
             place_brush: Brush::Wall,
-            priority: Priority::Agriculture,
-            gather_priority: GatherPriority::Balanced,
             enemies_defeated: 0,
-            units_lost: 0,
-            rallies: Vec::new(),
-            navy_rallies: Vec::new(),
             offscreen_cursor: 0,
-            levy_term: 0.0,
-            levy_quiet: 0.0,
             cave_tiles: Vec::new(),
             hut_tiles,
             build_sites: Vec::new(),
-            auto_zones: Vec::new(),
-            auto_build: false,
-            auto_timer: 0.0,
             evict_timer: EVICT_INTERVAL,
             saplings: Vec::new(),
-            player_bridges: Vec::new(),
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
-            player_spawn_timer: PLAYER_SPAWN_INTERVAL,
             ally_spawn_timer: ALLY_SPAWN_INTERVAL,
-            player_spawn_cycle: 0,
             enemy_spawn_cycle: 0,
             ally_spawn_cycle: 0,
             enemy_grow_timer: ENEMY_GROW_INTERVAL,
             enemy_bud_timer: ENEMY_BUD_INTERVAL,
             ally_bud_timer: ALLY_BUD_INTERVAL,
-            merc_quiet: 0.0,
-            escort_quiet: 0.0,
             enemy_raid_timer: ENEMY_RAID_INTERVAL,
             enemy_found_timer: ENEMY_FOUND_INTERVAL,
             ally_found_timer: ALLY_FOUND_INTERVAL,
             enemy_villages_founded: ENEMY_VILLAGES as u32,
             ally_villages_founded: ALLY_VILLAGES as u32,
-            home_continent,
             villages: Vec::new(),
-            alerts: Vec::new(),
-            alert_cooldowns: Vec::new(),
             rng: Rng::new(seed as u64 ^ 0xD1B54A32D192ED03),
         }
     }
 
+    pub fn realm(&self, realm: RealmId) -> &Realm {
+        &self.realms[realm as usize]
+    }
+
+    pub fn realm_mut(&mut self, realm: RealmId) -> &mut Realm {
+        &mut self.realms[realm as usize]
+    }
+
+    /// The ids of every realm, for walking them all. A plain range, so it
+    /// holds no borrow of the game while the loop body mutates it.
+    fn realm_ids(&self) -> std::ops::Range<RealmId> {
+        0..self.realms.len() as RealmId
+    }
+
+    /// Every faction that holds ground: the realms, then the enemy and the
+    /// allies.
+    fn factions(&self) -> impl Iterator<Item = Faction> + use<> {
+        self.realm_ids()
+            .map(Faction::Realm)
+            .chain([Faction::Enemy, Faction::Ally])
+    }
+
     /// Where the camera should open on a fresh world: the center of the
-    /// player's starting village (now planted on the coast, away from origin).
-    pub fn start_center(&self) -> Vec2 {
-        if self.world.houses_of(owner_of(Faction::Realm(0))).is_empty() {
+    /// realm's starting village (now planted on the coast, away from origin).
+    pub fn start_center(&self, realm: RealmId) -> Vec2 {
+        let houses = self.world.houses_of(owner_of(Faction::Realm(realm)));
+        if houses.is_empty() {
             return Vec2::ZERO;
         }
-        let (sx, sy) = self
-            .world
-            .houses_of(owner_of(Faction::Realm(0)))
-            .iter()
-            .fold((0i64, 0i64), |(ax, ay), &(x, y)| {
-                (ax + x as i64, ay + y as i64)
-            });
-        let n = self.world.houses_of(owner_of(Faction::Realm(0))).len() as f32;
+        let (sx, sy) = houses.iter().fold((0i64, 0i64), |(ax, ay), &(x, y)| {
+            (ax + x as i64, ay + y as i64)
+        });
+        let n = houses.len() as f32;
         Vec2::new(sx as f32 / n + 0.5, sy as f32 / n + 0.5)
     }
 
-    pub fn population(&self) -> usize {
+    /// How many units a realm has, soldiers and civilians together.
+    pub fn population(&self, realm: RealmId) -> usize {
         self.entities
             .iter()
-            .filter(|e| e.faction == Faction::Realm(0))
+            .filter(|e| e.faction == Faction::Realm(realm))
             .count()
     }
     fn enemy_count(&self) -> usize {
@@ -2351,60 +2589,59 @@ impl Game {
             .filter(|e| e.faction == faction && e.job == Job::Civilian)
             .count()
     }
-    /// The player's total population allowance: each village supports its own
+    /// A realm's total population allowance: each village supports its own
     /// people, and the kingdom-wide cap is the sum over villages (ceilinged).
     /// Before the first survey of a fresh or loaded game the houses haven't
     /// been clustered yet, so fall back to treating them as one village.
-    pub fn pop_cap(&self) -> usize {
+    pub fn pop_cap(&self, realm: RealmId) -> usize {
+        let faction = Faction::Realm(realm);
         let per_village: usize = self
             .villages
             .iter()
-            .filter(|v| v.faction == Faction::Realm(0))
+            .filter(|v| v.faction == faction)
             .map(|v| v.cap)
             .sum();
         let cap = if per_village > 0 {
             per_village
         } else {
-            VILLAGE_POP_BASE
-                + self.world.houses_of(owner_of(Faction::Realm(0))).len() * VILLAGE_POP_PER_HOUSE
+            VILLAGE_POP_BASE + self.houses(realm).len() * VILLAGE_POP_PER_HOUSE
         };
         cap.min(PLAYER_POP_MAX)
     }
 
-    /// Can a house be placed at `(x, y)`? That is, is it close enough to one the
-    /// player already controls (their village or a house they built)?
-    pub fn near_player_house(&self, x: i32, y: i32) -> bool {
-        self.world
-            .houses_of(owner_of(Faction::Realm(0)))
-            .iter()
-            .any(|&(hx, hy)| {
-                (hx - x).abs() <= BUILD_NEAR_RADIUS && (hy - y).abs() <= BUILD_NEAR_RADIUS
-            })
+    /// Every house tile a realm holds.
+    pub fn houses(&self, realm: RealmId) -> &[Tile] {
+        self.world.houses_of(owner_of(Faction::Realm(realm)))
     }
 
-    /// Is `(x, y)` a launch spot within the player's home port, close enough to
-    /// one of their houses that ships set sail from the village, not from some
+    /// Can `realm` place a house at `(x, y)`? That is, is it close enough to
+    /// one it already controls (its village or a house it built)?
+    pub fn near_house(&self, realm: RealmId, x: i32, y: i32) -> bool {
+        self.houses(realm).iter().any(|&(hx, hy)| {
+            (hx - x).abs() <= BUILD_NEAR_RADIUS && (hy - y).abs() <= BUILD_NEAR_RADIUS
+        })
+    }
+
+    /// Is `(x, y)` a launch spot within `realm`'s home port, close enough to
+    /// one of its houses that ships set sail from the village, not from some
     /// random far-off stretch of coast.
-    pub fn near_player_dock(&self, x: i32, y: i32) -> bool {
-        self.world
-            .houses_of(owner_of(Faction::Realm(0)))
-            .iter()
-            .any(|&(hx, hy)| {
-                (hx - x).abs() <= SHIP_NEAR_RADIUS && (hy - y).abs() <= SHIP_NEAR_RADIUS
-            })
+    pub fn near_dock(&self, realm: RealmId, x: i32, y: i32) -> bool {
+        self.houses(realm).iter().any(|&(hx, hy)| {
+            (hx - x).abs() <= SHIP_NEAR_RADIUS && (hy - y).abs() <= SHIP_NEAR_RADIUS
+        })
     }
 
-    /// Is there a bridge *you placed* within a couple of tiles, so a span can
-    /// be extended? (Natural bridges don't count, so the chain starts at land.)
-    /// Pending bridge sites count too, so a span can be ordered tile by tile
-    /// without waiting for the builder to finish each one.
-    pub fn near_player_bridge(&self, x: i32, y: i32) -> bool {
+    /// Is there a bridge `realm` placed within a couple of tiles, so a span
+    /// can be extended? (Natural bridges don't count, so the chain starts at
+    /// land.) Pending bridge sites count too, so a span can be ordered tile
+    /// by tile without waiting for the builder to finish each one.
+    pub fn near_bridge(&self, realm: RealmId, x: i32, y: i32) -> bool {
         let near = |(bx, by): Tile| (bx - x).abs() <= 2 && (by - y).abs() <= 2;
-        self.player_bridges.iter().any(|&b| near(b))
+        self.realm(realm).bridges.iter().any(|&b| near(b))
             || self
                 .build_sites
                 .iter()
-                .any(|s| s.kind == SiteKind::Bridge && near(s.tile))
+                .any(|s| s.kind == SiteKind::Bridge && s.realm == realm && near(s.tile))
     }
 
     pub fn update(&mut self, dt: f32, sim: (i32, i32, i32, i32)) {
@@ -2510,14 +2747,25 @@ impl Game {
         // the village to become civilians again (and wall it up on the way).
         // Not on the testing ground, where there is no village to fall back
         // to and a lone knight is the whole point.
-        let player_under =
-            !sandbox && self.civilian_count(Faction::Realm(0)) <= MIN_CIVILIANS_TO_GROW;
+        let realm_under: Vec<bool> = self
+            .realm_ids()
+            .map(|r| !sandbox && self.civilian_count(Faction::Realm(r)) <= MIN_CIVILIANS_TO_GROW)
+            .collect();
         let enemy_under = !sandbox && self.civilian_count(Faction::Enemy) <= MIN_CIVILIANS_TO_GROW;
         let ally_under = !sandbox && self.civilian_count(Faction::Ally) <= MIN_CIVILIANS_TO_GROW;
-        let pref = self.gather_priority.preferred();
-        // May the player's knights lay a bridge tile right now? They draw wood
-        // from the shared stockpile (no gold: knights are already paid).
-        let bridge_ok = self.wood >= BRIDGE_WOOD_COST;
+        // Each realm's gathering preference, and whether its knights may lay
+        // a bridge tile right now. They draw wood from the realm's stockpile
+        // (no gold: knights are already paid).
+        let pref: Vec<Option<Resource>> = self
+            .realms
+            .iter()
+            .map(|r| r.gather_priority.preferred())
+            .collect();
+        let bridge_ok: Vec<bool> = self
+            .realms
+            .iter()
+            .map(|r| r.wood >= BRIDGE_WOOD_COST)
+            .collect();
 
         // Combat: knights damage the nearest opponent in range, or hack at an
         // adjacent enemy wall or hut if no opponent is close. Bowmen shoot
@@ -2699,19 +2947,20 @@ impl Game {
             // A hut under attack with civilians inside raises an alarm flag
             // that rallies the knights nearby to save them.
             if let Some(h) = self.world.hut(tile.0, tile.1)
-                && h.owner == owner_of(Faction::Realm(0))
+                && let Faction::Realm(r) = faction_of(h.owner)
                 && h.occupants > 0
             {
-                self.raise_rally(tile_center(tile), Some(AUTO_RALLY_RADIUS));
-                self.alert_ongoing(AlertKind::HutRaided, tile_center(tile));
+                let realm = self.realm_mut(r);
+                realm.raise_rally(tile_center(tile), Some(AUTO_RALLY_RADIUS));
+                realm.alert_ongoing(AlertKind::HutRaided, tile_center(tile));
             }
             if let Some(hut) = self.world.damage_hut(tile.0, tile.1, dmg) {
                 // Razed with civilians still inside, so they're lost with it.
                 let trapped = hut.occupants as u32;
-                if hut.owner == owner_of(Faction::Realm(0)) {
-                    self.units_lost += trapped;
-                } else if hut.owner == owner_of(Faction::Enemy) {
-                    self.enemies_defeated += trapped;
+                match faction_of(hut.owner) {
+                    Faction::Realm(r) => self.realm_mut(r).units_lost += trapped,
+                    Faction::Enemy => self.enemies_defeated += trapped,
+                    Faction::Ally => {}
                 }
                 self.hut_tiles.retain(|&t| t != tile);
             }
@@ -2725,7 +2974,7 @@ impl Game {
             let Some(adt) = step_dt[i] else { continue };
             let faction = self.entities[i].faction;
             let under = match faction {
-                Faction::Realm(_) => player_under,
+                Faction::Realm(r) => realm_under[r as usize],
                 Faction::Enemy => enemy_under,
                 Faction::Ally => ally_under,
             };
@@ -2735,9 +2984,8 @@ impl Game {
                 // work for until a house of yours is painted down, so until
                 // then it gets no farm context and putters about like any
                 // other villager (see `ai_step`).
-                (Faction::Realm(_), Job::Civilian)
-                    if !sandbox
-                        || !self.world.houses_of(owner_of(Faction::Realm(0))).is_empty() =>
+                (Faction::Realm(r), Job::Civilian)
+                    if !sandbox || !self.world.houses_of(owner_of(faction)).is_empty() =>
                 {
                     let mut farm = FarmCtx {
                         caves: &self.cave_tiles,
@@ -2756,8 +3004,8 @@ impl Game {
                         acting[i],
                         close_foe[i],
                         under,
-                        self.world.houses_of(owner_of(Faction::Realm(0))),
-                        pref,
+                        self.world.houses_of(owner_of(faction)),
+                        pref[r as usize],
                         rally,
                         &self.hut_tiles,
                         false,
@@ -2765,7 +3013,7 @@ impl Game {
                         adt,
                     )
                 }
-                (Faction::Realm(_), _) => ai_step(
+                (Faction::Realm(r), _) => ai_step(
                     &self.world,
                     &mut self.entities[i],
                     &mut self.rng,
@@ -2774,11 +3022,11 @@ impl Game {
                     acting[i],
                     close_foe[i],
                     under,
-                    self.world.houses_of(owner_of(Faction::Realm(0))),
-                    pref,
+                    self.world.houses_of(owner_of(faction)),
+                    pref[r as usize],
                     rally,
                     &self.hut_tiles,
-                    bridge_ok,
+                    bridge_ok[r as usize],
                     None,
                     adt,
                 ),
@@ -2800,10 +3048,10 @@ impl Game {
                     adt,
                 ),
                 (Faction::Ally, _) => {
-                    // Hired mercenaries answer the player's flag and never
+                    // Hired mercenaries answer their employer's flag and never
                     // fall back to an allied village; the allies' own units
                     // keep to their own affairs.
-                    let merc = self.entities[i].mercenary;
+                    let merc = self.entities[i].mercenary();
                     ai_step(
                         &self.world,
                         &mut self.entities[i],
@@ -2823,16 +3071,23 @@ impl Game {
                     )
                 }
             };
+            // Whatever a unit gathers or spends goes to its own realm's
+            // stockpile; the enemy's and the allies' villagers work for no
+            // treasury, and their events never reach the arms that need one.
+            let realm = match faction {
+                Faction::Realm(r) => r,
+                Faction::Enemy | Faction::Ally => 0,
+            };
             match event {
                 Some(StepEvent::Harvest(node)) => {
                     if let Some(kind) = self.world.deplete_node(node.0, node.1) {
                         match kind {
-                            Resource::Wood => self.wood += 1,
-                            Resource::Stone => self.stone += 1,
+                            Resource::Wood => self.realm_mut(realm).wood += 1,
+                            Resource::Stone => self.realm_mut(realm).stone += 1,
                         }
                     }
                 }
-                Some(StepEvent::MineStone) => self.stone += 1,
+                Some(StepEvent::MineStone) => self.realm_mut(realm).stone += 1,
                 Some(StepEvent::Plant(t)) => {
                     if self.world.is_open_grass(t.0, t.1)
                         && !self.saplings.iter().any(|s| s.tile == t)
@@ -2848,13 +3103,15 @@ impl Game {
                     self.world.clear_node(t.0, t.1);
                 }
                 Some(StepEvent::LayBridge(t)) => {
-                    // A knight spans the water in its way: wood from the shared
-                    // stockpile, no gold. The tile joins the player's bridge
-                    // network, so spans can later be extended from it.
-                    if self.wood >= BRIDGE_WOOD_COST && self.world.is_open_water(t.0, t.1) {
-                        self.wood -= BRIDGE_WOOD_COST;
+                    // A knight spans the water in its way: wood from its
+                    // realm's stockpile, no gold. The tile joins that realm's
+                    // bridge network, so spans can later be extended from it.
+                    if self.realm(realm).wood >= BRIDGE_WOOD_COST
+                        && self.world.is_open_water(t.0, t.1)
+                    {
+                        self.realm_mut(realm).wood -= BRIDGE_WOOD_COST;
                         self.world.set_bridge(t.0, t.1, true);
-                        self.player_bridges.push(t);
+                        self.realm_mut(realm).bridges.push(t);
                     }
                 }
                 Some(StepEvent::Construct(t)) => {
@@ -2909,7 +3166,7 @@ impl Game {
             if self.entities[i].hp <= 0.0 {
                 match self.entities[i].faction {
                     Faction::Enemy => self.enemies_defeated += 1,
-                    Faction::Realm(_) => self.units_lost += 1,
+                    Faction::Realm(r) => self.realm_mut(r).units_lost += 1,
                     Faction::Ally => {}
                 }
                 self.entities.swap_remove(i);
@@ -2925,7 +3182,9 @@ impl Game {
         self.migrants_arrive();
         self.clear_reached_rally();
         self.resolve_captures();
-        self.age_alerts(dt);
+        for realm in &mut self.realms {
+            realm.age_alerts(dt);
+        }
         self.update_ships(dt);
         self.update_transports(dt);
         self.update_pirates(dt);
@@ -3132,9 +3391,10 @@ impl Game {
                     s.stone,
                     s.reward
                 );
-                self.money += s.reward;
+                let realm = s.realm;
+                self.realm_mut(realm).money += s.reward;
                 self.ships.swap_remove(i);
-                self.welcome_immigrants();
+                self.welcome_immigrants(realm);
             } else {
                 i += 1;
             }
@@ -3144,24 +3404,25 @@ impl Game {
     /// A cargo ship has docked at an allied port, and every so often allied
     /// families take passage home with its crew: trade with the allies is a
     /// trickle of people too. One or two allied civilians settle in whichever
-    /// of the player's villages has the most empty homes (the same choice new
+    /// of the realm's villages has the most empty homes (the same choice new
     /// villagers make), only while there's room, and keep their allied origin.
     /// Returns how many settled.
-    fn welcome_immigrants(&mut self) -> usize {
+    fn welcome_immigrants(&mut self, realm: RealmId) -> usize {
         if self.rng.range(0, 100) >= IMMIGRANT_CHANCE_PERCENT {
             return 0;
         }
+        let faction = Faction::Realm(realm);
         let n = 1 + self.rng.range(0, IMMIGRANTS_MAX);
         let mut settled = 0;
         let mut at = None;
         for _ in 0..n {
-            if self.population() >= self.pop_cap() {
+            if self.population(realm) >= self.pop_cap(realm) {
                 break;
             }
-            let Some((t, _)) = self.spawn_site(Faction::Realm(0)) else {
+            let Some((t, _)) = self.spawn_site(faction) else {
                 break;
             };
-            let mut e = Entity::new(Faction::Realm(0), Job::Civilian, t);
+            let mut e = Entity::new(faction, Job::Civilian, t);
             e.origin = Faction::Ally;
             self.entities.push(e);
             at.get_or_insert(tile_center(t));
@@ -3169,7 +3430,8 @@ impl Game {
         }
         if let Some(pos) = at {
             log::info!("{settled} allied immigrants settled in the realm");
-            self.push_alert(AlertKind::ImmigrantsArrived, pos);
+            self.realm_mut(realm)
+                .push_alert(AlertKind::ImmigrantsArrived, pos);
         }
         settled
     }
@@ -3211,26 +3473,32 @@ impl Game {
                     .push(Entity::new(Faction::Enemy, Job::Knight, spot));
             }
             log::info!("{} enemy raiders came ashore at ({ax}, {ay})", s.knights);
-            self.push_alert(AlertKind::EnemyTroopsLanded, tile_center(s.anchor));
+            self.alert_all(AlertKind::EnemyTroopsLanded, tile_center(s.anchor));
             return;
         }
         // An allied company goes ashore as mercenaries: allied knights who
-        // answer the player's flag from here on (see `hire_mercenaries`).
+        // answer their employer's flag from here on (see `hire_mercenaries`).
         if s.faction == Faction::Ally {
             for _ in 0..s.knights {
                 let spot = adjacent_walkable(&self.world, ax, ay).unwrap_or(s.anchor);
                 let mut e = Entity::new(Faction::Ally, Job::Knight, spot);
-                e.mercenary = true;
+                e.hired_by = s.hired_by;
                 self.entities.push(e);
             }
-            self.merc_quiet = 0.0;
             log::info!("{} mercenaries went ashore at ({ax}, {ay})", s.knights);
-            self.push_alert(AlertKind::MercenariesLanded, tile_center(s.anchor));
+            if let Some(r) = s.hired_by {
+                let realm = self.realm_mut(r);
+                realm.merc_quiet = 0.0;
+                realm.push_alert(AlertKind::MercenariesLanded, tile_center(s.anchor));
+            }
             return;
         }
-        // Settlers dropping anchor by a standing player village reinforce it:
-        // they go ashore and join it, and no new houses go up.
-        let reinforcing = s.civilians > 0 && self.near_player_village(s.anchor);
+        let Faction::Realm(realm) = s.faction else {
+            return;
+        };
+        // Settlers dropping anchor by a standing village of the realm's
+        // reinforce it: they go ashore and join it, and no new houses go up.
+        let reinforcing = s.civilians > 0 && self.near_own_village(realm, s.anchor);
         // Otherwise settlers found a colony. Spaced houses first (the pattern
         // enemy and allied camps use); if the shore turned out cramped, take
         // whatever open grass is closest.
@@ -3261,7 +3529,7 @@ impl Game {
                 }
             }
             for &(x, y) in &houses {
-                self.world.set_house(x, y, owner_of(Faction::Realm(0)));
+                self.world.set_house(x, y, owner_of(s.faction));
             }
         }
         // Everyone steps ashore beside the new houses (or onto the anchor tile
@@ -3274,40 +3542,43 @@ impl Game {
                 .copied()
                 .unwrap_or(s.anchor);
             let spot = adjacent_walkable(&self.world, home.0, home.1).unwrap_or(s.anchor);
-            self.entities
-                .push(Entity::new(Faction::Realm(0), job, spot));
+            self.entities.push(Entity::new(s.faction, job, spot));
         }
         if reinforcing {
             log::info!("settlers landed at ({ax}, {ay}) and joined the standing village");
-            self.push_alert(AlertKind::SettlersJoined, tile_center(s.anchor));
+            self.realm_mut(realm)
+                .push_alert(AlertKind::SettlersJoined, tile_center(s.anchor));
         } else if s.civilians > 0 {
             log::info!(
                 "settlers landed at ({ax}, {ay}) and founded a colony of {} houses",
                 houses.len()
             );
-            self.push_alert(AlertKind::ColonyFounded, tile_center(s.anchor));
+            self.realm_mut(realm)
+                .push_alert(AlertKind::ColonyFounded, tile_center(s.anchor));
         } else {
             log::info!("{} knights landed ashore at ({ax}, {ay})", s.knights);
-            self.push_alert(AlertKind::TroopsLanded, tile_center(s.anchor));
-            self.march_on_nearest_village(tile_center(s.anchor));
+            self.realm_mut(realm)
+                .push_alert(AlertKind::TroopsLanded, tile_center(s.anchor));
+            self.march_on_nearest_village(realm, tile_center(s.anchor));
         }
     }
 
     /// Point a fresh landing party at its objective: an automatic rally (the
-    /// same self-lifting kind the retake alarm uses) on the nearest enemy
+    /// same self-lifting kind the retake alarm uses) on the nearest hostile
     /// village within marching range of the beach, answered only by knights
     /// near the landing. Without it, a party dropped on a quiet stretch of
     /// coast would hold the beach instead of fighting. A flag the player
-    /// planted themselves is never overridden, and a shore with no enemy
+    /// planted themselves is never overridden, and a shore with no hostile
     /// village in range leaves the knights to their own instincts.
-    fn march_on_nearest_village(&mut self, from: Vec2) {
-        if self.player_flag() {
+    fn march_on_nearest_village(&mut self, realm: RealmId, from: Vec2) {
+        if self.realm(realm).player_flag() {
             return;
         }
+        let faction = Faction::Realm(realm);
         let target = self
-            .world
-            .houses_of(owner_of(Faction::Enemy))
-            .iter()
+            .factions()
+            .filter(|&f| hostile(f, faction))
+            .flat_map(|f| self.world.houses_of(owner_of(f)).iter())
             .map(|&h| tile_center(h))
             .min_by(|a, b| {
                 a.distance_squared(from)
@@ -3316,94 +3587,73 @@ impl Game {
         if let Some(t) = target
             && t.distance(from) <= TROOP_MARCH_RANGE
         {
-            self.raise_rally(t, Some(AUTO_RALLY_RADIUS));
+            self.realm_mut(realm)
+                .raise_rally(t, Some(AUTO_RALLY_RADIUS));
             log::info!("the landing party is marching on the village at {t}");
         }
     }
 
-    /// The knights' rally flags standing right now, for the HUD and the map.
-    pub fn rallies(&self) -> &[Rally] {
-        &self.rallies
-    }
-
-    /// The navy's rally flags standing right now, for the HUD and the map.
-    pub fn navy_rallies(&self) -> &[Vec2] {
-        &self.navy_rallies
-    }
-
-    /// Raise a rally flag at `pos`, unless one already stands close enough
-    /// that a soldier reaching one has reached the other: an alarm that fires
-    /// every frame (a hut under attack) must not plant a forest of flags.
-    fn raise_rally(&mut self, pos: Vec2, response: Option<f32>) {
-        let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
-        if self
-            .rallies
-            .iter()
-            .any(|r| r.pos.distance_squared(pos) <= r2)
-        {
-            return;
+    /// Toast an event that concerns every realm, such as an enemy fleet going
+    /// down or coming ashore.
+    fn alert_all(&mut self, kind: AlertKind, pos: Vec2) {
+        for realm in &mut self.realms {
+            realm.push_alert(kind, pos);
         }
-        self.rallies.push(Rally { pos, response });
     }
 
-    /// Raise a navy rally flag at `pos`, unless one already stands within a
-    /// warship's arrival range of it.
-    fn raise_navy_rally(&mut self, pos: Vec2) {
-        let r2 = NAVY_RALLY_ARRIVE * NAVY_RALLY_ARRIVE;
-        if self
-            .navy_rallies
-            .iter()
-            .any(|r| r.distance_squared(pos) <= r2)
-        {
-            return;
-        }
-        self.navy_rallies.push(pos);
-    }
-
-    /// Which rally flag, if any, each entity answers this frame. Only the
-    /// player's soldiers and hired mercenaries answer; everyone else gets
-    /// `None`. Among those, each goes to the nearest flag that calls it,
-    /// except that an under-manned flag pulls in its share (see `share_out`).
+    /// Which rally flag, if any, each entity answers this frame. Only a
+    /// realm's soldiers and the mercenaries it hired answer its flags;
+    /// everyone else gets `None`. Among those, each goes to the nearest flag
+    /// that calls it, except that an under-manned flag pulls in its share
+    /// (see `share_out`).
     fn assign_rallies(&self) -> Vec<Option<Vec2>> {
         let mut out = vec![None; self.entities.len()];
-        if self.rallies.is_empty() {
-            return out;
-        }
-        let answering: Vec<usize> = self
-            .entities
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| (e.faction == Faction::Realm(0) || e.mercenary) && e.is_soldier())
-            .map(|(i, _)| i)
-            .collect();
-        let units: Vec<Vec2> = answering.iter().map(|&i| self.entities[i].pos).collect();
-        let flags: Vec<Vec2> = self.rallies.iter().map(|r| r.pos).collect();
-        let choice = share_out(&units, &flags, |u, f| self.rallies[f].calls(units[u]));
-        for (k, &i) in answering.iter().enumerate() {
-            out[i] = choice[k].map(|f| flags[f]);
+        for r in self.realm_ids() {
+            let rallies = &self.realm(r).rallies;
+            if rallies.is_empty() {
+                continue;
+            }
+            let answering: Vec<usize> = self
+                .entities
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    (e.faction == Faction::Realm(r) || e.hired_by == Some(r)) && e.is_soldier()
+                })
+                .map(|(i, _)| i)
+                .collect();
+            let units: Vec<Vec2> = answering.iter().map(|&i| self.entities[i].pos).collect();
+            let flags: Vec<Vec2> = rallies.iter().map(|r| r.pos).collect();
+            let choice = share_out(&units, &flags, |u, f| rallies[f].calls(units[u]));
+            for (k, &i) in answering.iter().enumerate() {
+                out[i] = choice[k].map(|f| flags[f]);
+            }
         }
         out
     }
 
-    /// Which navy flag, if any, each warship answers this frame: the player's
-    /// ships and the hired escorts share the flags out among themselves (see
-    /// `share_out`); enemy ships answer none.
+    /// Which navy flag, if any, each warship answers this frame: a realm's
+    /// ships and the escorts it hired share its flags out among themselves
+    /// (see `share_out`); enemy ships answer none.
     fn assign_navy_rallies(&self) -> Vec<Option<Vec2>> {
         let mut out = vec![None; self.warships.len()];
-        if self.navy_rallies.is_empty() {
-            return out;
-        }
-        let answering: Vec<usize> = self
-            .warships
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| w.faction != Faction::Enemy)
-            .map(|(i, _)| i)
-            .collect();
-        let units: Vec<Vec2> = answering.iter().map(|&i| self.warships[i].pos).collect();
-        let choice = share_out(&units, &self.navy_rallies, |_, _| true);
-        for (k, &i) in answering.iter().enumerate() {
-            out[i] = choice[k].map(|f| self.navy_rallies[f]);
+        for r in self.realm_ids() {
+            let flags = &self.realm(r).navy_rallies;
+            if flags.is_empty() {
+                continue;
+            }
+            let answering: Vec<usize> = self
+                .warships
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| w.faction == Faction::Realm(r) || w.hired_by == Some(r))
+                .map(|(i, _)| i)
+                .collect();
+            let units: Vec<Vec2> = answering.iter().map(|&i| self.warships[i].pos).collect();
+            let choice = share_out(&units, flags, |_, _| true);
+            for (k, &i) in answering.iter().enumerate() {
+                out[i] = choice[k].map(|f| flags[f]);
+            }
         }
         out
     }
@@ -3502,7 +3752,7 @@ impl Game {
                     let e = self.entities.swap_remove(ei);
                     match e.faction {
                         Faction::Enemy => self.enemies_defeated += 1,
-                        Faction::Realm(_) => self.units_lost += 1,
+                        Faction::Realm(r) => self.realm_mut(r).units_lost += 1,
                         Faction::Ally => {}
                     }
                 }
@@ -3631,39 +3881,43 @@ impl Game {
     /// could harm, unarmored hulls first (they sink from one hit), and returns
     /// whether it struck something.
     fn resolve_shot(&mut self, bp: Vec2, r2: f32, gunner: Gunner) -> bool {
-        // Cargo ships are the player's and unarmed: one hit sinks hull and
-        // cargo together.
-        if gunner.harms(Faction::Realm(0))
-            && let Some(si) = self
-                .ships
-                .iter()
-                .position(|s| (s.pos - bp).length_squared() < r2)
-        {
+        // Cargo ships are unarmed: one hit sinks hull and cargo together.
+        if let Some(si) = self.ships.iter().position(|s| {
+            gunner.harms(Faction::Realm(s.realm)) && (s.pos - bp).length_squared() < r2
+        }) {
             log::info!("a cargo ship was sunk, its cargo lost at sea!");
-            self.push_alert(AlertKind::CargoSunk, self.ships[si].pos);
-            self.ships.swap_remove(si);
+            let s = self.ships.swap_remove(si);
+            self.realm_mut(s.realm)
+                .push_alert(AlertKind::CargoSunk, s.pos);
             return true;
         }
         // Transports are as unarmored as cargo ships: one hit sinks them, crew
-        // and all. The player's lost souls count toward the realm's
-        // casualties; an enemy raid going down is good news.
+        // and all. A realm's lost souls count toward its casualties; an enemy
+        // raid going down is good news for everyone.
         if let Some(si) = self
             .transports
             .iter()
             .position(|s| gunner.harms(s.faction) && (s.pos - bp).length_squared() < r2)
         {
             let s = self.transports.swap_remove(si);
-            let kind = if s.faction == Faction::Enemy {
-                AlertKind::EnemyShipSunk
-            } else if s.civilians > 0 {
-                AlertKind::SettlersSunk
-            } else {
-                AlertKind::TroopsSunk
-            };
             log::info!("a transport was sunk, all souls lost at sea!");
-            self.push_alert(kind, s.pos);
-            if s.faction == Faction::Realm(0) {
-                self.units_lost += s.civilians + s.knights;
+            match s.faction {
+                Faction::Enemy => self.alert_all(AlertKind::EnemyShipSunk, s.pos),
+                Faction::Realm(r) => {
+                    let kind = if s.civilians > 0 {
+                        AlertKind::SettlersSunk
+                    } else {
+                        AlertKind::TroopsSunk
+                    };
+                    let realm = self.realm_mut(r);
+                    realm.push_alert(kind, s.pos);
+                    realm.units_lost += s.civilians + s.knights;
+                }
+                Faction::Ally => {
+                    if let Some(r) = s.hired_by {
+                        self.realm_mut(r).push_alert(AlertKind::TroopsSunk, s.pos);
+                    }
+                }
             }
             return true;
         }
@@ -3675,13 +3929,18 @@ impl Game {
             self.warships[wi].hp -= CANNON_DAMAGE;
             if self.warships[wi].hp <= 0.0 {
                 let w = self.warships.swap_remove(wi);
-                let kind = match w.faction {
-                    Faction::Realm(_) => AlertKind::WarshipSunk,
-                    Faction::Enemy => AlertKind::EnemyShipSunk,
-                    Faction::Ally => AlertKind::EscortSunk,
-                };
                 log::info!("a warship was sunk!");
-                self.push_alert(kind, w.pos);
+                match w.faction {
+                    Faction::Realm(r) => {
+                        self.realm_mut(r).push_alert(AlertKind::WarshipSunk, w.pos)
+                    }
+                    Faction::Enemy => self.alert_all(AlertKind::EnemyShipSunk, w.pos),
+                    Faction::Ally => {
+                        if let Some(r) = w.hired_by {
+                            self.realm_mut(r).push_alert(AlertKind::EscortSunk, w.pos);
+                        }
+                    }
+                }
             }
             return true;
         }
@@ -3712,7 +3971,7 @@ impl Game {
                 let e = self.entities.swap_remove(ei);
                 match e.faction {
                     Faction::Enemy => self.enemies_defeated += 1,
-                    Faction::Realm(_) => self.units_lost += 1,
+                    Faction::Realm(r) => self.realm_mut(r).units_lost += 1,
                     Faction::Ally => {}
                 }
             }
@@ -3721,11 +3980,12 @@ impl Game {
         false
     }
 
-    /// Try to drop a new pirate onto an open-ocean tile out beyond the player's
+    /// Try to drop a new pirate onto an open-ocean tile out beyond some realm's
     /// home shore, where the shipping lanes run. Gives up quietly if no open sea
     /// turns up in a handful of tries.
     fn try_spawn_pirate(&mut self) {
-        let center = self.start_center();
+        let realm = self.rng.range(0, self.realms.len() as i32) as RealmId;
+        let center = self.start_center(realm);
         for _ in 0..14 {
             let a = self.rng.range(0, 62832) as f32 / 10000.0;
             let r = 45.0 + self.rng.range(0, 95) as f32; // 45..140 tiles out
@@ -3826,7 +4086,7 @@ impl Game {
             let target = self.navy_target(faction, wp);
 
             // Standing orders, if any: the navy flag this ship was dealt for
-            // the player's ships and the escorts (an escort still crossing
+            // a realm's ships and the escorts (an escort still crossing
             // over answers its own goal when no flag stands), the ship's own
             // goal for the enemy's.
             let orders = match faction {
@@ -3847,7 +4107,9 @@ impl Game {
                 // counts as arrived: a navy flag then lifts after the loop, a
                 // ship's own goal for that ship alone.
                 if (r - wp).length() <= NAVY_RALLY_ARRIVE {
-                    if faction != Faction::Enemy && self.navy_rallies.contains(&r) {
+                    if faction != Faction::Enemy
+                        && self.realms.iter().any(|m| m.navy_rallies.contains(&r))
+                    {
                         reached.push(r);
                     }
                     if self.warships[i].goal == Some(r) {
@@ -3935,13 +4197,9 @@ impl Game {
                 }
             }
         }
-        self.navy_rallies.retain(|r| !reached.contains(r));
-    }
-
-    /// Gold the next dispatched ship would fetch, given the current load and
-    /// stockpile (each field clamped to what's actually available).
-    pub fn ship_payout(&self) -> u32 {
-        self.ship_wood.min(self.wood) * WOOD_PRICE + self.ship_stone.min(self.stone) * STONE_PRICE
+        for realm in &mut self.realms {
+            realm.navy_rallies.retain(|r| !reached.contains(r));
+        }
     }
 
     /// Let sheltering civilians back out of any hut the enemy has left alone.
@@ -3976,76 +4234,74 @@ impl Game {
     /// Lift each rally flag once a soldier has reached it, handing that
     /// company back to normal combat AI right where they're needed.
     fn clear_reached_rally(&mut self) {
-        if self.rallies.is_empty() {
-            return;
-        }
         let r2 = RALLY_ARRIVE_RADIUS * RALLY_ARRIVE_RADIUS;
-        // The player's soldiers and any hired mercenaries count as answering.
-        let knights: Vec<Vec2> = self
-            .entities
-            .iter()
-            .filter(|e| (e.faction == Faction::Realm(0) || e.mercenary) && e.is_soldier())
-            .map(|e| e.pos)
-            .collect();
-        self.rallies.retain(|r| {
-            let arrived = knights.iter().any(|&p| p.distance_squared(r.pos) <= r2);
-            // An auto-raised flag with no knight close enough to answer is
-            // pointless; lift it rather than leave it standing forever.
-            let unanswerable = !r.planted() && !knights.iter().any(|&p| r.calls(p));
-            !(arrived || unanswerable)
-        });
+        for r in self.realm_ids() {
+            if self.realm(r).rallies.is_empty() {
+                continue;
+            }
+            // The realm's soldiers and any mercenaries it hired count as
+            // answering.
+            let knights: Vec<Vec2> = self
+                .entities
+                .iter()
+                .filter(|e| {
+                    (e.faction == Faction::Realm(r) || e.hired_by == Some(r)) && e.is_soldier()
+                })
+                .map(|e| e.pos)
+                .collect();
+            self.realm_mut(r).rallies.retain(|r| {
+                let arrived = knights.iter().any(|&p| p.distance_squared(r.pos) <= r2);
+                // An auto-raised flag with no knight close enough to answer is
+                // pointless; lift it rather than leave it standing forever.
+                let unanswerable = !r.planted() && !knights.iter().any(|&p| r.calls(p));
+                !(arrived || unanswerable)
+            });
+        }
     }
 
     /// Per-village capture: if a village has no defenders of its owner left but
     /// an opposing unit stands in it, the attacker converts that village's
     /// houses (and nearby walls) to their own.
     fn resolve_captures(&mut self) {
-        // Enemy villages overrun by the player. Only the player can take enemy
-        // ground; an allied unit passing through never flips it.
-        for village in cluster(self.world.houses_of(owner_of(Faction::Enemy))) {
-            if self.village_taken(&village, Faction::Enemy, Faction::Realm(0)) {
+        // Every realm's and the enemy's villages can change hands; the allies'
+        // never do, and an allied unit passing through never flips anyone's.
+        let owners: Vec<Faction> = self.factions().filter(|&f| f != Faction::Ally).collect();
+        for owner in owners {
+            let tiles = self.world.houses_of(owner_of(owner)).to_vec();
+            for village in cluster(&tiles) {
+                let Some(by) = self.captor(&village, owner) else {
+                    continue;
+                };
                 for &(x, y) in &village {
-                    self.world.set_house(x, y, owner_of(Faction::Realm(0)));
-                    self.world.reown_walls_near(
-                        x,
-                        y,
-                        4,
-                        owner_of(Faction::Enemy),
-                        owner_of(Faction::Realm(0)),
-                    );
+                    self.world.set_house(x, y, owner_of(by));
+                    self.world
+                        .reown_walls_near(x, y, 4, owner_of(owner), owner_of(by));
                 }
                 let center = village_center(&village);
-                self.push_alert(AlertKind::VillageCaptured, center);
-                self.settle_captured_village(&village);
-                if self.incorporate_civilians(center, Faction::Enemy, Faction::Realm(0)) > 0 {
-                    self.push_alert(AlertKind::PeopleIncorporated, center);
+                if let Faction::Realm(r) = by {
+                    self.realm_mut(r)
+                        .push_alert(AlertKind::VillageCaptured, center);
+                    self.settle_captured_village(&village, by);
                 }
-            }
-        }
-        // Player villages overrun by the enemy.
-        let player_tiles = self.world.houses_of(owner_of(Faction::Realm(0))).to_vec();
-        for village in cluster(&player_tiles) {
-            if self.village_taken(&village, Faction::Realm(0), Faction::Enemy) {
-                for &(x, y) in &village {
-                    self.world.set_house(x, y, owner_of(Faction::Enemy));
-                    self.world.reown_walls_near(
-                        x,
-                        y,
-                        4,
-                        owner_of(Faction::Realm(0)),
-                        owner_of(Faction::Enemy),
-                    );
+                let taken = self.incorporate_civilians(center, owner, by);
+                if taken > 0
+                    && let Faction::Realm(r) = by
+                {
+                    self.realm_mut(r)
+                        .push_alert(AlertKind::PeopleIncorporated, center);
                 }
-                // Sound the alarm: rally the knights near the fallen village to
-                // come to their allies' aid and retake it. Knights farther out
-                // stay at their own posts.
-                let center = village_center(&village);
-                self.raise_rally(center, Some(AUTO_RALLY_RADIUS));
-                self.push_alert(AlertKind::VillageLost, center);
-                if self.incorporate_civilians(center, Faction::Realm(0), Faction::Enemy) > 0 {
-                    self.push_alert(AlertKind::PeopleLost, center);
+                if let Faction::Realm(r) = owner {
+                    // Sound the alarm: rally the knights near the fallen
+                    // village to come to their allies' aid and retake it.
+                    // Knights farther out stay at their own posts.
+                    let realm = self.realm_mut(r);
+                    realm.raise_rally(center, Some(AUTO_RALLY_RADIUS));
+                    realm.push_alert(AlertKind::VillageLost, center);
+                    if taken > 0 {
+                        realm.push_alert(AlertKind::PeopleLost, center);
+                    }
+                    log::info!("village lost, knights rallying to retake it");
                 }
-                log::info!("village lost, knights rallying to retake it");
             }
         }
     }
@@ -4061,20 +4317,20 @@ impl Game {
     /// never do (they're owed their pay at home), horsemen never do either
     /// (they stay mounted and stand the garrison first), and a lone conqueror
     /// always stays under arms.
-    fn settle_captured_village(&mut self, village: &[Tile]) {
+    fn settle_captured_village(&mut self, village: &[Tile], by: Faction) {
         let center = village_center(village);
         let danger2 = SETTLE_DOWN_DANGER_RADIUS * SETTLE_DOWN_DANGER_RADIUS;
         let contested = self
             .entities
             .iter()
-            .any(|e| e.faction == Faction::Enemy && e.pos.distance_squared(center) <= danger2);
+            .any(|e| hostile(e.faction, by) && e.pos.distance_squared(center) <= danger2);
         let r2 = CAPTURE_RADIUS * CAPTURE_RADIUS;
         let mut inside: Vec<usize> = self
             .entities
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                e.faction == Faction::Realm(0)
+                e.faction == by
                     && e.is_soldier()
                     && !e.levy
                     && village
@@ -4125,7 +4381,10 @@ impl Game {
             "{settling} knights settled the captured village as civilians, {} stand garrison",
             n - settling
         );
-        self.push_alert(AlertKind::KnightsSettled, center);
+        if let Faction::Realm(r) = by {
+            self.realm_mut(r)
+                .push_alert(AlertKind::KnightsSettled, center);
+        }
     }
 
     /// A fallen village's people change hands with it: `from`-faction civilians
@@ -4166,53 +4425,46 @@ impl Game {
         take
     }
 
-    /// True when the village has no `owner` defender within capture range but at
-    /// least one unit of the specific attacker faction `by` is standing in it.
-    /// Requiring a named attacker keeps a neutral third party (the allies) from
-    /// ever flipping a village they merely wander through.
-    fn village_taken(&self, village: &[Tile], owner: Faction, by: Faction) -> bool {
+    /// Who takes a village of `owner`'s this frame, if anyone: `None` while a
+    /// unit at peace with the owner (its own garrison, or hired allies
+    /// standing in it) is within capture range, otherwise the hostile faction
+    /// with the most units standing in it. The allies never take ground, so
+    /// a neutral third party wandering through never flips a village.
+    fn captor(&self, village: &[Tile], owner: Faction) -> Option<Faction> {
         let r2 = CAPTURE_RADIUS * CAPTURE_RADIUS;
-        let mut owner_present = false;
-        let mut attacker_present = false;
+        let mut present: Vec<(Faction, usize)> = Vec::new();
         for e in &self.entities {
             let inside = village
                 .iter()
                 .any(|&(hx, hy)| e.pos.distance_squared(tile_center((hx, hy))) <= r2);
-            if inside {
-                // Anyone at peace with the owner holds the village for them:
-                // the player's own garrison, or hired allies standing in it.
-                if !hostile(e.faction, owner) {
-                    owner_present = true;
-                } else if e.faction == by {
-                    attacker_present = true;
-                }
+            if !inside {
+                continue;
+            }
+            if !hostile(e.faction, owner) {
+                return None;
+            }
+            if e.faction == Faction::Ally {
+                continue;
+            }
+            match present.iter_mut().find(|(f, _)| *f == e.faction) {
+                Some(p) => p.1 += 1,
+                None => present.push((e.faction, 1)),
             }
         }
-        !owner_present && attacker_present
+        present.into_iter().max_by_key(|&(_, n)| n).map(|(f, _)| f)
     }
 
     /// Rebuild the village list: cluster each faction's houses, then count the
     /// defenders standing in each and check whether a hostile unit is closing
-    /// in. A threatened player village raises an alert.
+    /// in. A threatened realm village raises an alert for that realm.
     fn survey_villages(&mut self) {
         let capture2 = CAPTURE_RADIUS * CAPTURE_RADIUS;
         let reach = CAPTURE_RADIUS + THREAT_MARGIN;
         let threat2 = reach * reach;
         let mut villages = Vec::new();
-        for (faction, tiles) in [
-            (
-                Faction::Realm(0),
-                &self.world.houses_of(owner_of(Faction::Realm(0))),
-            ),
-            (
-                Faction::Enemy,
-                &self.world.houses_of(owner_of(Faction::Enemy)),
-            ),
-            (
-                Faction::Ally,
-                &self.world.houses_of(owner_of(Faction::Ally)),
-            ),
-        ] {
+        let factions: Vec<Faction> = self.factions().collect();
+        for faction in factions {
+            let tiles = self.world.houses_of(owner_of(faction));
             for houses in cluster(tiles) {
                 let min = houses
                     .iter()
@@ -4277,66 +4529,18 @@ impl Game {
                 v.pop += 1;
             }
         }
-        let under_attack: Vec<Vec2> = villages
+        let under_attack: Vec<(RealmId, Vec2)> = villages
             .iter()
-            .filter(|v| v.faction == Faction::Realm(0) && v.threatened)
-            .map(|v| v.center)
+            .filter_map(|v| match v.faction {
+                Faction::Realm(r) if v.threatened => Some((r, v.center)),
+                _ => None,
+            })
             .collect();
-        for c in under_attack {
-            self.alert_ongoing(AlertKind::VillageThreatened, c);
+        for (r, c) in under_attack {
+            self.realm_mut(r)
+                .alert_ongoing(AlertKind::VillageThreatened, c);
         }
         self.villages = villages;
-    }
-
-    /// Alert for a situation that lasts across frames, like a raid in progress:
-    /// toast it once, then stay quiet until it has been calm for
-    /// `ALERT_COOLDOWN` seconds.
-    fn alert_ongoing(&mut self, kind: AlertKind, pos: Vec2) {
-        let r2 = ALERT_MERGE_RADIUS * ALERT_MERGE_RADIUS;
-        if let Some(c) = self
-            .alert_cooldowns
-            .iter_mut()
-            .find(|(k, p, _)| *k == kind && p.distance_squared(pos) <= r2)
-        {
-            c.2 = ALERT_COOLDOWN;
-            return;
-        }
-        self.alert_cooldowns.push((kind, pos, ALERT_COOLDOWN));
-        self.push_alert(kind, pos);
-    }
-
-    /// Toast a one-off event. A repeat of one still on screen nearby just
-    /// refreshes it instead of stacking a duplicate.
-    fn push_alert(&mut self, kind: AlertKind, pos: Vec2) {
-        let r2 = ALERT_MERGE_RADIUS * ALERT_MERGE_RADIUS;
-        if let Some(a) = self
-            .alerts
-            .iter_mut()
-            .find(|a| a.kind == kind && a.pos.distance_squared(pos) <= r2)
-        {
-            a.age = 0.0;
-            a.pos = pos;
-            return;
-        }
-        self.alerts.push(Alert {
-            kind,
-            pos,
-            age: 0.0,
-        });
-        if self.alerts.len() > MAX_ALERTS {
-            self.alerts.remove(0);
-        }
-    }
-
-    fn age_alerts(&mut self, dt: f32) {
-        for a in &mut self.alerts {
-            a.age += dt;
-        }
-        self.alerts.retain(|a| a.age < ALERT_LIFETIME);
-        for c in &mut self.alert_cooldowns {
-            c.2 -= dt;
-        }
-        self.alert_cooldowns.retain(|c| c.2 > 0.0);
     }
 
     /// Every settlement on the map as of the last update.
@@ -4344,74 +4548,63 @@ impl Game {
         &self.villages
     }
 
-    /// Alerts currently on screen, oldest first.
-    pub fn alerts(&self) -> &[Alert] {
-        &self.alerts
-    }
-
-    pub fn dismiss_alert(&mut self, i: usize) {
-        if i < self.alerts.len() {
-            self.alerts.remove(i);
-        }
-    }
-
-    /// Can the realm take `response` right now? A toast only shows its action
+    /// Can `realm` take `response` right now? A toast only shows its action
     /// button while this is true, so the button never offers what the
     /// stockpile can't cover.
-    pub fn can_respond(&self, response: AlertResponse) -> bool {
+    pub fn can_respond(&self, realm: RealmId, response: AlertResponse) -> bool {
         match response {
-            AlertResponse::SummonWarship => {
-                self.wood >= WARSHIP_WOOD_COST
-                    && self.stone >= WARSHIP_STONE_COST
-                    && self.money >= WARSHIP_GOLD_COST
-            }
-            // Rallying needs a ship to answer: the player's own or a hired
+            AlertResponse::SummonWarship => self.realm(realm).can_afford_warship(),
+            // Rallying needs a ship to answer: the realm's own or a hired
             // escort, both of which follow the flag.
-            AlertResponse::RallyNavy => self.warships.iter().any(|w| w.faction != Faction::Enemy),
+            AlertResponse::RallyNavy => self
+                .warships
+                .iter()
+                .any(|w| w.faction == Faction::Realm(realm) || w.hired_by == Some(realm)),
         }
     }
 
-    /// Take alert `i`'s one-click action; the toast is dismissed once the
-    /// action actually went through.
-    pub fn respond_to_alert(&mut self, i: usize) {
-        let Some(alert) = self.alerts.get(i).copied() else {
+    /// Take alert `i`'s one-click action for `realm`; the toast is dismissed
+    /// once the action actually went through.
+    pub fn respond_to_alert(&mut self, realm: RealmId, i: usize) {
+        let Some(alert) = self.realm(realm).alerts.get(i).copied() else {
             return;
         };
         let Some(response) = alert.kind.response() else {
             return;
         };
-        if !self.can_respond(response) {
+        if !self.can_respond(realm, response) {
             return;
         }
         let done = match response {
-            AlertResponse::SummonWarship => self.summon_warship(alert.pos),
+            AlertResponse::SummonWarship => self.summon_warship(realm, alert.pos),
             AlertResponse::RallyNavy => {
-                self.raise_navy_rally(alert.pos);
+                self.realm_mut(realm).raise_navy_rally(alert.pos);
                 true
             }
         };
         if done {
-            self.alerts.remove(i);
+            self.realm_mut(realm).alerts.remove(i);
         }
     }
 
     /// Summon a warship against a threat at `pos`: lay one down on open water
-    /// in the home harbor at the usual cost and rally the whole navy to the
-    /// spot. False (and nothing spent) if no open water is free by a house to
-    /// launch from.
-    fn summon_warship(&mut self, pos: Vec2) -> bool {
-        let Some(spot) = self.harbor_water() else {
+    /// in the realm's home harbor at the usual cost and rally its whole navy
+    /// to the spot. False (and nothing spent) if no open water is free by a
+    /// house to launch from.
+    fn summon_warship(&mut self, realm: RealmId, pos: Vec2) -> bool {
+        let Some(spot) = self.harbor_water(realm) else {
             return false;
         };
-        self.launch_warship(spot);
-        self.raise_navy_rally(pos);
+        self.launch_warship(realm, spot);
+        self.realm_mut(realm).raise_navy_rally(pos);
         true
     }
 
-    /// The first open-water tile in the home harbor (within `SHIP_NEAR_RADIUS`
-    /// of one of the player's houses), where a summoned warship can launch.
-    fn harbor_water(&self) -> Option<Tile> {
-        for &(hx, hy) in self.world.houses_of(owner_of(Faction::Realm(0))) {
+    /// The first open-water tile in `realm`'s home harbor (within
+    /// `SHIP_NEAR_RADIUS` of one of its houses), where a summoned warship can
+    /// launch.
+    fn harbor_water(&self, realm: RealmId) -> Option<Tile> {
+        for &(hx, hy) in self.houses(realm) {
             for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                 for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                     let t = (hx + dx, hy + dy);
@@ -4422,10 +4615,6 @@ impl Game {
             }
         }
         None
-    }
-
-    pub fn player_houses(&self) -> &[Tile] {
-        self.world.houses_of(owner_of(Faction::Realm(0)))
     }
 
     /// Every hut on the map, all factions.
@@ -4467,7 +4656,11 @@ impl Game {
                 + self.pirates.len()
                 + self.saplings.len()
                 + self.build_sites.len()
-                + self.auto_zones.len(),
+                + self
+                    .realms
+                    .iter()
+                    .map(|r| r.auto_zones.len())
+                    .sum::<usize>(),
         );
         keep.push(sim);
         let around = |p: Vec2| {
@@ -4481,7 +4674,9 @@ impl Game {
         let tile_rect = |&(x, y): &Tile| (x - 1, y - 1, x + 1, y + 1);
         keep.extend(self.saplings.iter().map(|s| tile_rect(&s.tile)));
         keep.extend(self.build_sites.iter().map(|s| tile_rect(&s.tile)));
-        keep.extend(self.auto_zones.iter().map(tile_rect));
+        for realm in &self.realms {
+            keep.extend(realm.auto_zones.iter().map(tile_rect));
+        }
         self.world.evict_clean_chunks(&keep);
     }
 
@@ -4538,15 +4733,13 @@ impl Game {
         let pick = candidates[self.rng.range(0, candidates.len() as i32) as usize];
         let (min, max) = (self.villages[pick].min, self.villages[pick].max);
         let big = self.villages[pick].houses >= CAMP_HORSEMAN_MIN_HOUSES;
-        let houses: Vec<Tile> = match faction {
-            Faction::Realm(_) => self.world.houses_of(owner_of(Faction::Realm(0))),
-            Faction::Enemy => self.world.houses_of(owner_of(Faction::Enemy)),
-            Faction::Ally => self.world.houses_of(owner_of(Faction::Ally)),
-        }
-        .iter()
-        .copied()
-        .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
-        .collect();
+        let houses: Vec<Tile> = self
+            .world
+            .houses_of(owner_of(faction))
+            .iter()
+            .copied()
+            .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
+            .collect();
         if houses.is_empty() {
             return None;
         }
@@ -4586,7 +4779,7 @@ impl Game {
     fn soldiers_of(&self, faction: Faction) -> (usize, usize, usize, usize) {
         let (mut knights, mut horsemen, mut bowmen, mut axemen) = (0usize, 0usize, 0usize, 0usize);
         for e in &self.entities {
-            if e.faction != faction || e.mercenary {
+            if e.faction != faction || e.mercenary() {
                 continue;
             }
             match e.job {
@@ -4598,6 +4791,80 @@ impl Game {
             }
         }
         (knights, horsemen, bowmen, axemen)
+    }
+
+    /// Run one realm's spawn clock: when it fires and the realm has room, a
+    /// new villager appears by whichever of its villages is emptiest.
+    fn spawn_for_realm(&mut self, realm: RealmId, dt: f32) {
+        let faction = Faction::Realm(realm);
+        self.realm_mut(realm).spawn_timer -= dt;
+        if self.realm(realm).spawn_timer > 0.0 {
+            return;
+        }
+        let civilians = self.civilian_count(faction);
+        self.realm_mut(realm).spawn_timer = spawn_interval(PLAYER_SPAWN_INTERVAL, civilians);
+        if self.population(realm) >= self.pop_cap(realm) {
+            return;
+        }
+        let Some((t, _)) = self.spawn_site(faction) else {
+            return;
+        };
+        // Agriculture favors civilians (2:1); Military favors knights (1:2).
+        // Both still raise some of each.
+        let priority = self.realm(realm).priority;
+        let c = self.realm(realm).spawn_cycle % 3;
+        let mut job = match priority {
+            Priority::Agriculture => {
+                if c == 2 {
+                    Job::Knight
+                } else {
+                    Job::Civilian
+                }
+            }
+            Priority::Military => {
+                if c == 0 {
+                    Job::Civilian
+                } else {
+                    Job::Knight
+                }
+            }
+        };
+        // A realm short of workers raises hands first, whatever the priority
+        // says: homes always refill with civilians, so a realm cut down to a
+        // few people can work its way back.
+        if civilians <= MIN_CIVILIANS_TO_GROW {
+            job = Job::Civilian;
+        }
+        // Under the Military priority, a realm light on cavalry raises a
+        // horseman in place of the knight when it can afford the horse, one
+        // light on bowmen raises a bowman when it can afford the bow, and
+        // likewise for axemen.
+        let money = self.realm(realm).money;
+        if job == Job::Knight && priority == Priority::Military {
+            if money >= HORSEMAN_GOLD_COST && self.wants_horseman(faction) {
+                job = Job::Horseman;
+            } else if money >= BOWMAN_GOLD_COST && self.wants_bowman(faction) {
+                job = Job::Bowman;
+            } else if money >= AXEMAN_GOLD_COST && self.wants_axeman(faction) {
+                job = Job::Axeman;
+            }
+        }
+        // Soldiers must be paid for; an empty treasury raises a (free)
+        // civilian instead, so the village still grows.
+        let cost = match job {
+            Job::Horseman => HORSEMAN_GOLD_COST,
+            Job::Bowman => BOWMAN_GOLD_COST,
+            Job::Axeman => AXEMAN_GOLD_COST,
+            Job::Knight => KNIGHT_GOLD_COST,
+            Job::Civilian => 0,
+        };
+        if money >= cost {
+            self.realm_mut(realm).money -= cost;
+        } else {
+            job = Job::Civilian;
+        }
+        self.realm_mut(realm).spawn_cycle += 1;
+        self.entities.push(Entity::new(faction, job, t));
     }
 
     fn handle_spawns(&mut self, dt: f32) {
@@ -4626,70 +4893,8 @@ impl Game {
             }
         }
 
-        self.player_spawn_timer -= dt;
-        if self.player_spawn_timer <= 0.0 {
-            let civilians = self.civilian_count(Faction::Realm(0));
-            self.player_spawn_timer = spawn_interval(PLAYER_SPAWN_INTERVAL, civilians);
-            if self.population() < self.pop_cap()
-                && let Some((t, _)) = self.spawn_site(Faction::Realm(0))
-            {
-                // Agriculture favors civilians (2:1); Military favors
-                // knights (1:2). Both still raise some of each.
-                let c = self.player_spawn_cycle % 3;
-                let mut job = match self.priority {
-                    Priority::Agriculture => {
-                        if c == 2 {
-                            Job::Knight
-                        } else {
-                            Job::Civilian
-                        }
-                    }
-                    Priority::Military => {
-                        if c == 0 {
-                            Job::Civilian
-                        } else {
-                            Job::Knight
-                        }
-                    }
-                };
-                // A realm short of workers raises hands first, whatever the
-                // priority says: homes always refill with civilians, so a
-                // realm cut down to a few people can work its way back.
-                if civilians <= MIN_CIVILIANS_TO_GROW {
-                    job = Job::Civilian;
-                }
-                // Under the Military priority, a realm light on cavalry
-                // raises a horseman in place of the knight when it can
-                // afford the horse, one light on bowmen raises a bowman when
-                // it can afford the bow, and likewise for axemen.
-                if job == Job::Knight && self.priority == Priority::Military {
-                    if self.money >= HORSEMAN_GOLD_COST && self.wants_horseman(Faction::Realm(0)) {
-                        job = Job::Horseman;
-                    } else if self.money >= BOWMAN_GOLD_COST && self.wants_bowman(Faction::Realm(0))
-                    {
-                        job = Job::Bowman;
-                    } else if self.money >= AXEMAN_GOLD_COST && self.wants_axeman(Faction::Realm(0))
-                    {
-                        job = Job::Axeman;
-                    }
-                }
-                // Soldiers must be paid for; an empty treasury raises a
-                // (free) civilian instead, so the village still grows.
-                let cost = match job {
-                    Job::Horseman => HORSEMAN_GOLD_COST,
-                    Job::Bowman => BOWMAN_GOLD_COST,
-                    Job::Axeman => AXEMAN_GOLD_COST,
-                    Job::Knight => KNIGHT_GOLD_COST,
-                    Job::Civilian => 0,
-                };
-                if self.money >= cost {
-                    self.money -= cost;
-                } else {
-                    job = Job::Civilian;
-                }
-                self.player_spawn_cycle += 1;
-                self.entities.push(Entity::new(Faction::Realm(0), job, t));
-            }
+        for realm in self.realm_ids().collect::<Vec<_>>() {
+            self.spawn_for_realm(realm, dt);
         }
 
         // Allied camps raise their own units: mostly knights to press the
@@ -4762,46 +4967,46 @@ impl Game {
                 (hx - anchor.0).abs() >= VILLAGE_SPACING || (hy - anchor.1).abs() >= VILLAGE_SPACING
             })
         };
-        spaced(self.world.houses_of(owner_of(Faction::Enemy)))
-            && spaced(self.world.houses_of(owner_of(Faction::Ally)))
-            && spaced(self.world.houses_of(owner_of(Faction::Realm(0))))
+        self.factions()
+            .all(|f| spaced(self.world.houses_of(owner_of(f))))
     }
 
-    /// Like `village_spot_clear`, but only against enemy and allied houses:
-    /// the check for a reinforcement landing, which may crowd the player's own
-    /// village but never someone else's.
-    fn spot_clear_of_rivals(&self, anchor: Tile) -> bool {
+    /// Like `village_spot_clear`, but against everyone's houses but `realm`'s
+    /// own: the check for a reinforcement landing, which may crowd the
+    /// realm's own village but never someone else's.
+    fn spot_clear_of_rivals(&self, realm: RealmId, anchor: Tile) -> bool {
         let spaced = |tiles: &[Tile]| {
             tiles.iter().all(|&(hx, hy)| {
                 (hx - anchor.0).abs() >= VILLAGE_SPACING || (hy - anchor.1).abs() >= VILLAGE_SPACING
             })
         };
-        spaced(self.world.houses_of(owner_of(Faction::Enemy)))
-            && spaced(self.world.houses_of(owner_of(Faction::Ally)))
+        self.factions()
+            .filter(|&f| f != Faction::Realm(realm))
+            .all(|f| spaced(self.world.houses_of(owner_of(f))))
     }
 
-    /// Is a player house within reinforcement range of this anchor? Settlers
-    /// landing here join the standing village instead of founding a new one.
-    fn near_player_village(&self, anchor: Tile) -> bool {
-        self.world
-            .houses_of(owner_of(Faction::Realm(0)))
+    /// Is a house of `realm`'s within reinforcement range of this anchor?
+    /// Settlers landing here join the standing village instead of founding a
+    /// new one.
+    fn near_own_village(&self, realm: RealmId, anchor: Tile) -> bool {
+        self.houses(realm)
             .iter()
             .any(|&(hx, hy)| (hx - anchor.0).abs().max((hy - anchor.1).abs()) <= REINFORCE_RADIUS)
     }
 
-    /// Ensure the cached home-continent tile set exists (flood-filled from the
-    /// capital), computing it lazily on first need (after a load, say).
-    fn ensure_home_set(&mut self) {
-        if self.home_continent.is_none() {
+    /// Ensure `realm`'s cached home-continent tile set exists (flood-filled
+    /// from its capital), computing it lazily on first need (after a load,
+    /// say).
+    fn ensure_home_set(&mut self, realm: RealmId) {
+        if self.realm(realm).home_continent.is_none() {
             let seed_tile = self
-                .world
-                .houses_of(owner_of(Faction::Realm(0)))
+                .houses(realm)
                 .iter()
                 .min_by_key(|(x, y)| x.abs() + y.abs())
                 .copied()
                 .unwrap_or((0, 0));
             let set = home_continent_tiles(&mut self.world, seed_tile, 300, 60_000);
-            self.home_continent = Some(set);
+            self.realm_mut(realm).home_continent = Some(set);
         }
     }
 
@@ -4899,7 +5104,7 @@ impl Game {
                 let d2 = e.pos.distance_squared(center);
                 (e.faction == faction
                     && !e.sheltered
-                    && !e.mercenary
+                    && !e.mercenary()
                     && e.found_at.is_none()
                     && d2 <= attr2)
                     .then_some((d2, i))
@@ -4959,7 +5164,7 @@ impl Game {
             Faction::Enemy => self
                 .villages
                 .iter()
-                .filter(|v| v.faction == Faction::Realm(0))
+                .filter(|v| matches!(v.faction, Faction::Realm(_)))
                 .map(|v| v.center)
                 .min_by(|a, b| {
                     a.distance_squared(center)
@@ -5020,13 +5225,19 @@ impl Game {
         None
     }
 
-    /// Does `anchor` sit on (or within a few tiles of) the player's home
-    /// landmass? Allied villages are kept off it so reaching them means a
-    /// voyage.
+    /// Does `anchor` sit on (or within a few tiles of) any realm's home
+    /// landmass? Allied villages are kept off them so reaching the allies
+    /// means a voyage.
     fn on_home_continent(&mut self, anchor: Tile) -> bool {
-        self.ensure_home_set();
-        let home = self.home_continent.as_ref().unwrap();
-        (-5..=5).any(|dy| (-5..=5).any(|dx| home.contains(&(anchor.0 + dx, anchor.1 + dy))))
+        for realm in self.realm_ids().collect::<Vec<_>>() {
+            self.ensure_home_set(realm);
+            let home = self.realm(realm).home_continent.as_ref().unwrap();
+            if (-5..=5).any(|dy| (-5..=5).any(|dx| home.contains(&(anchor.0 + dx, anchor.1 + dy))))
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Plant the daughter village once a founding party reaches its site: the
@@ -5107,7 +5318,6 @@ impl Game {
     /// Found a new allied village, always on a coast *off* the home continent so
     /// cargo ships remain the only way to reach it, and spaced from other camps.
     fn found_ally_village(&mut self) {
-        self.ensure_home_set();
         let base = FOUND_BASE_RADIUS
             + ALLY_FOUND_BONUS
             + self.ally_villages_founded as i32 * FOUND_RADIUS_STEP;
@@ -5148,38 +5358,40 @@ impl Game {
     /// construction order (its cost set aside, builder's pay included) and a
     /// civilian walks over to work the site. Clicking a pending site of the
     /// same kind cancels it and refunds everything.
-    pub fn try_build(&mut self, world_pos: Vec2) -> bool {
+    pub fn try_build(&mut self, realm: RealmId, world_pos: Vec2) -> bool {
         let (x, y) = tile_at(world_pos);
         match self.build_mode {
-            BuildMode::House => self.order_build((x, y), SiteKind::House),
-            BuildMode::Bridge => self.order_build((x, y), SiteKind::Bridge),
-            BuildMode::Mine => self.order_build((x, y), SiteKind::Mine),
-            BuildMode::Wall => self.order_build((x, y), SiteKind::Wall),
-            BuildMode::Hut => self.order_build((x, y), SiteKind::Hut),
+            BuildMode::House => self.order_build(realm, (x, y), SiteKind::House),
+            BuildMode::Bridge => self.order_build(realm, (x, y), SiteKind::Bridge),
+            BuildMode::Mine => self.order_build(realm, (x, y), SiteKind::Mine),
+            BuildMode::Wall => self.order_build(realm, (x, y), SiteKind::Wall),
+            BuildMode::Hut => self.order_build(realm, (x, y), SiteKind::Hut),
             BuildMode::AutoZone => {
                 // Mark a builder zone, or clear the one the click landed in.
-                if let Some(i) = self.auto_zones.iter().position(|&(zx, zy)| {
+                let zones = &mut self.realm_mut(realm).auto_zones;
+                if let Some(i) = zones.iter().position(|&(zx, zy)| {
                     (zx - x).abs() <= AUTO_ZONE_RADIUS && (zy - y).abs() <= AUTO_ZONE_RADIUS
                 }) {
-                    self.auto_zones.remove(i);
+                    zones.remove(i);
                 } else {
-                    self.auto_zones.push((x, y));
+                    zones.push((x, y));
                 }
                 true
             }
             BuildMode::Rally => {
-                self.toggle_rally((x, y));
+                self.toggle_rally(realm, (x, y));
                 true
             }
             BuildMode::Ship => {
                 // Launch a laden cargo ship from open water in the village's own
                 // harbor. It needs a water route to an allied coast; with no
                 // reachable ally port the launch is refused (and the cargo kept).
-                if !self.world.is_open_water(x, y) || !self.near_player_dock(x, y) {
+                if !self.world.is_open_water(x, y) || !self.near_dock(realm, x, y) {
                     return false;
                 }
-                let wood = self.ship_wood.min(self.wood);
-                let stone = self.ship_stone.min(self.stone);
+                let r = self.realm(realm);
+                let wood = r.ship_wood.min(r.wood);
+                let stone = r.ship_stone.min(r.stone);
                 if wood + stone == 0 {
                     return false;
                 }
@@ -5187,23 +5399,21 @@ impl Game {
                 let Some((_, path)) = plan_trade_route(&mut self.world, &[(x, y)], &allies) else {
                     return false;
                 };
-                self.dispatch_ship((x, y), path, wood, stone);
+                self.dispatch_ship(realm, (x, y), path, wood, stone);
                 true
             }
-            BuildMode::Settle => self.order_settlers((x, y)),
-            BuildMode::LandTroops => self.order_troops((x, y)),
+            BuildMode::Settle => self.order_settlers(realm, (x, y)),
+            BuildMode::LandTroops => self.order_troops(realm, (x, y)),
             BuildMode::Warship => {
                 // Lay down a warship in open water within the home harbor. No
                 // sea route is needed, since it patrols rather than voyaging.
                 if !self.world.is_open_water(x, y)
-                    || !self.near_player_dock(x, y)
-                    || self.wood < WARSHIP_WOOD_COST
-                    || self.stone < WARSHIP_STONE_COST
-                    || self.money < WARSHIP_GOLD_COST
+                    || !self.near_dock(realm, x, y)
+                    || !self.realm(realm).can_afford_warship()
                 {
                     return false;
                 }
-                self.launch_warship((x, y));
+                self.launch_warship(realm, (x, y));
                 true
             }
             BuildMode::NavyRally => {
@@ -5215,10 +5425,11 @@ impl Game {
                     return false;
                 }
                 let here = tile_center((x, y));
-                if let Some(k) = self.navy_rallies.iter().position(|&r| r == here) {
-                    self.navy_rallies.remove(k);
+                let flags = &mut self.realm_mut(realm).navy_rallies;
+                if let Some(k) = flags.iter().position(|&r| r == here) {
+                    flags.remove(k);
                 } else {
-                    self.navy_rallies.push(here);
+                    flags.push(here);
                 }
                 true
             }
@@ -5241,7 +5452,7 @@ impl Game {
     /// on, or `None` if the current mode acts on the press alone (flags,
     /// zones, ships, placing units). Ask before handing the press to
     /// `try_build`, since the press may cancel the very order this looks for.
-    pub fn stroke_at(&self, world_pos: Vec2) -> Option<Stroke> {
+    pub fn stroke_at(&self, realm: RealmId, world_pos: Vec2) -> Option<Stroke> {
         if self.sandbox() {
             return (self.sandbox_tool == SandboxTool::PlaceTile).then_some(Stroke::Place);
         }
@@ -5250,7 +5461,7 @@ impl Game {
         if self
             .build_sites
             .iter()
-            .any(|s| s.tile == t && s.kind == kind)
+            .any(|s| s.tile == t && s.kind == kind && s.realm == realm)
         {
             Some(Stroke::Cancel)
         } else {
@@ -5263,7 +5474,7 @@ impl Game {
     /// pending order, by `stroke`. Unlike a click it never flips a tile the
     /// other way, so sweeping back over a line leaves it as it is. Returns
     /// whether anything changed.
-    pub fn stroke_build(&mut self, t: Tile, stroke: Stroke) -> bool {
+    pub fn stroke_build(&mut self, realm: RealmId, t: Tile, stroke: Stroke) -> bool {
         if self.sandbox() {
             if self.sandbox_tool != SandboxTool::PlaceTile {
                 return false;
@@ -5276,8 +5487,8 @@ impl Game {
         };
         let pending = self.build_sites.iter().any(|s| s.tile == t);
         match stroke {
-            Stroke::Place if !pending => self.order_build(t, kind),
-            Stroke::Cancel if pending => self.order_build(t, kind),
+            Stroke::Place if !pending => self.order_build(realm, t, kind),
+            Stroke::Cancel if pending => self.order_build(realm, t, kind),
             _ => false,
         }
     }
@@ -5286,12 +5497,13 @@ impl Game {
     /// the soldiers share the standing flags out among themselves and each
     /// flag lifts once someone reaches it. Clicking a flagged tile lifts that
     /// flag instead.
-    fn toggle_rally(&mut self, t: Tile) {
+    fn toggle_rally(&mut self, realm: RealmId, t: Tile) {
         let here = tile_center(t);
-        if let Some(k) = self.rallies.iter().position(|r| r.pos == here) {
-            self.rallies.remove(k);
+        let rallies = &mut self.realm_mut(realm).rallies;
+        if let Some(k) = rallies.iter().position(|r| r.pos == here) {
+            rallies.remove(k);
         } else {
-            self.rallies.push(Rally {
+            rallies.push(Rally {
                 pos: here,
                 response: None,
             });
@@ -5311,7 +5523,7 @@ impl Game {
                 true
             }
             SandboxTool::Rally => {
-                self.toggle_rally(t);
+                self.toggle_rally(0, t);
                 true
             }
         }
@@ -5333,7 +5545,9 @@ impl Game {
             Brush::Bridge => {
                 self.world.carve_water(x, y);
                 self.world.set_bridge(x, y, true);
-                self.player_bridges.push(t);
+                if let Faction::Realm(r) = self.place_faction {
+                    self.realm_mut(r).bridges.push(t);
+                }
             }
             Brush::House => {
                 self.world.plant_house(x, y, owner);
@@ -5356,7 +5570,9 @@ impl Game {
         self.world.clear_tile(t.0, t.1);
         self.cave_tiles.retain(|&c| c != t);
         self.hut_tiles.retain(|&h| h != t);
-        self.player_bridges.retain(|&b| b != t);
+        for realm in &mut self.realms {
+            realm.bridges.retain(|&b| b != t);
+        }
         self.saplings.retain(|s| s.tile != t);
         self.build_sites.retain(|s| s.tile != t);
     }
@@ -5375,10 +5591,12 @@ impl Game {
         self.world.wipe_flat();
         self.cave_tiles.clear();
         self.hut_tiles.clear();
-        self.player_bridges.clear();
+        for realm in &mut self.realms {
+            realm.bridges.clear();
+            realm.auto_zones.clear();
+        }
         self.saplings.clear();
         self.build_sites.clear();
-        self.auto_zones.clear();
         self.world
             .ensure_region(-ENSURE_MARGIN, -ENSURE_MARGIN, ENSURE_MARGIN, ENSURE_MARGIN);
     }
@@ -5411,7 +5629,9 @@ impl Game {
     pub fn clear_units(&mut self) {
         self.entities.clear();
         self.missiles.clear();
-        self.rallies.clear();
+        for realm in &mut self.realms {
+            realm.rallies.clear();
+        }
     }
 
     /// How many units of each faction stand on the map, as
@@ -5431,9 +5651,16 @@ impl Game {
     /// Load and launch a cargo ship from `port` along `path`, debiting the
     /// stockpile; its reward is banked when it docks. The caller has already
     /// validated the launch spot, the route, and the stockpile.
-    fn dispatch_ship(&mut self, port: Tile, path: Vec<Tile>, wood: u32, stone: u32) {
-        self.wood -= wood;
-        self.stone -= stone;
+    fn dispatch_ship(
+        &mut self,
+        realm: RealmId,
+        port: Tile,
+        path: Vec<Tile>,
+        wood: u32,
+        stone: u32,
+    ) {
+        self.realm_mut(realm).wood -= wood;
+        self.realm_mut(realm).stone -= stone;
         let reward = wood * WOOD_PRICE + stone * STONE_PRICE;
         let start = tile_center(port);
         let facing = path
@@ -5441,6 +5668,7 @@ impl Game {
             .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
         self.ships.push(Ship {
             pos: start,
+            realm,
             path,
             path_cursor: 0,
             wood,
@@ -5458,18 +5686,20 @@ impl Game {
     /// it, the stockpile falls short, or too few civilians would stay behind;
     /// every refusal says why with a toast at the click, so a click that does
     /// nothing is never a mystery.
-    fn order_settlers(&mut self, t: Tile) -> bool {
+    fn order_settlers(&mut self, realm: RealmId, t: Tile) -> bool {
         let refuse = |game: &mut Game, why: LaunchRefusal| {
-            game.push_alert(AlertKind::LaunchRefused(why), tile_center(t));
+            game.realm_mut(realm)
+                .push_alert(AlertKind::LaunchRefused(why), tile_center(t));
             false
         };
-        if self.wood < SETTLER_WOOD_COST
-            || self.stone < SETTLER_STONE_COST
-            || self.money < SETTLER_GOLD_COST
+        if !self
+            .realm(realm)
+            .can_afford(SETTLER_WOOD_COST, SETTLER_STONE_COST, SETTLER_GOLD_COST)
         {
             return refuse(self, LaunchRefusal::Stockpile);
         }
-        if self.civilian_count(Faction::Realm(0)) < SETTLER_CIVILIANS + SETTLER_CIVILIANS_SPARED {
+        if self.civilian_count(Faction::Realm(realm)) < SETTLER_CIVILIANS + SETTLER_CIVILIANS_SPARED
+        {
             return refuse(self, LaunchRefusal::Civilians);
         }
         let Some(anchor) = find_land_anchor(&mut self.world, t, SETTLE_ANCHOR_RADIUS) else {
@@ -5481,27 +5711,27 @@ impl Game {
         // never anyone else's. Ground merely *near* your village (too close
         // to found, too far to join) is still refused.
         if !self.village_spot_clear(anchor)
-            && !(self.near_player_village(anchor) && self.spot_clear_of_rivals(anchor))
+            && !(self.near_own_village(realm, anchor) && self.spot_clear_of_rivals(realm, anchor))
         {
             return refuse(self, LaunchRefusal::TooClose);
         }
-        let Some((port, path)) = self.plan_settler_route(anchor) else {
+        let Some((port, path)) = self.plan_settler_route(realm, anchor) else {
             return refuse(self, LaunchRefusal::NoRoute);
         };
-        let crew = self.board_settlers(tile_center(port));
+        let crew = self.board_settlers(realm, tile_center(port));
         if crew == 0 {
             return refuse(self, LaunchRefusal::Civilians);
         }
-        self.wood -= SETTLER_WOOD_COST;
-        self.stone -= SETTLER_STONE_COST;
-        self.money -= SETTLER_GOLD_COST;
+        self.realm_mut(realm)
+            .spend(SETTLER_WOOD_COST, SETTLER_STONE_COST, SETTLER_GOLD_COST);
         let start = tile_center(port);
         let facing = path
             .first()
             .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
         self.transports.push(Transport {
             pos: start,
-            faction: Faction::Realm(0),
+            faction: Faction::Realm(realm),
+            hired_by: None,
             path,
             path_cursor: 0,
             anchor,
@@ -5513,7 +5743,8 @@ impl Game {
         // The ship casts off from the harbor, usually far from where the click
         // landed, so say out loud that the expedition is away. A banner on the
         // landing (drawn from `anchor`) marks the destination until it docks.
-        self.push_alert(AlertKind::SettlersSailed, start);
+        self.realm_mut(realm)
+            .push_alert(AlertKind::SettlersSailed, start);
         true
     }
 
@@ -5522,23 +5753,25 @@ impl Game {
     /// board, then debit the cost and set sail. Unlike settling, troops may
     /// land right by an enemy village; that's rather the point. Refusals say
     /// why with a toast at the click, like a settle order's.
-    fn order_troops(&mut self, t: Tile) -> bool {
+    fn order_troops(&mut self, realm: RealmId, t: Tile) -> bool {
         let refuse = |game: &mut Game, why: LaunchRefusal| {
-            game.push_alert(AlertKind::LaunchRefused(why), tile_center(t));
+            game.realm_mut(realm)
+                .push_alert(AlertKind::LaunchRefused(why), tile_center(t));
             false
         };
-        if self.wood < TROOP_WOOD_COST
-            || self.stone < TROOP_STONE_COST
-            || self.money < TROOP_GOLD_COST
+        if !self
+            .realm(realm)
+            .can_afford(TROOP_WOOD_COST, TROOP_STONE_COST, TROOP_GOLD_COST)
         {
             return refuse(self, LaunchRefusal::Stockpile);
         }
         // Only standing knights ship out: levies are militia serving on credit,
         // owed their pay at home, not an expeditionary force.
+        let faction = Faction::Realm(realm);
         let standing = self
             .entities
             .iter()
-            .filter(|e| e.faction == Faction::Realm(0) && e.job == Job::Knight && !e.levy)
+            .filter(|e| e.faction == faction && e.job == Job::Knight && !e.levy)
             .count();
         if standing < TROOP_KNIGHTS {
             return refuse(self, LaunchRefusal::Knights);
@@ -5546,23 +5779,23 @@ impl Game {
         let Some(anchor) = find_land_anchor(&mut self.world, t, SETTLE_ANCHOR_RADIUS) else {
             return refuse(self, LaunchRefusal::NoShore);
         };
-        let Some((port, path)) = self.plan_settler_route(anchor) else {
+        let Some((port, path)) = self.plan_settler_route(realm, anchor) else {
             return refuse(self, LaunchRefusal::NoRoute);
         };
-        let party = self.board_knights(tile_center(port));
+        let party = self.board_knights(realm, tile_center(port));
         if party == 0 {
             return refuse(self, LaunchRefusal::Knights);
         }
-        self.wood -= TROOP_WOOD_COST;
-        self.stone -= TROOP_STONE_COST;
-        self.money -= TROOP_GOLD_COST;
+        self.realm_mut(realm)
+            .spend(TROOP_WOOD_COST, TROOP_STONE_COST, TROOP_GOLD_COST);
         let start = tile_center(port);
         let facing = path
             .first()
             .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
         self.transports.push(Transport {
             pos: start,
-            faction: Faction::Realm(0),
+            faction,
+            hired_by: None,
             path,
             path_cursor: 0,
             anchor,
@@ -5571,20 +5804,22 @@ impl Game {
             bob: 0.0,
             facing,
         });
-        self.push_alert(AlertKind::TroopsSailed, start);
+        self.realm_mut(realm)
+            .push_alert(AlertKind::TroopsSailed, start);
         true
     }
 
-    /// Board `TROOP_KNIGHTS` of the player's standing knights (never levies)
+    /// Board `TROOP_KNIGHTS` of the realm's standing knights (never levies)
     /// onto a troop ship launching at `port`, removing them from the realm; the
     /// ones nearest the harbor answer the call. Returns how many boarded. The
     /// caller has already checked enough are standing.
-    fn board_knights(&mut self, port: Vec2) -> u32 {
+    fn board_knights(&mut self, realm: RealmId, port: Vec2) -> u32 {
+        let faction = Faction::Realm(realm);
         let mut aboard: Vec<usize> = self
             .entities
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.faction == Faction::Realm(0) && e.job == Job::Knight && !e.levy)
+            .filter(|(_, e)| e.faction == faction && e.job == Job::Knight && !e.levy)
             .map(|(i, _)| i)
             .collect();
         aboard.sort_by(|&a, &b| {
@@ -5610,19 +5845,19 @@ impl Game {
     /// (down a river to the sea included) and the closest one at that; a pond
     /// beside a house can't eat the search the way the old handful of
     /// one-at-a-time tries could.
-    fn plan_settler_route(&mut self, anchor: Tile) -> Option<(Tile, Vec<Tile>)> {
-        let docks = self.collect_docks();
+    fn plan_settler_route(&mut self, realm: RealmId, anchor: Tile) -> Option<(Tile, Vec<Tile>)> {
+        let docks = self.collect_docks(realm);
         plan_voyage(&mut self.world, &docks, anchor)
     }
 
-    /// Every tile a transport may launch from: open water within
-    /// `SHIP_NEAR_RADIUS` of one of the player's houses, deduplicated. The
-    /// house surroundings are generated first so a freshly loaded realm
-    /// doesn't misread its own harbor.
-    fn collect_docks(&mut self) -> Vec<Tile> {
+    /// Every tile a transport of `realm`'s may launch from: open water within
+    /// `SHIP_NEAR_RADIUS` of one of its houses, deduplicated. The house
+    /// surroundings are generated first so a freshly loaded realm doesn't
+    /// misread its own harbor.
+    fn collect_docks(&mut self, realm: RealmId) -> Vec<Tile> {
         let mut seen: HashSet<Tile> = HashSet::default();
         let mut docks = Vec::new();
-        let houses = self.world.houses_of(owner_of(Faction::Realm(0))).to_vec();
+        let houses = self.houses(realm).to_vec();
         for (hx, hy) in houses {
             self.world.ensure_region(
                 hx - SHIP_NEAR_RADIUS,
@@ -5642,18 +5877,17 @@ impl Game {
         docks
     }
 
-    /// Board `SETTLER_CIVILIANS` of the player's civilians onto a settler ship
+    /// Board `SETTLER_CIVILIANS` of the realm's civilians onto a settler ship
     /// launching at `port`, removing them from the realm; the ones nearest the
     /// harbor answer the call. Returns how many boarded. The caller has already
     /// checked enough would stay behind.
-    fn board_settlers(&mut self, port: Vec2) -> u32 {
+    fn board_settlers(&mut self, realm: RealmId, port: Vec2) -> u32 {
+        let faction = Faction::Realm(realm);
         let mut aboard: Vec<usize> = self
             .entities
             .iter()
             .enumerate()
-            .filter(|(_, e)| {
-                e.faction == Faction::Realm(0) && e.job == Job::Civilian && !e.sheltered
-            })
+            .filter(|(_, e)| e.faction == faction && e.job == Job::Civilian && !e.sheltered)
             .map(|(i, _)| i)
             .collect();
         aboard.sort_by(|&a, &b| {
@@ -5672,12 +5906,12 @@ impl Game {
         crew
     }
 
-    /// Player civilians on the road between villages, answering a call for
+    /// A realm's civilians on the road between villages, answering a call for
     /// settlers.
-    pub fn migrants(&self) -> usize {
+    pub fn migrants(&self, realm: RealmId) -> usize {
         self.entities
             .iter()
-            .filter(|e| e.migrate_to.is_some())
+            .filter(|e| e.faction == Faction::Realm(realm) && e.migrate_to.is_some())
             .count()
     }
 
@@ -5691,8 +5925,9 @@ impl Game {
     /// ship's usual cost. Refused, with nothing spent and a toast at the
     /// village saying why, when no other village can spare anyone or neither
     /// road nor sea reaches it.
-    pub fn call_settlers(&mut self, center: Vec2) -> bool {
-        let villages = cluster(self.world.houses_of(owner_of(Faction::Realm(0))));
+    pub fn call_settlers(&mut self, realm: RealmId, center: Vec2) -> bool {
+        let faction = Faction::Realm(realm);
+        let villages = cluster(self.houses(realm));
         let centers: Vec<Vec2> = villages.iter().map(|v| village_center(v)).collect();
         let Some(target) = (0..villages.len()).min_by(|&a, &b| {
             centers[a]
@@ -5703,7 +5938,8 @@ impl Game {
         };
         let at = centers[target];
         let refuse = |game: &mut Game, why: LaunchRefusal| {
-            game.push_alert(AlertKind::LaunchRefused(why), at);
+            game.realm_mut(realm)
+                .push_alert(AlertKind::LaunchRefused(why), at);
             false
         };
         // Each village's own people: civilians at work in the open (not
@@ -5712,7 +5948,7 @@ impl Game {
         let attr2 = VILLAGE_ATTRIBUTION_RADIUS * VILLAGE_ATTRIBUTION_RADIUS;
         let mut people: Vec<Vec<usize>> = vec![Vec::new(); villages.len()];
         for (i, e) in self.entities.iter().enumerate() {
-            if e.faction != Faction::Realm(0)
+            if e.faction != faction
                 || e.job != Job::Civilian
                 || e.sheltered
                 || e.migrate_to.is_some()
@@ -5750,7 +5986,7 @@ impl Game {
         // Over land: the party walks from the first village a road joins to
         // this one, as long as no enemy lies along it. The ones nearest the
         // destination answer the call.
-        let owner = owner_of(Faction::Realm(0));
+        let owner = owner_of(faction);
         let mut road_held = false;
         for &k in &sources {
             let mut party = people[k].clone();
@@ -5776,7 +6012,7 @@ impl Game {
             let Some(road) = migrant_route(&self.world, owner, start, dest) else {
                 continue;
             };
-            if !self.road_is_clear(&road) {
+            if !self.road_is_clear(realm, &road) {
                 road_held = true;
                 continue;
             }
@@ -5796,7 +6032,8 @@ impl Game {
                 dest.0,
                 dest.1
             );
-            self.push_alert(AlertKind::MigrantsSetOut, centers[k]);
+            self.realm_mut(realm)
+                .push_alert(AlertKind::MigrantsSetOut, centers[k]);
             return true;
         }
 
@@ -5814,9 +6051,9 @@ impl Game {
                 },
             )
         };
-        if self.wood < SETTLER_WOOD_COST
-            || self.stone < SETTLER_STONE_COST
-            || self.money < SETTLER_GOLD_COST
+        if !self
+            .realm(realm)
+            .can_afford(SETTLER_WOOD_COST, SETTLER_STONE_COST, SETTLER_GOLD_COST)
         {
             return refuse_sea(self, LaunchRefusal::ShipCost);
         }
@@ -5826,7 +6063,7 @@ impl Game {
         }
         let near = (at.x.floor() as i32, at.y.floor() as i32);
         let Some(anchor) = find_land_anchor(&mut self.world, near, SETTLE_ANCHOR_RADIUS)
-            .filter(|&a| self.near_player_village(a))
+            .filter(|&a| self.near_own_village(realm, a))
         else {
             return refuse_sea(self, LaunchRefusal::NoWay);
         };
@@ -5850,15 +6087,15 @@ impl Game {
             for i in crew {
                 self.entities.swap_remove(i);
             }
-            self.wood -= SETTLER_WOOD_COST;
-            self.stone -= SETTLER_STONE_COST;
-            self.money -= SETTLER_GOLD_COST;
+            self.realm_mut(realm)
+                .spend(SETTLER_WOOD_COST, SETTLER_STONE_COST, SETTLER_GOLD_COST);
             let facing = path
                 .first()
                 .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
             self.transports.push(Transport {
                 pos: start,
-                faction: Faction::Realm(0),
+                faction,
+                hired_by: None,
                 path,
                 path_cursor: 0,
                 anchor,
@@ -5867,16 +6104,18 @@ impl Game {
                 bob: 0.0,
                 facing,
             });
-            self.push_alert(AlertKind::SettlersSailed, start);
+            self.realm_mut(realm)
+                .push_alert(AlertKind::SettlersSailed, start);
             return true;
         }
         refuse_sea(self, LaunchRefusal::NoWay)
     }
 
-    /// Is a migrants' road clear of the enemy? No hostile soldier and no
-    /// enemy house may stand within `MIGRANT_SAFE_RADIUS` (Chebyshev) of any
-    /// tile on it, so settlers are never sent walking through a war.
-    fn road_is_clear(&self, road: &[Tile]) -> bool {
+    /// Is a migrants' road clear of `realm`'s foes? No hostile soldier and no
+    /// hostile house may stand within `MIGRANT_SAFE_RADIUS` (Chebyshev) of
+    /// any tile on it, so settlers are never sent walking through a war.
+    fn road_is_clear(&self, realm: RealmId, road: &[Tile]) -> bool {
+        let faction = Faction::Realm(realm);
         let r = MIGRANT_SAFE_RADIUS;
         let (mut lo, mut hi) = ((i32::MAX, i32::MAX), (i32::MIN, i32::MIN));
         for &(x, y) in road {
@@ -5887,13 +6126,12 @@ impl Game {
         let threats: Vec<Tile> = self
             .entities
             .iter()
-            .filter(|e| e.is_soldier() && hostile(e.faction, Faction::Realm(0)))
+            .filter(|e| e.is_soldier() && hostile(e.faction, faction))
             .map(|e| e.tile())
             .chain(
-                self.world
-                    .houses_of(owner_of(Faction::Enemy))
-                    .iter()
-                    .copied(),
+                self.factions()
+                    .filter(|&f| hostile(f, faction))
+                    .flat_map(|f| self.world.houses_of(owner_of(f)).iter().copied()),
             )
             .filter(near_road)
             .collect();
@@ -5911,75 +6149,81 @@ impl Game {
     /// (drafted, say, or carried off into another realm), gives up the trip
     /// where it stands. Once the last of a party is in, an alert says so.
     fn migrants_arrive(&mut self) {
-        let mut arrived: Vec<Tile> = Vec::new();
+        let mut arrived: Vec<(RealmId, Tile)> = Vec::new();
         for e in &mut self.entities {
             let Some(dest) = e.migrate_to else { continue };
-            if e.faction != Faction::Realm(0)
-                || e.job != Job::Civilian
-                || !self
-                    .world
-                    .houses_of(owner_of(Faction::Realm(0)))
-                    .contains(&dest)
-            {
+            let realm = match e.faction {
+                Faction::Realm(r) if e.job == Job::Civilian => Some(r),
+                _ => None,
+            };
+            let Some(realm) =
+                realm.filter(|_| self.world.houses_of(owner_of(e.faction)).contains(&dest))
+            else {
                 e.migrate_to = None;
                 continue;
-            }
+            };
             let (x, y) = e.tile();
             if (x - dest.0).abs().max((y - dest.1).abs()) <= MIGRANT_ARRIVE_RADIUS {
                 e.migrate_to = None;
                 e.set_path(Vec::new());
-                if !arrived.contains(&dest) {
-                    arrived.push(dest);
+                if !arrived.contains(&(realm, dest)) {
+                    arrived.push((realm, dest));
                 }
             }
         }
-        for dest in arrived {
+        for (realm, dest) in arrived {
             if !self.entities.iter().any(|e| e.migrate_to == Some(dest)) {
                 log::info!("settlers arrived at ({}, {})", dest.0, dest.1);
-                self.push_alert(AlertKind::MigrantsArrived, tile_center(dest));
+                self.realm_mut(realm)
+                    .push_alert(AlertKind::MigrantsArrived, tile_center(dest));
             }
         }
     }
 
     /// Debit a warship's cost and set its hull in the water at `spot`. The
     /// caller has already checked the spot and the stockpile.
-    fn launch_warship(&mut self, spot: Tile) {
-        self.wood -= WARSHIP_WOOD_COST;
-        self.stone -= WARSHIP_STONE_COST;
-        self.money -= WARSHIP_GOLD_COST;
+    fn launch_warship(&mut self, realm: RealmId, spot: Tile) {
+        self.realm_mut(realm)
+            .spend(WARSHIP_WOOD_COST, WARSHIP_STONE_COST, WARSHIP_GOLD_COST);
         self.warships
-            .push(Warship::new(Faction::Realm(0), tile_center(spot)));
+            .push(Warship::new(Faction::Realm(realm), tile_center(spot)));
     }
 
-    /// While the autonomous-trade switch is on, keep the harbor busy: on each
-    /// check, if the fleet at sea is small enough and the stockpile covers the
-    /// configured cargo load in full, launch a laden ship on its own. Only
-    /// full loads go out, so autonomous trade skims the surplus instead of
-    /// scraping the stockpile bare.
+    /// While a realm's autonomous-trade switch is on, keep its harbor busy:
+    /// on each check, if its fleet at sea is small enough and the stockpile
+    /// covers the configured cargo load in full, launch a laden ship on its
+    /// own. Only full loads go out, so autonomous trade skims the surplus
+    /// instead of scraping the stockpile bare.
     fn plan_auto_trade(&mut self, dt: f32) {
-        self.trade_timer -= dt;
-        if self.trade_timer > 0.0 {
-            return;
+        for realm in self.realm_ids().collect::<Vec<_>>() {
+            let r = self.realm_mut(realm);
+            r.trade_timer -= dt;
+            if r.trade_timer > 0.0 {
+                continue;
+            }
+            r.trade_timer = AUTO_TRADE_INTERVAL;
+            let at_sea = self.ships.iter().filter(|s| s.realm == realm).count();
+            let r = self.realm(realm);
+            if !r.auto_trade || at_sea >= MAX_AUTO_TRADE_SHIPS {
+                continue;
+            }
+            let (wood, stone) = (r.ship_wood, r.ship_stone);
+            if wood + stone == 0 || r.wood < wood || r.stone < stone {
+                continue;
+            }
+            let Some((port, path)) = self.plan_harbor_route(realm) else {
+                // No launch spot, or no route to an ally: back off for a few
+                // checks, since the failed route searches are the expensive
+                // part.
+                self.realm_mut(realm).trade_timer = AUTO_TRADE_INTERVAL * 3.0;
+                continue;
+            };
+            self.dispatch_ship(realm, port, path, wood, stone);
         }
-        self.trade_timer = AUTO_TRADE_INTERVAL;
-        if !self.auto_trade || self.ships.len() >= MAX_AUTO_TRADE_SHIPS {
-            return;
-        }
-        let (wood, stone) = (self.ship_wood, self.ship_stone);
-        if wood + stone == 0 || self.wood < wood || self.stone < stone {
-            return;
-        }
-        let Some((port, path)) = self.plan_harbor_route() else {
-            // No launch spot, or no route to an ally: back off for a few
-            // checks, since the failed route searches are the expensive part.
-            self.trade_timer = AUTO_TRADE_INTERVAL * 3.0;
-            return;
-        };
-        self.dispatch_ship(port, path, wood, stone);
     }
 
-    /// A spot the harbor can launch a cargo ship from on its own: open water
-    /// within `SHIP_NEAR_RADIUS` of one of the player's houses that has a sea
+    /// A spot `realm`'s harbor can launch a cargo ship from on its own: open
+    /// water within `SHIP_NEAR_RADIUS` of one of its houses that has a sea
     /// route to an allied coast, plus that route.
     ///
     /// A **random** one of the realm's coastal villages is asked first, so
@@ -5990,10 +6234,10 @@ impl Game {
     /// closest harbor, which left a colony's quay idle however long it stood.
     /// If the village drawn has no sea route, the whole realm's docks go into
     /// one search as before, so trade never stalls on an unlucky draw.
-    fn plan_harbor_route(&mut self) -> Option<(Tile, Vec<Tile>)> {
+    fn plan_harbor_route(&mut self, realm: RealmId) -> Option<(Tile, Vec<Tile>)> {
         let allies = self.world.houses_of(owner_of(Faction::Ally)).to_vec();
         let mine: Vec<usize> = (0..self.villages.len())
-            .filter(|&i| self.villages[i].faction == Faction::Realm(0))
+            .filter(|&i| self.villages[i].faction == Faction::Realm(realm))
             .collect();
         let mut coastal: Vec<Vec<Tile>> = Vec::new();
         for i in mine {
@@ -6008,7 +6252,7 @@ impl Game {
                 return Some(route);
             }
         }
-        let docks = self.collect_docks();
+        let docks = self.collect_docks(realm);
         plan_trade_route(&mut self.world, &docks, &allies)
     }
 
@@ -6022,7 +6266,7 @@ impl Game {
         let (min, max) = (v.min, v.max);
         let houses: Vec<Tile> = self
             .world
-            .houses_of(owner_of(Faction::Realm(0)))
+            .houses_of(owner_of(v.faction))
             .iter()
             .copied()
             .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
@@ -6058,46 +6302,45 @@ impl Game {
 
     /// Place a construction order of `kind` at `t`, or cancel the pending order
     /// already there (same kind only), refunding its full cost.
-    fn order_build(&mut self, t: Tile, kind: SiteKind) -> bool {
+    fn order_build(&mut self, realm: RealmId, t: Tile, kind: SiteKind) -> bool {
         if let Some(i) = self.build_sites.iter().position(|s| s.tile == t) {
-            if self.build_sites[i].kind != kind {
+            if self.build_sites[i].kind != kind || self.build_sites[i].realm != realm {
                 return false;
             }
             self.cancel_site(i);
             return true;
         }
-        if !self.site_placeable(t, kind) {
+        if !self.site_placeable(realm, t, kind) {
             return false;
         }
         let (wood, stone, gold) = kind.cost();
-        if self.wood < wood || self.stone < stone || self.money < gold {
+        if !self.realm(realm).can_afford(wood, stone, gold) {
             return false;
         }
-        self.wood -= wood;
-        self.stone -= stone;
-        self.money -= gold;
+        self.realm_mut(realm).spend(wood, stone, gold);
         self.build_sites.push(BuildSite {
             tile: t,
             kind,
+            realm,
             left: kind.build_time(),
             auto: false,
         });
         true
     }
 
-    /// May a site of `kind` be ordered on `t` right now?
-    fn site_placeable(&self, (x, y): Tile, kind: SiteKind) -> bool {
+    /// May `realm` order a site of `kind` on `t` right now?
+    fn site_placeable(&self, realm: RealmId, (x, y): Tile, kind: SiteKind) -> bool {
         match kind {
             // On open grass next to the village you already hold.
             SiteKind::House | SiteKind::Mine | SiteKind::Wall => {
-                self.world.is_open_grass(x, y) && self.near_player_house(x, y)
+                self.world.is_open_grass(x, y) && self.near_house(realm, x, y)
             }
             // A span must start from your land (near a house); further bridge
             // tiles may extend from one you already placed or ordered. This way
             // a bridge network always traces back to a house.
             SiteKind::Bridge => {
                 self.world.is_open_water(x, y)
-                    && (self.near_player_house(x, y) || self.near_player_bridge(x, y))
+                    && (self.near_house(realm, x, y) || self.near_bridge(realm, x, y))
             }
             // A hut is raised out of a standing tree.
             SiteKind::Hut => self.world.node(x, y).map(|n| n.kind) == Some(Resource::Wood),
@@ -6109,9 +6352,7 @@ impl Game {
     fn cancel_site(&mut self, i: usize) {
         let site = self.build_sites.swap_remove(i);
         let (wood, stone, gold) = site.kind.cost();
-        self.wood += wood;
-        self.stone += stone;
-        self.money += gold;
+        self.realm_mut(site.realm).refund(wood, stone, gold);
     }
 
     /// A builder has finished a site: raise the structure, unless the tile was
@@ -6119,11 +6360,12 @@ impl Game {
     /// order is refunded instead.
     fn complete_site(&mut self, site: BuildSite) {
         let (x, y) = site.tile;
+        let owner = owner_of(Faction::Realm(site.realm));
         let ok = match site.kind {
             SiteKind::House => {
                 let ok = self.world.is_open_grass(x, y);
                 if ok {
-                    self.world.set_house(x, y, owner_of(Faction::Realm(0)));
+                    self.world.set_house(x, y, owner);
                 }
                 ok
             }
@@ -6131,7 +6373,7 @@ impl Game {
                 let ok = self.world.is_open_water(x, y);
                 if ok {
                     self.world.set_bridge(x, y, true);
-                    self.player_bridges.push((x, y));
+                    self.realm_mut(site.realm).bridges.push((x, y));
                 }
                 ok
             }
@@ -6146,16 +6388,14 @@ impl Game {
             SiteKind::Wall => {
                 let ok = self.world.is_open_grass(x, y);
                 if ok {
-                    self.world
-                        .set_wall(x, y, owner_of(Faction::Realm(0)), WALL_MAX_HP);
+                    self.world.set_wall(x, y, owner, WALL_MAX_HP);
                 }
                 ok
             }
             SiteKind::Hut => {
                 let ok = self.world.node(x, y).map(|n| n.kind) == Some(Resource::Wood);
                 if ok {
-                    self.world
-                        .set_hut(x, y, owner_of(Faction::Realm(0)), HUT_MAX_HP);
+                    self.world.set_hut(x, y, owner, HUT_MAX_HP);
                     self.hut_tiles.push((x, y));
                 }
                 ok
@@ -6163,74 +6403,77 @@ impl Game {
         };
         if !ok {
             let (wood, stone, gold) = site.kind.cost();
-            self.wood += wood;
-            self.stone += stone;
-            self.money += gold;
+            self.realm_mut(site.realm).refund(wood, stone, gold);
         }
     }
 
-    /// While the autonomous-building switch is on, keep each builder zone
-    /// growing: order a new house on the open ground nearest the zone's marker
-    /// whenever the treasury can afford one. Each zone queues a single
-    /// autonomous order at a time, so builders never run ahead of the player's
-    /// stockpile by more than one house.
+    /// While a realm's autonomous-building switch is on, keep each of its
+    /// builder zones growing: order a new house on the open ground nearest the
+    /// zone's marker whenever the treasury can afford one. Each zone queues a
+    /// single autonomous order at a time, so builders never run ahead of the
+    /// realm's stockpile by more than one house.
     fn plan_auto_builds(&mut self, dt: f32) {
-        self.auto_timer -= dt;
-        if self.auto_timer > 0.0 {
-            return;
-        }
-        self.auto_timer = AUTO_BUILD_INTERVAL;
-        if !self.auto_build {
-            return;
-        }
-        for zi in 0..self.auto_zones.len() {
-            let (zx, zy) = self.auto_zones[zi];
-            let in_zone = |(tx, ty): Tile| {
-                (tx - zx).abs() <= AUTO_ZONE_RADIUS && (ty - zy).abs() <= AUTO_ZONE_RADIUS
-            };
-            if self.build_sites.iter().any(|s| s.auto && in_zone(s.tile)) {
+        for realm in self.realm_ids().collect::<Vec<_>>() {
+            let r = self.realm_mut(realm);
+            r.auto_timer -= dt;
+            if r.auto_timer > 0.0 {
                 continue;
             }
-            let (wood, stone, gold) = SiteKind::House.cost();
-            if self.wood < wood || self.stone < stone || self.money < gold {
+            r.auto_timer = AUTO_BUILD_INTERVAL;
+            if !r.auto_build {
                 continue;
             }
-            // The open spot nearest the marker that the house rules allow, kept
-            // a tile apart from standing houses so the zone doesn't wall its
-            // own people in.
-            let mut best: Option<(Tile, i32)> = None;
-            for dy in -AUTO_ZONE_RADIUS..=AUTO_ZONE_RADIUS {
-                for dx in -AUTO_ZONE_RADIUS..=AUTO_ZONE_RADIUS {
-                    let t = (zx + dx, zy + dy);
-                    if !self.site_placeable(t, SiteKind::House)
-                        || self.build_sites.iter().any(|s| s.tile == t)
-                    {
-                        continue;
-                    }
-                    let spaced = self
-                        .world
-                        .houses_of(owner_of(Faction::Realm(0)))
-                        .iter()
-                        .all(|&(hx, hy)| (hx - t.0).abs().max((hy - t.1).abs()) >= 2);
-                    if !spaced {
-                        continue;
-                    }
-                    let d = dx.abs() + dy.abs();
-                    if best.is_none_or(|(_, bd)| d < bd) {
-                        best = Some((t, d));
+            for zi in 0..self.realm(realm).auto_zones.len() {
+                let (zx, zy) = self.realm(realm).auto_zones[zi];
+                let in_zone = |(tx, ty): Tile| {
+                    (tx - zx).abs() <= AUTO_ZONE_RADIUS && (ty - zy).abs() <= AUTO_ZONE_RADIUS
+                };
+                if self
+                    .build_sites
+                    .iter()
+                    .any(|s| s.auto && s.realm == realm && in_zone(s.tile))
+                {
+                    continue;
+                }
+                let (wood, stone, gold) = SiteKind::House.cost();
+                if !self.realm(realm).can_afford(wood, stone, gold) {
+                    continue;
+                }
+                // The open spot nearest the marker that the house rules allow,
+                // kept a tile apart from standing houses so the zone doesn't
+                // wall its own people in.
+                let mut best: Option<(Tile, i32)> = None;
+                for dy in -AUTO_ZONE_RADIUS..=AUTO_ZONE_RADIUS {
+                    for dx in -AUTO_ZONE_RADIUS..=AUTO_ZONE_RADIUS {
+                        let t = (zx + dx, zy + dy);
+                        if !self.site_placeable(realm, t, SiteKind::House)
+                            || self.build_sites.iter().any(|s| s.tile == t)
+                        {
+                            continue;
+                        }
+                        let spaced = self
+                            .houses(realm)
+                            .iter()
+                            .all(|&(hx, hy)| (hx - t.0).abs().max((hy - t.1).abs()) >= 2);
+                        if !spaced {
+                            continue;
+                        }
+                        let d = dx.abs() + dy.abs();
+                        if best.is_none_or(|(_, bd)| d < bd) {
+                            best = Some((t, d));
+                        }
                     }
                 }
+                let Some((t, _)) = best else { continue };
+                self.realm_mut(realm).spend(wood, stone, gold);
+                self.build_sites.push(BuildSite {
+                    tile: t,
+                    kind: SiteKind::House,
+                    realm,
+                    left: SiteKind::House.build_time(),
+                    auto: true,
+                });
             }
-            let Some((t, _)) = best else { continue };
-            self.wood -= wood;
-            self.stone -= stone;
-            self.money -= gold;
-            self.build_sites.push(BuildSite {
-                tile: t,
-                kind: SiteKind::House,
-                left: SiteKind::House.build_time(),
-                auto: true,
-            });
         }
     }
 
@@ -6239,16 +6482,11 @@ impl Game {
         &self.build_sites
     }
 
-    /// Builder-zone markers, for rendering.
-    pub fn auto_zones(&self) -> &[Tile] {
-        &self.auto_zones
-    }
-
-    /// How the player's civilians are employed: (farming, mining, building).
-    pub fn role_counts(&self) -> (usize, usize, usize) {
+    /// How a realm's civilians are employed: (farming, mining, building).
+    pub fn role_counts(&self, realm: RealmId) -> (usize, usize, usize) {
         let mut counts = (0, 0, 0);
         for e in &self.entities {
-            if e.faction != Faction::Realm(0) || e.job != Job::Civilian {
+            if e.faction != Faction::Realm(realm) || e.job != Job::Civilian {
                 continue;
             }
             match e.role() {
@@ -6260,43 +6498,42 @@ impl Game {
         counts
     }
 
-    /// Does a flag the player planted stand (rather than only auto-raised
-    /// alarms, or nothing)?
-    pub fn player_flag(&self) -> bool {
-        self.rallies.iter().any(Rally::planted)
+    /// Allied knights hired by `realm` currently ashore.
+    pub fn mercenaries(&self, realm: RealmId) -> usize {
+        self.entities
+            .iter()
+            .filter(|e| e.hired_by == Some(realm))
+            .count()
     }
 
-    /// Hired allied knights currently ashore.
-    pub fn mercenaries(&self) -> usize {
-        self.entities.iter().filter(|e| e.mercenary).count()
-    }
-
-    /// Hire an allied company to answer the player's rally flag (the one most
+    /// Hire an allied company to answer `realm`'s rally flag (the one most
     /// recently planted, when several stand). The nearest allied village to
     /// the flag with knights to spare (beyond its garrison) loads
     /// `MERC_KNIGHTS` onto one of its ships, which sails for the coast nearest
-    /// the flag; ashore, the company answers the flags like the player's own
+    /// the flag; ashore, the company answers the flags like the realm's own
     /// knights, fights as allies do, and sails home once the ground is quiet
     /// (see `stand_down_mercenaries`). Gold is paid up front. Refused, with
-    /// nothing spent and a toast saying why, when no player flag stands, the
+    /// nothing spent and a toast saying why, when no flag stands, the
     /// treasury is short, no ally has the knights, no beach lies near the
     /// flag, or no sea route reaches it.
-    pub fn hire_mercenaries(&mut self) -> bool {
+    pub fn hire_mercenaries(&mut self, realm: RealmId) -> bool {
         let flag = self
+            .realm(realm)
             .rallies
             .iter()
             .rev()
             .find(|r| r.planted())
             .map(|r| r.pos);
-        let at = flag.unwrap_or_else(|| self.start_center());
+        let at = flag.unwrap_or_else(|| self.start_center(realm));
         let refuse = |game: &mut Game, why: LaunchRefusal| {
-            game.push_alert(AlertKind::LaunchRefused(why), at);
+            game.realm_mut(realm)
+                .push_alert(AlertKind::LaunchRefused(why), at);
             false
         };
         let Some(flag) = flag else {
             return refuse(self, LaunchRefusal::NoRally);
         };
-        if self.money < MERC_HIRE_COST {
+        if self.realm(realm).money < MERC_HIRE_COST {
             return refuse(self, LaunchRefusal::Stockpile);
         }
         // The company comes from the nearest allied village that can spare it.
@@ -6319,7 +6556,7 @@ impl Game {
                 .filter(|(_, e)| {
                     e.faction == Faction::Ally
                         && e.job == Job::Knight
-                        && !e.mercenary
+                        && !e.mercenary()
                         && e.found_at.is_none()
                         && e.pos.distance_squared(center) <= attr2
                 })
@@ -6364,13 +6601,14 @@ impl Game {
         for i in knights {
             self.entities.swap_remove(i);
         }
-        self.money -= MERC_HIRE_COST;
+        self.realm_mut(realm).money -= MERC_HIRE_COST;
         let facing = path
             .first()
             .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
         self.transports.push(Transport {
             pos: start,
             faction: Faction::Ally,
+            hired_by: Some(realm),
             path,
             path_cursor: 0,
             anchor,
@@ -6379,71 +6617,81 @@ impl Game {
             bob: 0.0,
             facing,
         });
-        self.merc_quiet = 0.0;
         log::info!("hired an allied company of {MERC_KNIGHTS} for {MERC_HIRE_COST} gold");
-        self.push_alert(AlertKind::MercenariesSailed, start);
+        let r = self.realm_mut(realm);
+        r.merc_quiet = 0.0;
+        r.push_alert(AlertKind::MercenariesSailed, start);
         true
     }
 
-    /// Once no flag stands and no enemy has come near any mercenary for
-    /// `MERC_STAND_DOWN` seconds, the hired company counts its work done and
-    /// sails home: the knights leave the realm (their village raises
-    /// replacements in time), and an alert says so.
+    /// Once a realm has no flag standing and no enemy has come near any
+    /// mercenary it hired for `MERC_STAND_DOWN` seconds, the hired company
+    /// counts its work done and sails home: the knights leave the map (their
+    /// village raises replacements in time), and an alert says so.
     fn stand_down_mercenaries(&mut self, dt: f32) {
-        if !self.entities.iter().any(|e| e.mercenary) {
-            return;
-        }
         let r2 = MERC_ENGAGE_RADIUS * MERC_ENGAGE_RADIUS;
-        let engaged = !self.rallies.is_empty()
-            || self.entities.iter().filter(|e| e.mercenary).any(|m| {
-                self.entities
-                    .iter()
-                    .any(|e| e.faction == Faction::Enemy && e.pos.distance_squared(m.pos) <= r2)
-            });
-        if engaged {
-            self.merc_quiet = 0.0;
-            return;
-        }
-        self.merc_quiet += dt;
-        if self.merc_quiet < MERC_STAND_DOWN {
-            return;
-        }
-        self.merc_quiet = 0.0;
-        let at = self.entities.iter().find(|e| e.mercenary).map(|e| e.pos);
-        self.entities.retain(|e| !e.mercenary);
-        if let Some(pos) = at {
-            log::info!("the hired company sailed home");
-            self.push_alert(AlertKind::MercenariesLeft, pos);
+        for realm in self.realm_ids().collect::<Vec<_>>() {
+            let hired = |e: &Entity| e.hired_by == Some(realm);
+            if !self.entities.iter().any(hired) {
+                continue;
+            }
+            let engaged = !self.realm(realm).rallies.is_empty()
+                || self.entities.iter().filter(|e| hired(e)).any(|m| {
+                    self.entities.iter().any(|e| {
+                        hostile(e.faction, Faction::Ally) && e.pos.distance_squared(m.pos) <= r2
+                    })
+                });
+            let r = self.realm_mut(realm);
+            if engaged {
+                r.merc_quiet = 0.0;
+                continue;
+            }
+            r.merc_quiet += dt;
+            if r.merc_quiet < MERC_STAND_DOWN {
+                continue;
+            }
+            r.merc_quiet = 0.0;
+            let at = self.entities.iter().find(|e| hired(e)).map(|e| e.pos);
+            self.entities.retain(|e| !hired(e));
+            if let Some(pos) = at {
+                log::info!("the hired company sailed home");
+                self.realm_mut(realm)
+                    .push_alert(AlertKind::MercenariesLeft, pos);
+            }
         }
     }
 
-    /// Hired allied warships currently afloat.
-    pub fn escorts(&self) -> usize {
-        self.warship_count(Faction::Ally)
+    /// Allied warships hired by `realm` currently afloat.
+    pub fn escorts(&self, realm: RealmId) -> usize {
+        self.warships
+            .iter()
+            .filter(|w| w.hired_by == Some(realm))
+            .count()
     }
 
-    /// Hire an allied warship to sail with the navy. It launches from the
-    /// allied port nearest the player's home harbor, crosses to that harbor,
-    /// and from then on behaves as one of the player's own: hunting pirates
-    /// and enemy hulls, shelling foes ashore, patrolling the deep sea, and
-    /// answering the navy rally flag. It sails home once the sea has been
+    /// Hire an allied warship to sail with `realm`'s navy. It launches from
+    /// the allied port nearest the realm's home harbor, crosses to that
+    /// harbor, and from then on behaves as one of the realm's own: hunting
+    /// pirates and enemy hulls, shelling foes ashore, patrolling the deep sea,
+    /// and answering the navy rally flag. It sails home once the sea has been
     /// quiet a while (see `stand_down_escorts`). Gold is paid up front.
     /// Refused, with nothing spent and a toast saying why, when the treasury
     /// is short, the escort cap is reached, the home harbor has no water, or
     /// no sea route joins an allied port to it.
-    pub fn hire_escort(&mut self) -> bool {
-        let at = self.start_center();
+    pub fn hire_escort(&mut self, realm: RealmId) -> bool {
+        let at = self.start_center(realm);
         let refuse = |game: &mut Game, why: LaunchRefusal| {
-            game.push_alert(AlertKind::LaunchRefused(why), at);
+            game.realm_mut(realm)
+                .push_alert(AlertKind::LaunchRefused(why), at);
             false
         };
-        if self.money < ESCORT_HIRE_COST {
+        if self.realm(realm).money < ESCORT_HIRE_COST {
             return refuse(self, LaunchRefusal::Stockpile);
         }
-        if self.escorts() >= MAX_ESCORTS {
+        if self.escorts(realm) >= MAX_ESCORTS {
             return refuse(self, LaunchRefusal::Escorts);
         }
-        let Some(harbor) = self.harbor_water() else {
+        let Some(harbor) = self.harbor_water(realm) else {
             return refuse(self, LaunchRefusal::NoShore);
         };
         // Every allied port goes into one search, so the escort leaves from
@@ -6453,53 +6701,59 @@ impl Game {
         let Some((port, path)) = plan_voyage(&mut self.world, &docks, harbor) else {
             return refuse(self, LaunchRefusal::NoRoute);
         };
-        self.money -= ESCORT_HIRE_COST;
+        self.realm_mut(realm).money -= ESCORT_HIRE_COST;
         let start = tile_center(port);
         let mut w = Warship::new(Faction::Ally, start);
+        w.hired_by = Some(realm);
         w.path = smooth_water_path(&self.world, port, &path);
         w.goal = Some(tile_center(harbor));
         w.plan_pos = tile_center(harbor);
         w.repath = NAVY_RALLY_REPLAN;
         self.warships.push(w);
-        self.escort_quiet = 0.0;
         log::info!("hired an allied escort for {ESCORT_HIRE_COST} gold");
-        self.push_alert(AlertKind::EscortSailed, start);
+        let r = self.realm_mut(realm);
+        r.escort_quiet = 0.0;
+        r.push_alert(AlertKind::EscortSailed, start);
         true
     }
 
-    /// Once no navy flag stands and no hostile has been in sight of any
-    /// escort for `ESCORT_STAND_DOWN` seconds, the hired warships count their
-    /// work done and sail home: they leave the map, and an alert says so. An
-    /// escort still crossing over is never sent home.
+    /// Once a realm has no navy flag standing and no hostile has been in
+    /// sight of any escort it hired for `ESCORT_STAND_DOWN` seconds, the
+    /// hired warships count their work done and sail home: they leave the
+    /// map, and an alert says so. An escort still crossing over is never sent
+    /// home.
     fn stand_down_escorts(&mut self, dt: f32) {
-        let escorts: Vec<usize> = self
-            .warships
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| w.faction == Faction::Ally)
-            .map(|(i, _)| i)
-            .collect();
-        if escorts.is_empty() {
-            return;
+        for realm in self.realm_ids().collect::<Vec<_>>() {
+            let escorts: Vec<usize> = self
+                .warships
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| w.hired_by == Some(realm))
+                .map(|(i, _)| i)
+                .collect();
+            if escorts.is_empty() {
+                continue;
+            }
+            let engaged = !self.realm(realm).navy_rallies.is_empty()
+                || escorts.iter().any(|&i| {
+                    let w = &self.warships[i];
+                    w.goal.is_some() || self.navy_target(Faction::Ally, w.pos).is_some()
+                });
+            let r = self.realm_mut(realm);
+            if engaged {
+                r.escort_quiet = 0.0;
+                continue;
+            }
+            r.escort_quiet += dt;
+            if r.escort_quiet < ESCORT_STAND_DOWN {
+                continue;
+            }
+            r.escort_quiet = 0.0;
+            let at = self.warships[escorts[0]].pos;
+            self.warships.retain(|w| w.hired_by != Some(realm));
+            log::info!("the allied escort sailed home");
+            self.realm_mut(realm).push_alert(AlertKind::EscortLeft, at);
         }
-        let engaged = !self.navy_rallies.is_empty()
-            || escorts.iter().any(|&i| {
-                let w = &self.warships[i];
-                w.goal.is_some() || self.navy_target(Faction::Ally, w.pos).is_some()
-            });
-        if engaged {
-            self.escort_quiet = 0.0;
-            return;
-        }
-        self.escort_quiet += dt;
-        if self.escort_quiet < ESCORT_STAND_DOWN {
-            return;
-        }
-        self.escort_quiet = 0.0;
-        let at = self.warships[escorts[0]].pos;
-        self.warships.retain(|w| w.faction != Faction::Ally);
-        log::info!("the allied escort sailed home");
-        self.push_alert(AlertKind::EscortLeft, at);
     }
 
     /// The enemy's sea raids. On each check, an enemy village grown to
@@ -6521,12 +6775,12 @@ impl Game {
         if self.enemy_raids_at_sea() >= MAX_ENEMY_RAIDS {
             return;
         }
-        // The soft target: the player's village with the fewest defenders,
-        // ties broken at random.
+        // The soft target: the realm village with the fewest defenders, of
+        // any realm's, ties broken at random.
         let mut targets: Vec<usize> = Vec::new();
         let mut fewest = usize::MAX;
         for (i, v) in self.villages.iter().enumerate() {
-            if v.faction != Faction::Realm(0) {
+            if !matches!(v.faction, Faction::Realm(_)) {
                 continue;
             }
             if v.knights < fewest {
@@ -6622,6 +6876,7 @@ impl Game {
         self.transports.push(Transport {
             pos: start,
             faction: Faction::Enemy,
+            hired_by: None,
             path,
             path_cursor: 0,
             anchor,
@@ -6636,42 +6891,37 @@ impl Game {
             anchor.1,
             if escorted { " with an escort" } else { "" }
         );
-        self.push_alert(AlertKind::EnemyFleetSailed, tile_center(anchor));
+        if let Faction::Realm(r) = self.villages[target].faction {
+            self.realm_mut(r)
+                .push_alert(AlertKind::EnemyFleetSailed, tile_center(anchor));
+        }
     }
 
-    /// Lift every rally flag; knights resume defending on their own.
-    pub fn clear_rally(&mut self) {
-        self.rallies.clear();
-    }
-
-    /// Lift every navy rally flag; warships resume hunting and patrolling.
-    pub fn clear_navy_rally(&mut self) {
-        self.navy_rallies.clear();
-    }
-
-    /// Proclaim a draft: every civilian the realm can spare takes up arms as a
-    /// knight on the spot, serving as a levy on credit, and the levies' term
-    /// of service (`LEVY_SERVICE`) starts. A working core of civilians is
-    /// always spared so the economy doesn't collapse. The floor is kept just
-    /// *above* `MIN_CIVILIANS_TO_GROW` so the draft never trips the
+    /// Proclaim a draft in `realm`: every civilian it can spare takes up arms
+    /// as a knight on the spot, serving as a levy on credit, and the levies'
+    /// term of service (`LEVY_SERVICE`) starts. A working core of civilians
+    /// is always spared so the economy doesn't collapse. The floor is kept
+    /// just *above* `MIN_CIVILIANS_TO_GROW` so the draft never trips the
     /// low-civilian retreat that would march the very knights it just raised
     /// back home. Proclaiming again calls up whoever has been raised since and
     /// starts the term afresh for everyone serving.
-    pub fn proclaim_draft(&mut self) {
-        self.levy_term = LEVY_SERVICE;
-        self.levy_quiet = 0.0;
+    pub fn proclaim_draft(&mut self, realm: RealmId) {
+        let faction = Faction::Realm(realm);
+        let r = self.realm_mut(realm);
+        r.levy_term = LEVY_SERVICE;
+        r.levy_quiet = 0.0;
         for i in 0..self.entities.len() {
-            if self.civilian_count(Faction::Realm(0)) <= MIN_CIVILIANS_TO_GROW + 1 {
+            if self.civilian_count(faction) <= MIN_CIVILIANS_TO_GROW + 1 {
                 break;
             }
             let e = &self.entities[i];
-            if e.faction != Faction::Realm(0) || e.job != Job::Civilian {
+            if e.faction != faction || e.job != Job::Civilian {
                 continue;
             }
             let e = &mut self.entities[i];
             e.levy = true;
             e.job = Job::Knight;
-            e.max_hp = max_hp_for(Faction::Realm(0), Job::Knight);
+            e.max_hp = max_hp_for(faction, Job::Knight);
             e.hp = e.max_hp;
             // Shed any work state so the fresh recruit acts as a soldier.
             e.mine_target = None;
@@ -6682,76 +6932,83 @@ impl Game {
         }
     }
 
-    /// Seconds left on the levies' term of service, or `None` when none is
-    /// running.
-    pub fn levy_term_remaining(&self) -> Option<f32> {
-        (self.levy_term > 0.0).then_some(self.levy_term)
-    }
-
-    /// Levies currently serving, and the gold they'll be owed when they stand
-    /// down.
-    pub fn levies_owed(&self) -> (usize, u32) {
-        let n = self.entities.iter().filter(|e| e.levy).count();
+    /// Levies of `realm` currently serving, and the gold they'll be owed when
+    /// they stand down.
+    pub fn levies_owed(&self, realm: RealmId) -> (usize, u32) {
+        let n = self
+            .entities
+            .iter()
+            .filter(|e| e.levy && e.faction == Faction::Realm(realm))
+            .count();
         (n, n as u32 * LEVY_GOLD_PAY)
     }
 
-    /// Run the levies' term of service down, and once it is up and no player
-    /// village has been threatened for `LEVY_STAND_DOWN` seconds, the invasion
-    /// counts as repelled and the levies stand down. Each survivor is paid
-    /// `LEVY_GOLD_PAY` and goes back to civilian work; any the treasury can't
-    /// cover desert. The fallen are owed nothing.
+    /// Run each realm's levies' term of service down, and once it is up and
+    /// none of that realm's villages has been threatened for
+    /// `LEVY_STAND_DOWN` seconds, the invasion counts as repelled and the
+    /// levies stand down. Each survivor is paid `LEVY_GOLD_PAY` and goes back
+    /// to civilian work; any the treasury can't cover desert. The fallen are
+    /// owed nothing.
     fn stand_down_levies(&mut self, dt: f32) {
-        self.levy_term = (self.levy_term - dt).max(0.0);
-        if !self.entities.iter().any(|e| e.levy) {
-            return;
-        }
-        let threatened = self
-            .villages
-            .iter()
-            .any(|v| v.faction == Faction::Realm(0) && v.threatened);
-        if self.levy_term > 0.0 || threatened {
-            self.levy_quiet = 0.0;
-            return;
-        }
-        self.levy_quiet += dt;
-        if self.levy_quiet < LEVY_STAND_DOWN {
-            return;
-        }
-        self.levy_quiet = 0.0;
+        for realm in self.realm_ids().collect::<Vec<_>>() {
+            let faction = Faction::Realm(realm);
+            let r = self.realm_mut(realm);
+            r.levy_term = (r.levy_term - dt).max(0.0);
+            if !self.entities.iter().any(|e| e.levy && e.faction == faction) {
+                continue;
+            }
+            let threatened = self
+                .villages
+                .iter()
+                .any(|v| v.faction == faction && v.threatened);
+            // Indexed directly rather than through `realm_mut`, so the
+            // treasury can be borrowed alongside the units below.
+            let r = &mut self.realms[realm as usize];
+            if r.levy_term > 0.0 || threatened {
+                r.levy_quiet = 0.0;
+                continue;
+            }
+            r.levy_quiet += dt;
+            if r.levy_quiet < LEVY_STAND_DOWN {
+                continue;
+            }
+            r.levy_quiet = 0.0;
 
-        let mut paid_at = None;
-        let mut deserted_at = None;
-        let money = &mut self.money;
-        self.entities.retain_mut(|e| {
-            if !e.levy {
-                return true;
+            let mut paid_at = None;
+            let mut deserted_at = None;
+            let money = &mut r.money;
+            self.entities.retain_mut(|e| {
+                if !e.levy || e.faction != faction {
+                    return true;
+                }
+                if *money < LEVY_GOLD_PAY {
+                    deserted_at.get_or_insert(e.pos);
+                    return false;
+                }
+                *money -= LEVY_GOLD_PAY;
+                paid_at.get_or_insert(e.pos);
+                e.levy = false;
+                // A levy that already fell back home is a civilian again; the
+                // rest lay down their arms, keeping their wounds.
+                if e.job == Job::Knight {
+                    let max_hp = max_hp_for(e.faction, Job::Civilian);
+                    e.hp = (e.hp / e.max_hp * max_hp).max(1.0);
+                    e.max_hp = max_hp;
+                    e.job = Job::Civilian;
+                    e.build_site = None;
+                    e.target_node = None;
+                    e.harvest_timer = 0.0;
+                    e.set_path(Vec::new());
+                }
+                true
+            });
+            if let Some(pos) = paid_at {
+                self.realm_mut(realm).push_alert(AlertKind::LeviesPaid, pos);
             }
-            if *money < LEVY_GOLD_PAY {
-                deserted_at.get_or_insert(e.pos);
-                return false;
+            if let Some(pos) = deserted_at {
+                self.realm_mut(realm)
+                    .push_alert(AlertKind::LeviesDeserted, pos);
             }
-            *money -= LEVY_GOLD_PAY;
-            paid_at.get_or_insert(e.pos);
-            e.levy = false;
-            // A levy that already fell back home is a civilian again; the rest
-            // lay down their arms, keeping their wounds.
-            if e.job == Job::Knight {
-                let max_hp = max_hp_for(e.faction, Job::Civilian);
-                e.hp = (e.hp / e.max_hp * max_hp).max(1.0);
-                e.max_hp = max_hp;
-                e.job = Job::Civilian;
-                e.build_site = None;
-                e.target_node = None;
-                e.harvest_timer = 0.0;
-                e.set_path(Vec::new());
-            }
-            true
-        });
-        if let Some(pos) = paid_at {
-            self.push_alert(AlertKind::LeviesPaid, pos);
-        }
-        if let Some(pos) = deserted_at {
-            self.push_alert(AlertKind::LeviesDeserted, pos);
         }
     }
 
@@ -7161,16 +7418,7 @@ fn gather_behavior(
     let here = e.tile();
 
     // Survival first: if the enemy's near, drop everything and hide in a hut.
-    if let Some(ev) = seek_shelter(
-        world,
-        e,
-        owner,
-        Faction::Realm(0),
-        snap,
-        grid,
-        farm.huts,
-        dt,
-    ) {
+    if let Some(ev) = seek_shelter(world, e, owner, e.faction, snap, grid, farm.huts, dt) {
         release_cave(e, farm.cave_use);
         return ev;
     }
@@ -8937,8 +9185,8 @@ fn open_sea(world: &World, x: i32, y: i32) -> bool {
 }
 
 /// Position of the nearest vessel (cargo ship, transport, or warship) within
-/// `max` of `from` that `gunner` would fire on, if any. Cargo ships are the
-/// player's; the rest fly their own faction's flag.
+/// `max` of `from` that `gunner` would fire on, if any. Cargo ships fly
+/// their realm's flag; the rest their own faction's.
 fn nearest_vessel(
     ships: &[Ship],
     transports: &[Transport],
@@ -8949,13 +9197,14 @@ fn nearest_vessel(
 ) -> Option<Vec2> {
     let mut best = max;
     let mut pos = None;
-    if gunner.harms(Faction::Realm(0)) {
-        for s in ships {
-            let d = (s.pos - from).length();
-            if d < best {
-                best = d;
-                pos = Some(s.pos);
-            }
+    for s in ships
+        .iter()
+        .filter(|s| gunner.harms(Faction::Realm(s.realm)))
+    {
+        let d = (s.pos - from).length();
+        if d < best {
+            best = d;
+            pos = Some(s.pos);
         }
     }
     for s in transports.iter().filter(|s| gunner.harms(s.faction)) {
@@ -9181,6 +9430,72 @@ impl<'a> Reader<'a> {
 fn faction_u8(f: Faction) -> u8 {
     owner_of(f)
 }
+fn priority_u8(p: Priority) -> u8 {
+    match p {
+        Priority::Agriculture => 0,
+        Priority::Military => 1,
+    }
+}
+fn priority_of(v: u8) -> Priority {
+    match v {
+        1 => Priority::Military,
+        _ => Priority::Agriculture,
+    }
+}
+fn gather_u8(g: GatherPriority) -> u8 {
+    match g {
+        GatherPriority::Balanced => 0,
+        GatherPriority::Wood => 1,
+        GatherPriority::Stone => 2,
+    }
+}
+fn gather_of(v: u8) -> GatherPriority {
+    match v {
+        1 => GatherPriority::Wood,
+        2 => GatherPriority::Stone,
+        _ => GatherPriority::Balanced,
+    }
+}
+fn controller_u8(c: Controller) -> u8 {
+    match c {
+        Controller::Human => 0,
+        Controller::Ai => 1,
+    }
+}
+fn controller_of(v: u8) -> Controller {
+    match v {
+        1 => Controller::Ai,
+        _ => Controller::Human,
+    }
+}
+/// A realm id as saves store it: the realm's own index, or `NO_REALM` for
+/// "none" (a unit nobody hired, say).
+const NO_REALM: u8 = 255;
+fn realm_u8(r: Option<RealmId>) -> u8 {
+    r.unwrap_or(NO_REALM)
+}
+fn realm_of(v: u8) -> Option<RealmId> {
+    (v != NO_REALM).then_some(v)
+}
+/// A counted list of tiles.
+fn write_tiles(b: &mut Vec<u8>, tiles: &[Tile]) {
+    wu32(b, tiles.len() as u32);
+    for &(x, y) in tiles {
+        wi32(b, x);
+        wi32(b, y);
+    }
+}
+impl Reader<'_> {
+    /// A counted list of tiles, as `write_tiles` lays it out.
+    fn tiles(&mut self) -> Option<Vec<Tile>> {
+        let count = self.u32()? as usize;
+        let mut out = Vec::with_capacity(count.min(1 << 16));
+        for _ in 0..count {
+            out.push((self.i32()?, self.i32()?));
+        }
+        Some(out)
+    }
+}
 fn job_u8(j: Job) -> u8 {
     match j {
         Job::Civilian => 0,
@@ -9239,13 +9554,17 @@ impl Game {
         b.extend_from_slice(MAGIC);
         wu8(&mut b, VERSION);
         wi32(&mut b, self.world.seed());
-        wu32(&mut b, self.wood);
-        wu32(&mut b, self.stone);
-        wu32(&mut b, self.money);
-        wu32(&mut b, self.ship_wood);
-        wu32(&mut b, self.ship_stone);
+        // The header carries the first realm's stockpile, orders and switches
+        // where saves have always kept them; the v20 realm section at the tail
+        // repeats them for every realm, this one included, and wins on load.
+        let first = self.realm(0);
+        wu32(&mut b, first.wood);
+        wu32(&mut b, first.stone);
+        wu32(&mut b, first.money);
+        wu32(&mut b, first.ship_wood);
+        wu32(&mut b, first.ship_stone);
         wu32(&mut b, self.enemies_defeated);
-        wu32(&mut b, self.units_lost);
+        wu32(&mut b, first.units_lost);
         wu8(
             &mut b,
             if self.build_mode == BuildMode::Bridge {
@@ -9254,22 +9573,8 @@ impl Game {
                 0
             },
         );
-        wu8(
-            &mut b,
-            if self.priority == Priority::Military {
-                1
-            } else {
-                0
-            },
-        );
-        wu8(
-            &mut b,
-            match self.gather_priority {
-                GatherPriority::Balanced => 0,
-                GatherPriority::Wood => 1,
-                GatherPriority::Stone => 2,
-            },
-        );
+        wu8(&mut b, priority_u8(first.priority));
+        wu8(&mut b, gather_u8(first.gather_priority));
         wf32(&mut b, cam.cx);
         wf32(&mut b, cam.cy);
         wf32(&mut b, cam.view_height);
@@ -9287,14 +9592,10 @@ impl Game {
             wu8(&mut b, e.levy as u8);
         }
 
-        wu32(&mut b, self.player_bridges.len() as u32);
-        for &(x, y) in &self.player_bridges {
-            wi32(&mut b, x);
-            wi32(&mut b, y);
-        }
+        write_tiles(&mut b, &first.bridges);
 
         // The trade fleet, and the switch letting the harbor dispatch it.
-        wu8(&mut b, self.auto_trade as u8);
+        wu8(&mut b, first.auto_trade as u8);
         wu32(&mut b, self.ships.len() as u32);
         for s in &self.ships {
             wf32(&mut b, s.pos.x);
@@ -9322,12 +9623,8 @@ impl Game {
 
         // The builders: the autonomous switch, zone markers, and pending
         // construction sites (their reserved costs live in these entries).
-        wu8(&mut b, self.auto_build as u8);
-        wu32(&mut b, self.auto_zones.len() as u32);
-        for &(x, y) in &self.auto_zones {
-            wi32(&mut b, x);
-            wi32(&mut b, y);
-        }
+        wu8(&mut b, first.auto_build as u8);
+        write_tiles(&mut b, &first.auto_zones);
         wu32(&mut b, self.build_sites.len() as u32);
         for s in &self.build_sites {
             wi32(&mut b, s.tile.0);
@@ -9428,7 +9725,7 @@ impl Game {
         // sea and ashore. Older saves lack them and default to the player's.
         wu32(&mut b, self.entities.len() as u32);
         for e in &self.entities {
-            wu8(&mut b, e.mercenary as u8);
+            wu8(&mut b, e.mercenary() as u8);
         }
         wu32(&mut b, self.transports.len() as u32);
         for s in &self.transports {
@@ -9470,6 +9767,48 @@ impl Game {
             wi32(&mut b, x);
             wi32(&mut b, y);
         }
+
+        // v20 tail sections: every realm in full (the header's copy of the
+        // first realm is repeated here, so this section alone describes
+        // them all), then who owns each cargo ship and construction order,
+        // and which realm hired each mercenary, allied transport and escort.
+        // Older saves lack them and load as one realm that owns everything.
+        wu8(&mut b, self.realms.len() as u8);
+        for realm in &self.realms {
+            wu8(&mut b, controller_u8(realm.controller));
+            wu32(&mut b, realm.wood);
+            wu32(&mut b, realm.stone);
+            wu32(&mut b, realm.money);
+            wu32(&mut b, realm.ship_wood);
+            wu32(&mut b, realm.ship_stone);
+            wu32(&mut b, realm.units_lost);
+            wu8(&mut b, realm.auto_trade as u8);
+            wu8(&mut b, realm.auto_build as u8);
+            wu8(&mut b, priority_u8(realm.priority));
+            wu8(&mut b, gather_u8(realm.gather_priority));
+            write_tiles(&mut b, &realm.auto_zones);
+            write_tiles(&mut b, &realm.bridges);
+        }
+        wu32(&mut b, self.ships.len() as u32);
+        for s in &self.ships {
+            wu8(&mut b, s.realm);
+        }
+        wu32(&mut b, self.build_sites.len() as u32);
+        for s in &self.build_sites {
+            wu8(&mut b, s.realm);
+        }
+        wu32(&mut b, self.entities.len() as u32);
+        for e in &self.entities {
+            wu8(&mut b, realm_u8(e.hired_by));
+        }
+        wu32(&mut b, self.transports.len() as u32);
+        for s in &self.transports {
+            wu8(&mut b, realm_u8(s.hired_by));
+        }
+        wu32(&mut b, self.warships.len() as u32);
+        for w in &self.warships {
+            wu8(&mut b, realm_u8(w.hired_by));
+        }
         b
     }
 
@@ -9496,16 +9835,8 @@ impl Game {
         } else {
             BuildMode::House
         };
-        let priority = if r.u8()? == 1 {
-            Priority::Military
-        } else {
-            Priority::Agriculture
-        };
-        let gather_priority = match r.u8()? {
-            1 => GatherPriority::Wood,
-            2 => GatherPriority::Stone,
-            _ => GatherPriority::Balanced,
-        };
+        let priority = priority_of(r.u8()?);
+        let gather_priority = gather_of(r.u8()?);
         let cam = CamState {
             cx: r.f32()?,
             cy: r.f32()?,
@@ -9553,7 +9884,7 @@ impl Game {
                 build_site: None,
                 sheltered: false,
                 levy,
-                mercenary: false,
+                hired_by: None,
                 found_at: None,
                 migrate_to: None,
                 pending: 0.0,
@@ -9569,11 +9900,7 @@ impl Game {
             });
         }
 
-        let bcount = r.u32()? as usize;
-        let mut player_bridges = Vec::with_capacity(bcount);
-        for _ in 0..bcount {
-            player_bridges.push((r.i32()?, r.i32()?));
-        }
+        let bridges = r.tiles()?;
 
         let auto_trade = r.u8()? != 0;
         let scount = r.u32()? as usize;
@@ -9594,8 +9921,11 @@ impl Game {
             let facing = path
                 .get(path_cursor)
                 .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - pos));
+            // The owner comes from the v20 tail section below; until then
+            // every cargo ship is the first realm's.
             ships.push(Ship {
                 pos,
+                realm: 0,
                 path,
                 path_cursor,
                 wood,
@@ -9612,18 +9942,14 @@ impl Game {
             let pos = Vec2::new(r.f32()?, r.f32()?);
             let hp = r.f32()?;
             // Owner, orders, and sortie come from the v18 tail section below;
-            // until then every warship is the player's.
+            // until then every warship is the first realm's.
             let mut w = Warship::new(Faction::Realm(0), pos);
             w.hp = hp;
             warships.push(w);
         }
 
         let auto_build = r.u8()? != 0;
-        let zcount = r.u32()? as usize;
-        let mut auto_zones = Vec::with_capacity(zcount);
-        for _ in 0..zcount {
-            auto_zones.push((r.i32()?, r.i32()?));
-        }
+        let auto_zones = r.tiles()?;
         let sitecount = r.u32()? as usize;
         let mut build_sites = Vec::with_capacity(sitecount);
         for _ in 0..sitecount {
@@ -9631,9 +9957,11 @@ impl Game {
             let kind = site_kind_of(r.u8()?);
             let left = r.f32()?;
             let auto = r.u8()? != 0;
+            // The owner comes from the v20 tail section below.
             build_sites.push(BuildSite {
                 tile,
                 kind,
+                realm: 0,
                 left,
                 auto,
             });
@@ -9757,6 +10085,7 @@ impl Game {
                 transports.push(Transport {
                     pos,
                     faction: Faction::Realm(0),
+                    hired_by: None,
                     path,
                     path_cursor,
                     anchor,
@@ -9782,12 +10111,15 @@ impl Game {
 
         // Unit flags and transport owners (v17 tail sections); older saves
         // keep the defaults set above (no mercenaries, player-owned ships).
+        // Before v20 there was one realm to hire anyone, so a mercenary or an
+        // allied company is the first realm's until the v20 section says
+        // otherwise.
         if version >= 17 {
             let count = r.u32()? as usize;
             for i in 0..count {
                 let flags = r.u8()?;
                 if let Some(e) = entities.get_mut(i) {
-                    e.mercenary = flags & 1 != 0;
+                    e.hired_by = (flags & 1 != 0).then_some(0);
                 }
             }
             let count = r.u32()? as usize;
@@ -9795,6 +10127,7 @@ impl Game {
                 let faction = faction_of(r.u8()?);
                 if let Some(s) = transports.get_mut(i) {
                     s.faction = faction;
+                    s.hired_by = (faction == Faction::Ally).then_some(0);
                 }
             }
         }
@@ -9812,6 +10145,7 @@ impl Game {
                 let sortie = r.f32()?;
                 if let Some(w) = warships.get_mut(i) {
                     w.faction = faction;
+                    w.hired_by = (faction == Faction::Ally).then_some(0);
                     w.hp = w.hp.min(warship_max_hp(faction));
                     w.goal = has_goal.then_some(goal);
                     w.plan_pos = goal;
@@ -9831,6 +10165,92 @@ impl Game {
                     e.migrate_to = on_road.then_some(dest);
                 }
             }
+        }
+
+        // The realms. A save from before v20 describes one realm, in the
+        // header fields read above; v20 writes every realm at the tail along
+        // with who owns each ship, order and hired unit.
+        let mut first = Realm::new(Controller::Human, None);
+        first.wood = wood;
+        first.stone = stone;
+        first.money = money;
+        first.ship_wood = ship_wood;
+        first.ship_stone = ship_stone;
+        first.units_lost = units_lost;
+        first.auto_trade = auto_trade;
+        first.auto_build = auto_build;
+        first.priority = priority;
+        first.gather_priority = gather_priority;
+        first.auto_zones = auto_zones;
+        first.bridges = bridges;
+        let mut realms = vec![first];
+        if version >= 20 {
+            let count = r.u8()? as usize;
+            let mut saved = Vec::with_capacity(count);
+            for _ in 0..count {
+                let mut realm = Realm::new(controller_of(r.u8()?), None);
+                realm.wood = r.u32()?;
+                realm.stone = r.u32()?;
+                realm.money = r.u32()?;
+                realm.ship_wood = r.u32()?;
+                realm.ship_stone = r.u32()?;
+                realm.units_lost = r.u32()?;
+                realm.auto_trade = r.u8()? != 0;
+                realm.auto_build = r.u8()? != 0;
+                realm.priority = priority_of(r.u8()?);
+                realm.gather_priority = gather_of(r.u8()?);
+                realm.auto_zones = r.tiles()?;
+                realm.bridges = r.tiles()?;
+                saved.push(realm);
+            }
+            // A save always holds at least one realm; keep the header's if a
+            // damaged file claims none.
+            if !saved.is_empty() {
+                realms = saved;
+            }
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let realm = r.u8()?;
+                if let Some(s) = ships.get_mut(i) {
+                    s.realm = realm;
+                }
+            }
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let realm = r.u8()?;
+                if let Some(s) = build_sites.get_mut(i) {
+                    s.realm = realm;
+                }
+            }
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let hired_by = realm_of(r.u8()?);
+                if let Some(e) = entities.get_mut(i) {
+                    e.hired_by = hired_by;
+                }
+            }
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let hired_by = realm_of(r.u8()?);
+                if let Some(s) = transports.get_mut(i) {
+                    s.hired_by = hired_by;
+                }
+            }
+            let count = r.u32()? as usize;
+            for i in 0..count {
+                let hired_by = realm_of(r.u8()?);
+                if let Some(w) = warships.get_mut(i) {
+                    w.hired_by = hired_by;
+                }
+            }
+        }
+        // Nothing may point at a realm the save doesn't hold.
+        let last = (realms.len() - 1) as RealmId;
+        for s in &mut ships {
+            s.realm = s.realm.min(last);
+        }
+        for s in &mut build_sites {
+            s.realm = s.realm.min(last);
         }
 
         // Rebuild the tile lists (mines, huts) by scanning chunks.
@@ -9868,14 +10288,8 @@ impl Game {
         let game = Game {
             world,
             entities,
-            wood,
-            stone,
-            money,
-            ship_wood,
-            ship_stone,
+            realms,
             ships,
-            auto_trade,
-            trade_timer: 0.0,
             transports,
             warships,
             pirates: Vec::new(),
@@ -9887,44 +10301,26 @@ impl Game {
             place_faction: Faction::Realm(0),
             place_job: Job::Knight,
             place_brush: Brush::Wall,
-            priority,
-            gather_priority,
             enemies_defeated,
-            units_lost,
-            rallies: Vec::new(),
-            navy_rallies: Vec::new(),
             offscreen_cursor: 0,
-            levy_term: 0.0,
-            levy_quiet: 0.0,
             cave_tiles,
             hut_tiles,
             build_sites,
-            auto_zones,
-            auto_build,
-            auto_timer: 0.0,
             evict_timer: EVICT_INTERVAL,
             saplings: Vec::new(),
-            player_bridges,
             enemy_spawn_timer: ENEMY_SPAWN_INTERVAL,
-            player_spawn_timer: PLAYER_SPAWN_INTERVAL,
             ally_spawn_timer: ALLY_SPAWN_INTERVAL,
-            player_spawn_cycle: 0,
             enemy_spawn_cycle: 0,
             ally_spawn_cycle: 0,
             enemy_grow_timer: ENEMY_GROW_INTERVAL,
             enemy_bud_timer: ENEMY_BUD_INTERVAL,
             ally_bud_timer: ALLY_BUD_INTERVAL,
-            merc_quiet: 0.0,
-            escort_quiet: 0.0,
             enemy_raid_timer: ENEMY_RAID_INTERVAL,
             enemy_found_timer: ENEMY_FOUND_INTERVAL,
             ally_found_timer: ALLY_FOUND_INTERVAL,
             enemy_villages_founded,
             ally_villages_founded,
-            home_continent: None,
             villages: Vec::new(),
-            alerts: Vec::new(),
-            alert_cooldowns: Vec::new(),
             rng: Rng::new(seed as u64 ^ 0xD1B54A32D192ED03),
         };
         Some((game, cam))
@@ -9994,6 +10390,24 @@ mod tests {
         out
     }
 
+    /// How many bytes the v20 tail sections (the realms and the owner lists)
+    /// take in a save of `game`, so a test faking an older save can strip
+    /// them before stripping the sections older versions lacked.
+    fn v20_tail_len(game: &Game) -> usize {
+        let tiles = |t: &[Tile]| 4 + 8 * t.len();
+        let realms: usize = game
+            .realms
+            .iter()
+            .map(|r| 1 + 6 * 4 + 4 + tiles(&r.auto_zones) + tiles(&r.bridges))
+            .sum();
+        1 + realms
+            + (4 + game.ships.len())
+            + (4 + game.build_sites.len())
+            + (4 + game.entities.len())
+            + (4 + game.transports.len())
+            + (4 + game.warships.len())
+    }
+
     /// Clear the board for a long, isolated run: every unit removed and every
     /// player house razed, so the realm neither gathers nor raises anyone while
     /// thousands of ticks play out. Removing the units alone no longer does it,
@@ -10037,7 +10451,7 @@ mod tests {
         println!("generate_chunk: {:.2?} avg over 256", t.elapsed() / 256);
 
         let mut game = Game::new(11);
-        let c = game.start_center();
+        let c = game.start_center(0);
         let sim = (
             c.x as i32 - 60,
             c.y as i32 - 60,
@@ -10061,7 +10475,7 @@ mod tests {
     /// A launchable home port: open water within the player's harbor that has a
     /// sea route to an allied coast. `None` if the village can't ship anywhere.
     fn find_player_port(game: &mut Game) -> Option<Tile> {
-        game.plan_harbor_route().map(|(dock, _)| dock)
+        game.plan_harbor_route(0).map(|(dock, _)| dock)
     }
 
     #[test]
@@ -10080,22 +10494,26 @@ mod tests {
                 continue;
             };
 
-            let (wood0, stone0, money0) = (game.wood, game.stone, game.money);
-            let (lw, ls) = (game.ship_wood.min(wood0), game.ship_stone.min(stone0));
+            let (wood0, stone0, money0) =
+                (game.realm(0).wood, game.realm(0).stone, game.realm(0).money);
+            let (lw, ls) = (
+                game.realm(0).ship_wood.min(wood0),
+                game.realm(0).ship_stone.min(stone0),
+            );
             let expected = lw * WOOD_PRICE + ls * STONE_PRICE;
             assert!(expected > 0, "seed {seed}: nothing worth shipping");
 
             game.build_mode = BuildMode::Ship;
             assert!(
-                game.try_build(tile_center(port)),
+                game.try_build(0, tile_center(port)),
                 "seed {seed}: failed to launch a ship toward the allied coast",
             );
             // Cargo is deducted from the stockpile immediately; gold isn't paid
             // until the ship actually docks.
-            assert_eq!(game.wood, wood0 - lw);
-            assert_eq!(game.stone, stone0 - ls);
+            assert_eq!(game.realm(0).wood, wood0 - lw);
+            assert_eq!(game.realm(0).stone, stone0 - ls);
             assert_eq!(game.ships().len(), 1);
-            assert_eq!(game.money, money0, "reward paid before delivery");
+            assert_eq!(game.realm(0).money, money0, "reward paid before delivery");
 
             // The voyage from the home port is long, and the realm no longer
             // freezes off-screen. Strip the realm bare so the thousands of
@@ -10112,7 +10530,7 @@ mod tests {
             }
             assert!(game.ships().is_empty(), "seed {seed}: ship never docked");
             assert_eq!(
-                game.money,
+                game.realm(0).money,
                 money0 + expected,
                 "seed {seed}: wrong payout banked",
             );
@@ -10131,7 +10549,7 @@ mod tests {
             // A far shore the harbor's water genuinely reaches, kept clear of
             // every standing settlement, found the same way world creation
             // vets the allied coasts.
-            let home = game.home_continent.clone().unwrap();
+            let home = game.realm_mut(0).home_continent.clone().unwrap();
             let mut coasts =
                 reachable_overseas_coasts(&mut game.world, port, &home, SHIP_PATH_BUDGET);
             coasts.sort_by_key(|&(x, y)| (x - port.0).abs() + (y - port.1).abs());
@@ -10142,21 +10560,22 @@ mod tests {
             // up mid-test.
             game.enemy_found_timer = f32::INFINITY;
             game.ally_found_timer = f32::INFINITY;
-            game.wood = SETTLER_WOOD_COST;
-            game.stone = SETTLER_STONE_COST;
-            game.money = SETTLER_GOLD_COST;
+            game.realm_mut(0).wood = SETTLER_WOOD_COST;
+            game.realm_mut(0).stone = SETTLER_STONE_COST;
+            game.realm_mut(0).money = SETTLER_GOLD_COST;
             game.build_mode = BuildMode::Settle;
 
             // A fresh realm starts with too few civilians to crew an expedition
             // and still leave the spared core behind, so the order is refused
             // with nothing spent.
-            assert!(!game.try_build(tile_center(shore)), "seed {seed}");
+            assert!(!game.try_build(0, tile_center(shore)), "seed {seed}");
             assert_eq!(
-                (game.wood, game.stone, game.money),
+                (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
                 (SETTLER_WOOD_COST, SETTLER_STONE_COST, SETTLER_GOLD_COST),
             );
             assert!(
-                game.alerts()
+                game.realm(0)
+                    .alerts()
                     .iter()
                     .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::Civilians)),
                 "seed {seed}: the refusal should say why",
@@ -10172,13 +10591,17 @@ mod tests {
             let civs0 = game.civilian_count(Faction::Realm(0));
             let houses0 = game.world.houses_of(owner_of(Faction::Realm(0))).len();
             assert!(
-                game.try_build(tile_center(shore)),
+                game.try_build(0, tile_center(shore)),
                 "seed {seed}: expedition refused",
             );
             assert_eq!(game.transports().len(), 1);
-            assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
+            assert_eq!(
+                (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
+                (0, 0, 0)
+            );
             assert!(
-                game.alerts()
+                game.realm(0)
+                    .alerts()
                     .iter()
                     .any(|a| a.kind == AlertKind::SettlersSailed),
                 "seed {seed}: no departure alert",
@@ -10237,7 +10660,8 @@ mod tests {
                 "seed {seed}: the settlers should step ashore",
             );
             assert!(
-                game.alerts()
+                game.realm(0)
+                    .alerts()
                     .iter()
                     .any(|a| a.kind == AlertKind::ColonyFounded),
                 "seed {seed}: no founding alert",
@@ -10261,6 +10685,7 @@ mod tests {
         game.transports.push(Transport {
             pos: Vec2::new(12.5, -3.5),
             faction: Faction::Realm(0),
+            hired_by: None,
             path: vec![(13, -4), (14, -4), (15, -5)],
             path_cursor: 1,
             anchor: (18, -6),
@@ -10272,6 +10697,7 @@ mod tests {
         game.transports.push(Transport {
             pos: Vec2::new(10.5, -2.5),
             faction: Faction::Ally,
+            hired_by: Some(0),
             path: vec![(11, -3), (12, -3)],
             path_cursor: 0,
             anchor: (16, -8),
@@ -10305,6 +10731,7 @@ mod tests {
         // owners (v18), transport owners and unit flags (v17), then origins
         // (v16).
         let n = game.entities.len();
+        bytes.truncate(bytes.len() - v20_tail_len(&game)); // realms and owners
         bytes.truncate(bytes.len() - (4 + 9 * n)); // migrants
         bytes.truncate(bytes.len() - 4); // warship owners (none afloat)
         bytes.truncate(bytes.len() - 4); // transport owners (none at sea)
@@ -10316,7 +10743,7 @@ mod tests {
         bytes[4] = 13;
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v13 save no longer loads");
         assert!(loaded.transports().is_empty());
-        assert_eq!(loaded.money, game.money);
+        assert_eq!(loaded.realm(0).money, game.realm(0).money);
         assert_eq!(
             loaded.world.houses_of(owner_of(Faction::Realm(0))).len(),
             game.world.houses_of(owner_of(Faction::Realm(0))).len()
@@ -10333,6 +10760,7 @@ mod tests {
         // owners (v18), transport owners and unit flags (v17), then origins
         // (v16).
         let n = game.entities.len();
+        bytes.truncate(bytes.len() - v20_tail_len(&game)); // realms and owners
         bytes.truncate(bytes.len() - (4 + 9 * n)); // migrants
         bytes.truncate(bytes.len() - 4); // warship owners (none afloat)
         bytes.truncate(bytes.len() - 4); // transport owners (none at sea)
@@ -10368,7 +10796,7 @@ mod tests {
             let Some(port) = find_player_port(&mut game) else {
                 continue;
             };
-            let home = game.home_continent.clone().unwrap();
+            let home = game.realm_mut(0).home_continent.clone().unwrap();
             let mut coasts =
                 reachable_overseas_coasts(&mut game.world, port, &home, SHIP_PATH_BUDGET);
             coasts.sort_by_key(|&(x, y)| (x - port.0).abs() + (y - port.1).abs());
@@ -10377,20 +10805,21 @@ mod tests {
             };
             game.enemy_found_timer = f32::INFINITY;
             game.ally_found_timer = f32::INFINITY;
-            game.wood = TROOP_WOOD_COST;
-            game.stone = TROOP_STONE_COST;
-            game.money = TROOP_GOLD_COST;
+            game.realm_mut(0).wood = TROOP_WOOD_COST;
+            game.realm_mut(0).stone = TROOP_STONE_COST;
+            game.realm_mut(0).money = TROOP_GOLD_COST;
             game.build_mode = BuildMode::LandTroops;
 
             // A fresh realm has too few standing knights for a landing party,
             // so the order is refused with nothing spent, and says why.
-            assert!(!game.try_build(tile_center(shore)), "seed {seed}");
+            assert!(!game.try_build(0, tile_center(shore)), "seed {seed}");
             assert_eq!(
-                (game.wood, game.stone, game.money),
+                (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
                 (TROOP_WOOD_COST, TROOP_STONE_COST, TROOP_GOLD_COST),
             );
             assert!(
-                game.alerts()
+                game.realm(0)
+                    .alerts()
                     .iter()
                     .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::Knights)),
                 "seed {seed}: the refusal should say why",
@@ -10404,14 +10833,18 @@ mod tests {
                     .push(Entity::new(Faction::Realm(0), Job::Knight, spot));
             }
             assert!(
-                game.try_build(tile_center(shore)),
+                game.try_build(0, tile_center(shore)),
                 "seed {seed}: landing refused",
             );
             assert_eq!(game.transports().len(), 1);
             assert_eq!(game.transports()[0].knights, TROOP_KNIGHTS as u32);
-            assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
+            assert_eq!(
+                (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
+                (0, 0, 0)
+            );
             assert!(
-                game.alerts()
+                game.realm(0)
+                    .alerts()
                     .iter()
                     .any(|a| a.kind == AlertKind::TroopsSailed),
                 "seed {seed}: no departure alert",
@@ -10445,7 +10878,8 @@ mod tests {
                 "seed {seed}: a troop landing must not found a colony",
             );
             assert!(
-                game.alerts()
+                game.realm(0)
+                    .alerts()
                     .iter()
                     .any(|a| a.kind == AlertKind::TroopsLanded),
                 "seed {seed}: no landing alert",
@@ -10493,7 +10927,8 @@ mod tests {
             "quiet ground keeps a single garrison",
         );
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::KnightsSettled),
             "no settling alert",
@@ -10559,7 +10994,8 @@ mod tests {
             "knights never turn"
         );
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::PeopleIncorporated),
             "no incorporation alert"
@@ -10603,7 +11039,8 @@ mod tests {
             "the taken keep their birth faction"
         );
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::PeopleLost),
             "no people-lost alert"
@@ -10619,7 +11056,7 @@ mod tests {
             .position(|e| e.faction == Faction::Realm(0))
             .expect("the player starts with units");
         game.entities[i].origin = Faction::Enemy;
-        game.entities[i].mercenary = true;
+        game.entities[i].hired_by = Some(0);
         let bytes = game.to_bytes(CAM);
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
         assert!(loaded.entities[i].faction == Faction::Realm(0));
@@ -10628,10 +11065,10 @@ mod tests {
             "origin lost in the round trip"
         );
         assert!(
-            loaded.entities[i].mercenary,
+            loaded.entities[i].mercenary(),
             "the mercenary flag was lost in the round trip"
         );
-        assert_eq!(loaded.mercenaries(), 1, "a flag leaked onto other units");
+        assert_eq!(loaded.mercenaries(0), 1, "a flag leaked onto other units");
         assert!(
             loaded
                 .entities
@@ -10684,6 +11121,7 @@ mod tests {
         let troops = |anchor| Transport {
             pos: tile_center(anchor),
             faction: Faction::Realm(0),
+            hired_by: None,
             path: Vec::new(),
             path_cursor: 0,
             anchor,
@@ -10697,6 +11135,7 @@ mod tests {
         // so the party invades instead of holding the beach.
         game.land_transport(troops(anchor));
         let flag = *game
+            .realm(0)
             .rallies()
             .last()
             .expect("the landing gave no march order");
@@ -10724,13 +11163,13 @@ mod tests {
 
         // A flag the player planted themselves is never overridden.
         let own = tile_center((0, 0));
-        game.rallies = vec![Rally {
+        game.realm_mut(0).rallies = vec![Rally {
             pos: own,
             response: None,
         }];
         game.land_transport(troops(anchor));
         assert_eq!(
-            game.rallies(),
+            game.realm(0).rallies(),
             &[Rally {
                 pos: own,
                 response: None,
@@ -10761,11 +11200,11 @@ mod tests {
             }
         }
         let Some(water) = water else { return };
-        let (wood0, stone0) = (game.wood, game.stone);
+        let (wood0, stone0) = (game.realm(0).wood, game.realm(0).stone);
         game.build_mode = BuildMode::Ship;
-        assert!(!game.try_build(tile_center(water)));
+        assert!(!game.try_build(0, tile_center(water)));
         assert_eq!(game.ships().len(), 0);
-        assert_eq!((game.wood, game.stone), (wood0, stone0));
+        assert_eq!((game.realm(0).wood, game.realm(0).stone), (wood0, stone0));
     }
 
     #[test]
@@ -10778,10 +11217,10 @@ mod tests {
             // Nobody gathers or fights, so the dispatches below are the only
             // thing touching the fleet.
             game.entities.clear();
-            game.ship_wood = 10;
-            game.ship_stone = 0;
-            game.wood = 25;
-            let c = game.start_center();
+            game.realm_mut(0).ship_wood = 10;
+            game.realm_mut(0).ship_stone = 0;
+            game.realm_mut(0).wood = 25;
+            let c = game.start_center(0);
             let sim = (
                 c.x as i32 - 40,
                 c.y as i32 - 40,
@@ -10796,7 +11235,7 @@ mod tests {
             assert!(game.ships().is_empty(), "seed {seed}: launched unbidden");
 
             // Switch on: a ship goes out with exactly the configured load.
-            game.auto_trade = true;
+            game.realm_mut(0).auto_trade = true;
             let mut steps = 0;
             while game.ships().is_empty() && steps < 600 {
                 game.update(0.1, sim);
@@ -10820,12 +11259,12 @@ mod tests {
         // treasury then proves no ship ever sailed and banked a payout.
         let mut game = Game::new(3);
         game.entities.clear();
-        game.auto_trade = true;
-        game.ship_wood = 10_000;
-        game.ship_stone = 0;
-        game.wood = 10;
-        game.money = 0;
-        let c = game.start_center();
+        game.realm_mut(0).auto_trade = true;
+        game.realm_mut(0).ship_wood = 10_000;
+        game.realm_mut(0).ship_stone = 0;
+        game.realm_mut(0).wood = 10;
+        game.realm_mut(0).money = 0;
+        let c = game.start_center(0);
         let sim = (
             c.x as i32 - 40,
             c.y as i32 - 40,
@@ -10837,7 +11276,8 @@ mod tests {
         }
         assert!(game.ships().is_empty());
         assert_eq!(
-            game.money, 0,
+            game.realm(0).money,
+            0,
             "no ship may have sailed, so nothing can have been banked"
         );
     }
@@ -10846,31 +11286,37 @@ mod tests {
     fn cargo_sunk_alert_summons_a_warship_and_rallies_the_navy() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
-            if game.harbor_water().is_none() {
+            if game.harbor_water(0).is_none() {
                 continue;
             }
-            game.wood = WARSHIP_WOOD_COST;
-            game.stone = WARSHIP_STONE_COST;
-            game.money = WARSHIP_GOLD_COST;
-            let wreck = game.start_center() + Vec2::new(60.0, 0.0);
-            game.push_alert(AlertKind::CargoSunk, wreck);
+            game.realm_mut(0).wood = WARSHIP_WOOD_COST;
+            game.realm_mut(0).stone = WARSHIP_STONE_COST;
+            game.realm_mut(0).money = WARSHIP_GOLD_COST;
+            let wreck = game.start_center(0) + Vec2::new(60.0, 0.0);
+            game.realm_mut(0).push_alert(AlertKind::CargoSunk, wreck);
 
             let r = AlertKind::CargoSunk
                 .response()
                 .expect("a sunk cargo ship offers the summon response");
-            assert!(game.can_respond(r));
-            game.respond_to_alert(0);
+            assert!(game.can_respond(0, r));
+            game.respond_to_alert(0, 0);
 
             assert_eq!(game.warships().len(), 1, "seed {seed}: no warship summoned");
-            assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
             assert_eq!(
-                game.navy_rallies(),
+                (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
+                (0, 0, 0)
+            );
+            assert_eq!(
+                game.realm(0).navy_rallies(),
                 &[wreck],
                 "the navy rallies to the wreck"
             );
-            assert!(game.alerts().is_empty(), "the toast goes once acted on");
+            assert!(
+                game.realm(0).alerts().is_empty(),
+                "the toast goes once acted on"
+            );
             // Broke now, so the response is gated off again.
-            assert!(!game.can_respond(r));
+            assert!(!game.can_respond(0, r));
             return;
         }
         panic!("no test seed had harbor water");
@@ -10896,32 +11342,32 @@ mod tests {
     fn navy_rally_calls_a_warship_and_lifts_on_arrival() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
-            let Some(spot) = game.harbor_water() else {
+            let Some(spot) = game.harbor_water(0) else {
                 continue;
             };
-            game.wood = WARSHIP_WOOD_COST;
-            game.stone = WARSHIP_STONE_COST;
-            game.money = WARSHIP_GOLD_COST;
+            game.realm_mut(0).wood = WARSHIP_WOOD_COST;
+            game.realm_mut(0).stone = WARSHIP_STONE_COST;
+            game.realm_mut(0).money = WARSHIP_GOLD_COST;
             game.build_mode = BuildMode::Warship;
-            assert!(game.try_build(tile_center(spot)));
+            assert!(game.try_build(0, tile_center(spot)));
 
             // A flag out at sea, far enough that arriving means real sailing.
             let Some(flag) = open_water_at_range(&mut game, spot, 12.0) else {
                 continue;
             };
             game.build_mode = BuildMode::NavyRally;
-            assert!(game.try_build(tile_center(flag)));
-            assert_eq!(game.navy_rallies(), &[tile_center(flag)]);
+            assert!(game.try_build(0, tile_center(flag)));
+            assert_eq!(game.realm(0).navy_rallies(), &[tile_center(flag)]);
 
             game.entities.clear();
             let sim = (spot.0 - 20, spot.1 - 20, spot.0 + 20, spot.1 + 20);
             let mut steps = 0;
-            while !game.navy_rallies().is_empty() && steps < 2_000 {
+            while !game.realm(0).navy_rallies().is_empty() && steps < 2_000 {
                 game.update(0.1, sim);
                 steps += 1;
             }
             assert!(
-                game.navy_rallies().is_empty(),
+                game.realm(0).navy_rallies().is_empty(),
                 "seed {seed}: the flag never lifted"
             );
             let w = &game.warships()[0];
@@ -10939,7 +11385,7 @@ mod tests {
         // Directly assert the treasury gates knight production: with gold a
         // knight is affordable; drained, the village must fall back to civilians.
         let game = Game::new(1);
-        assert!(game.money >= KNIGHT_GOLD_COST);
+        assert!(game.realm(0).money >= KNIGHT_GOLD_COST);
     }
 
     /// A broke fresh world with extra civilians at home and a draft just
@@ -10947,8 +11393,8 @@ mod tests {
     /// draft directly so spawns and combat can't muddy the count.
     fn drafted_game() -> Game {
         let mut game = Game::new(1);
-        game.money = 0;
-        let home = game.start_center();
+        game.realm_mut(0).money = 0;
+        let home = game.start_center(0);
         let tile = (home.x as i32, home.y as i32);
         for _ in 0..10 {
             game.entities
@@ -10958,8 +11404,8 @@ mod tests {
             game.civilian_count(Faction::Realm(0)) > MIN_CIVILIANS_TO_GROW + 1,
             "need bodies to draft"
         );
-        game.proclaim_draft();
-        assert!(game.levy_term_remaining().is_some());
+        game.proclaim_draft(0);
+        assert!(game.realm(0).levy_term_remaining().is_some());
         game
     }
 
@@ -10970,7 +11416,7 @@ mod tests {
             game.stand_down_levies(0.1);
         }
         assert!(
-            game.levy_term_remaining().is_none(),
+            game.realm(0).levy_term_remaining().is_none(),
             "the term should have run out"
         );
     }
@@ -10981,12 +11427,16 @@ mod tests {
         let game = drafted_game();
 
         // Even a broke realm can call up levies, and none of it is paid yet.
-        let (levies, owed) = game.levies_owed();
+        let (levies, owed) = game.levies_owed(0);
         let converted = farmers0 - game.civilian_count(Faction::Realm(0));
         assert!(levies >= 1, "a draft with bodies should call some up");
         assert_eq!(levies, converted, "every call-up is a levy");
         assert_eq!(owed, levies as u32 * LEVY_GOLD_PAY);
-        assert_eq!(game.money, 0, "levies are paid later, not up front");
+        assert_eq!(
+            game.realm(0).money,
+            0,
+            "levies are paid later, not up front"
+        );
         // The call-up is instant and takes everyone down to the working core,
         // which is always spared.
         assert_eq!(
@@ -10998,50 +11448,53 @@ mod tests {
                 .iter()
                 .all(|e| !e.levy || e.job == Job::Knight)
         );
-        assert_eq!(game.levy_term_remaining(), Some(LEVY_SERVICE));
+        assert_eq!(game.realm(0).levy_term_remaining(), Some(LEVY_SERVICE));
     }
 
     #[test]
     fn a_second_proclamation_calls_up_newcomers_and_restarts_the_term() {
         let mut game = drafted_game();
-        let levies0 = game.levies_owed().0;
+        let levies0 = game.levies_owed(0).0;
         for _ in 0..600 {
             game.stand_down_levies(0.1);
         }
-        let partway = game.levy_term_remaining().expect("term still running");
+        let partway = game
+            .realm(0)
+            .levy_term_remaining()
+            .expect("term still running");
         assert!(partway < LEVY_SERVICE);
 
         // Two villagers raised since; a fresh proclamation takes them too and
         // the whole company serves a full term from now.
-        let home = game.start_center();
+        let home = game.start_center(0);
         let tile = (home.x as i32, home.y as i32);
         for _ in 0..2 {
             game.entities
                 .push(Entity::new(Faction::Realm(0), Job::Civilian, tile));
         }
-        game.proclaim_draft();
-        assert_eq!(game.levies_owed().0, levies0 + 2);
-        assert_eq!(game.levy_term_remaining(), Some(LEVY_SERVICE));
+        game.proclaim_draft(0);
+        assert_eq!(game.levies_owed(0).0, levies0 + 2);
+        assert_eq!(game.realm(0).levy_term_remaining(), Some(LEVY_SERVICE));
     }
 
     #[test]
     fn levies_wait_out_a_threat_then_are_paid_and_go_home() {
         let mut game = drafted_game();
-        let (levies, owed) = game.levies_owed();
+        let (levies, owed) = game.levies_owed(0);
         assert!(levies >= 1);
         let farmers0 = game.civilian_count(Faction::Realm(0));
-        game.money = owed;
+        game.realm_mut(0).money = owed;
 
         // Through their term the levies stay under arms even with the realm
         // at peace, and are still serving the moment it runs out.
         serve_out_term(&mut game);
-        assert_eq!(game.levies_owed().0, levies, "stood down mid-term");
+        assert_eq!(game.levies_owed(0).0, levies, "stood down mid-term");
 
         // While a village is under threat, the levies stay under arms however
         // long it lasts.
         game.villages = vec![Village {
             faction: Faction::Realm(0),
-            center: game.start_center(),
+            center: game.start_center(0),
             min: (0, 0),
             max: (0, 0),
             houses: 1,
@@ -11054,18 +11507,19 @@ mod tests {
         for _ in 0..(LEVY_STAND_DOWN as usize * 30) {
             game.stand_down_levies(0.1);
         }
-        assert_eq!(game.levies_owed().0, levies, "stood down mid-raid");
+        assert_eq!(game.levies_owed(0).0, levies, "stood down mid-raid");
 
         // Once it's quiet for long enough, everyone is paid and back farming.
         game.villages[0].threatened = false;
         for _ in 0..(LEVY_STAND_DOWN as usize * 10 + 1) {
             game.stand_down_levies(0.1);
         }
-        assert_eq!(game.levies_owed(), (0, 0));
-        assert_eq!(game.money, 0, "each levy is paid exactly once");
+        assert_eq!(game.levies_owed(0), (0, 0));
+        assert_eq!(game.realm(0).money, 0, "each levy is paid exactly once");
         assert_eq!(game.civilian_count(Faction::Realm(0)), farmers0 + levies);
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::LeviesPaid)
         );
@@ -11074,25 +11528,26 @@ mod tests {
     #[test]
     fn unpaid_levies_desert() {
         let mut game = drafted_game();
-        let (levies, _) = game.levies_owed();
+        let (levies, _) = game.levies_owed(0);
         assert!(levies >= 1);
         let units0 = game.entities.len();
         let farmers0 = game.civilian_count(Faction::Realm(0));
         // Enough gold for all but one.
-        game.money = (levies as u32 - 1) * LEVY_GOLD_PAY;
+        game.realm_mut(0).money = (levies as u32 - 1) * LEVY_GOLD_PAY;
         serve_out_term(&mut game);
         for _ in 0..(LEVY_STAND_DOWN as usize * 10 + 1) {
             game.stand_down_levies(0.1);
         }
-        assert_eq!(game.levies_owed(), (0, 0));
-        assert_eq!(game.money, 0);
+        assert_eq!(game.levies_owed(0), (0, 0));
+        assert_eq!(game.realm(0).money, 0);
         assert_eq!(game.entities.len(), units0 - 1, "the unpaid levy deserts");
         assert_eq!(
             game.civilian_count(Faction::Realm(0)),
             farmers0 + levies - 1
         );
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::LeviesDeserted)
         );
@@ -11144,11 +11599,11 @@ mod tests {
     #[test]
     fn levies_survive_a_save() {
         let game = drafted_game();
-        let (levies, _) = game.levies_owed();
+        let (levies, _) = game.levies_owed(0);
         assert!(levies >= 1);
         let bytes = game.to_bytes(CAM);
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
-        assert_eq!(loaded.levies_owed(), game.levies_owed());
+        assert_eq!(loaded.levies_owed(0), game.levies_owed(0));
     }
 
     #[test]
@@ -11160,6 +11615,106 @@ mod tests {
     }
 
     #[test]
+    fn realms_are_at_war_with_each_other_but_not_themselves() {
+        assert!(hostile(Faction::Realm(0), Faction::Realm(1)));
+        assert!(hostile(Faction::Realm(1), Faction::Realm(0)));
+        assert!(!hostile(Faction::Realm(1), Faction::Realm(1)));
+        assert!(hostile(Faction::Realm(1), Faction::Enemy));
+        assert!(!hostile(Faction::Realm(1), Faction::Ally));
+        // Owner bytes round-trip for realms past the first, and keep the
+        // first realm, the enemy and the allies on the bytes saves always used.
+        for r in 0..5 {
+            assert_eq!(faction_of(owner_of(Faction::Realm(r))), Faction::Realm(r));
+        }
+        assert_eq!(owner_of(Faction::Realm(0)), 0);
+        assert_eq!(owner_of(Faction::Enemy), 1);
+        assert_eq!(owner_of(Faction::Ally), 2);
+        assert_eq!(owner_of(Faction::Realm(1)), 3);
+    }
+
+    /// A second realm with its own village, stockpile and orders lives
+    /// alongside the first: each gathers into its own treasury, each is
+    /// surveyed as its own villages, and a save brings both back with their
+    /// owners intact.
+    #[test]
+    fn two_realms_keep_their_own_stockpiles_and_survive_a_save() {
+        let mut game = Game::new(3);
+        // The first realm is razed so it raises nobody who could gather.
+        strip_realm(&mut game);
+        game.realms.push(Realm::new(Controller::Ai, None));
+        let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land");
+        let second = owner_of(Faction::Realm(1));
+        game.world.set_house(anchor.0, anchor.1, second);
+        game.world.set_house(anchor.0 + 2, anchor.1, second);
+        game.realm_mut(1).money = 7;
+        game.realm_mut(1).wood = 0;
+        game.realm_mut(1).auto_zones.push((anchor.0, anchor.1 + 5));
+        game.survey_villages();
+        assert_eq!(game.houses(1), &[anchor, (anchor.0 + 2, anchor.1)]);
+        assert!(
+            game.villages()
+                .iter()
+                .any(|v| v.faction == Faction::Realm(1))
+        );
+        assert_eq!(game.population(1), 0);
+
+        // A civilian of the second realm harvesting pays into its stockpile,
+        // not the first's.
+        let (hx, hy) = anchor;
+        let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot");
+        let mut e = Entity::new(Faction::Realm(1), Job::Civilian, spot);
+        e.hp = e.max_hp;
+        game.entities.push(e);
+        let wood0 = game.realm(0).wood;
+        let mut tree = None;
+        for dy in -6..=6 {
+            for dx in -6..=6 {
+                let t = (hx + dx, hy + dy);
+                if game.world.node(t.0, t.1).map(|n| n.kind) == Some(Resource::Wood) {
+                    tree = Some(t);
+                }
+            }
+        }
+        if tree.is_none() {
+            game.world.set_node(hx + 3, hy + 3, Resource::Wood, 5);
+        }
+        for _ in 0..1200 {
+            game.update(0.1, (-200, -200, 200, 200));
+            if game.realm(1).wood > 0 {
+                break;
+            }
+        }
+        assert!(
+            game.realm(1).wood > 0,
+            "the second realm's civilian gathered nothing"
+        );
+        assert_eq!(
+            game.realm(0).wood,
+            wood0,
+            "the first realm was credited instead"
+        );
+
+        let bytes = game.to_bytes(CAM);
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
+        assert_eq!(loaded.realms.len(), 2);
+        assert_eq!(loaded.realm(1).controller, Controller::Ai);
+        assert_eq!(loaded.realm(1).money, 7);
+        assert_eq!(loaded.realm(1).auto_zones(), &[(anchor.0, anchor.1 + 5)]);
+        assert_eq!(loaded.realm(0).money, game.realm(0).money);
+        let mut houses = loaded.houses(1).to_vec();
+        houses.sort_unstable();
+        assert_eq!(houses, vec![anchor, (anchor.0 + 2, anchor.1)]);
+        assert!(
+            loaded
+                .entities
+                .iter()
+                .filter(|e| matches!(e.faction, Faction::Realm(_)))
+                .all(|e| e.faction == Faction::Realm(1)),
+            "the second realm's people came back as someone else's"
+        );
+    }
+
+    #[test]
     fn save_round_trips_money_ally_houses_and_ships() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
@@ -11167,28 +11722,28 @@ mod tests {
                 continue;
             };
             let ally_houses = game.world.houses_of(owner_of(Faction::Ally)).len();
-            game.money = 321;
-            game.ship_wood = 15;
-            game.ship_stone = 35;
-            game.auto_trade = true;
+            game.realm_mut(0).money = 321;
+            game.realm_mut(0).ship_wood = 15;
+            game.realm_mut(0).ship_stone = 35;
+            game.realm_mut(0).auto_trade = true;
             game.build_mode = BuildMode::Ship;
-            assert!(game.try_build(tile_center(port)));
+            assert!(game.try_build(0, tile_center(port)));
             assert_eq!(game.ships().len(), 1);
 
             // Also lay down a warship, so the navy round-trips too.
-            game.wood += WARSHIP_WOOD_COST;
-            game.stone += WARSHIP_STONE_COST;
-            game.money += WARSHIP_GOLD_COST;
+            game.realm_mut(0).wood += WARSHIP_WOOD_COST;
+            game.realm_mut(0).stone += WARSHIP_STONE_COST;
+            game.realm_mut(0).money += WARSHIP_GOLD_COST;
             game.build_mode = BuildMode::Warship;
-            assert!(game.try_build(tile_center(port)));
+            assert!(game.try_build(0, tile_center(port)));
             assert_eq!(game.warships().len(), 1);
 
             let bytes = game.to_bytes(CAM);
             let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
-            assert_eq!(loaded.money, game.money);
-            assert_eq!(loaded.ship_wood, 15);
-            assert_eq!(loaded.ship_stone, 35);
-            assert!(loaded.auto_trade, "trade switch lost across save");
+            assert_eq!(loaded.realm(0).money, game.realm(0).money);
+            assert_eq!(loaded.realm(0).ship_wood, 15);
+            assert_eq!(loaded.realm(0).ship_stone, 35);
+            assert!(loaded.realm(0).auto_trade, "trade switch lost across save");
             assert_eq!(
                 loaded.world.houses_of(owner_of(Faction::Ally)).len(),
                 ally_houses
@@ -11281,24 +11836,27 @@ mod tests {
             game.build_mode = BuildMode::Warship;
 
             // Broke: the launch is refused and nothing is spent.
-            game.wood = WARSHIP_WOOD_COST;
-            game.stone = WARSHIP_STONE_COST;
-            game.money = WARSHIP_GOLD_COST - 1;
-            assert!(!game.try_build(tile_center(port)));
+            game.realm_mut(0).wood = WARSHIP_WOOD_COST;
+            game.realm_mut(0).stone = WARSHIP_STONE_COST;
+            game.realm_mut(0).money = WARSHIP_GOLD_COST - 1;
+            assert!(!game.try_build(0, tile_center(port)));
             assert_eq!(game.warships().len(), 0);
 
             // Funded: it lays down and the cost is deducted.
-            game.money = WARSHIP_GOLD_COST;
-            assert!(game.try_build(tile_center(port)));
+            game.realm_mut(0).money = WARSHIP_GOLD_COST;
+            assert!(game.try_build(0, tile_center(port)));
             assert_eq!(game.warships().len(), 1);
-            assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
+            assert_eq!(
+                (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
+                (0, 0, 0)
+            );
 
             // Dry land is no place for a warship.
-            game.wood = WARSHIP_WOOD_COST;
-            game.stone = WARSHIP_STONE_COST;
-            game.money = WARSHIP_GOLD_COST;
+            game.realm_mut(0).wood = WARSHIP_WOOD_COST;
+            game.realm_mut(0).stone = WARSHIP_STONE_COST;
+            game.realm_mut(0).money = WARSHIP_GOLD_COST;
             let land = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
-            assert!(!game.try_build(tile_center(land)));
+            assert!(!game.try_build(0, tile_center(land)));
             assert_eq!(game.warships().len(), 1);
             return;
         }
@@ -11307,7 +11865,7 @@ mod tests {
 
     /// An open-grass tile next to the player's village fit for a house order.
     fn find_house_spot(game: &Game) -> Tile {
-        for &(hx, hy) in game.player_houses() {
+        for &(hx, hy) in game.houses(0) {
             for dy in -BUILD_NEAR_RADIUS..=BUILD_NEAR_RADIUS {
                 for dx in -BUILD_NEAR_RADIUS..=BUILD_NEAR_RADIUS {
                     let t = (hx + dx, hy + dy);
@@ -11325,12 +11883,12 @@ mod tests {
     fn builders_cut_their_way_through_to_a_walled_in_site() {
         let mut game = Game::new(1);
         game.entities.clear();
-        game.wood = 100;
-        game.stone = 100;
-        game.money = 100;
+        game.realm_mut(0).wood = 100;
+        game.realm_mut(0).stone = 100;
+        game.realm_mut(0).money = 100;
         let spot = find_house_spot(&game);
         game.build_mode = BuildMode::House;
-        assert!(game.try_build(tile_center(spot)));
+        assert!(game.try_build(0, tile_center(spot)));
 
         // Ring the site in trees two tiles out, so the only way in is to
         // chop through.
@@ -11358,7 +11916,7 @@ mod tests {
             .is_none(),
             "the ring left a way in"
         );
-        let wood_before = game.wood;
+        let wood_before = game.realm(0).wood;
         game.entities
             .push(Entity::new(Faction::Realm(0), Job::Civilian, start));
 
@@ -11373,7 +11931,7 @@ mod tests {
         }
         assert!(built, "the builder never cut through to the site");
         assert!(
-            game.wood > wood_before,
+            game.realm(0).wood > wood_before,
             "the trees cleared on the way should be banked"
         );
     }
@@ -11382,9 +11940,9 @@ mod tests {
     fn a_new_build_order_pulls_a_gatherer_off_its_work() {
         let mut game = Game::new(1);
         game.entities.clear();
-        game.wood = 100;
-        game.stone = 100;
-        game.money = 100;
+        game.realm_mut(0).wood = 100;
+        game.realm_mut(0).stone = 100;
+        game.realm_mut(0).money = 100;
         let spot = find_house_spot(&game);
         let start = stand_tile(&game.world, 0, spot).expect("the site must be workable");
         // A civilian deep in a long swing at something next to it.
@@ -11396,7 +11954,7 @@ mod tests {
         game.update(0.1, sim);
 
         game.build_mode = BuildMode::House;
-        assert!(game.try_build(tile_center(spot)));
+        assert!(game.try_build(0, tile_center(spot)));
         for _ in 0..10 {
             game.update(0.1, sim);
         }
@@ -11411,17 +11969,17 @@ mod tests {
     fn build_orders_cost_a_wage_and_wait_for_a_builder() {
         let mut game = Game::new(1);
         game.entities.clear();
-        game.wood = 100;
-        game.stone = 100;
-        game.money = 100;
+        game.realm_mut(0).wood = 100;
+        game.realm_mut(0).stone = 100;
+        game.realm_mut(0).money = 100;
         let spot = find_house_spot(&game);
         game.build_mode = BuildMode::House;
-        assert!(game.try_build(tile_center(spot)));
+        assert!(game.try_build(0, tile_center(spot)));
         assert_eq!(game.build_sites().len(), 1);
         // Materials and the builder's pay are set aside up front...
-        assert_eq!(game.wood, 100 - HOUSE_WOOD_COST);
-        assert_eq!(game.stone, 100 - HOUSE_STONE_COST);
-        assert_eq!(game.money, 100 - HOUSE_GOLD_COST - BUILDER_WAGE);
+        assert_eq!(game.realm(0).wood, 100 - HOUSE_WOOD_COST);
+        assert_eq!(game.realm(0).stone, 100 - HOUSE_STONE_COST);
+        assert_eq!(game.realm(0).money, 100 - HOUSE_GOLD_COST - BUILDER_WAGE);
         // ...but nothing stands yet, and nothing will without a builder.
         let sim = (spot.0 - 20, spot.1 - 20, spot.0 + 20, spot.1 + 20);
         for _ in 0..100 {
@@ -11447,7 +12005,7 @@ mod tests {
         assert!(built, "the builder never finished the house");
         assert!(game.build_sites().is_empty());
         assert_eq!(
-            game.money,
+            game.realm(0).money,
             100 - HOUSE_GOLD_COST - BUILDER_WAGE,
             "a finished build must not refund the order"
         );
@@ -11456,12 +12014,12 @@ mod tests {
     #[test]
     fn orders_reach_far_from_the_village() {
         let mut game = Game::new(1);
-        game.wood = 100;
-        game.stone = 100;
-        game.money = 100;
+        game.realm_mut(0).wood = 100;
+        game.realm_mut(0).stone = 100;
+        game.realm_mut(0).money = 100;
         // An open spot a good way out: 10+ tiles from every house (far beyond
         // the old 5-tile limit) yet still inside the new build range.
-        let (hx, hy) = game.player_houses()[0];
+        let (hx, hy) = game.houses(0)[0];
         let mut spot = None;
         'scan: for r in 10..=BUILD_NEAR_RADIUS {
             for dy in -r..=r {
@@ -11471,12 +12029,12 @@ mod tests {
                     }
                     let t = (hx + dx, hy + dy);
                     let far_from_all = game
-                        .player_houses()
+                        .houses(0)
                         .iter()
                         .all(|&(ax, ay)| (ax - t.0).abs().max((ay - t.1).abs()) >= 10);
                     if far_from_all
                         && game.world.is_open_grass(t.0, t.1)
-                        && game.near_player_house(t.0, t.1)
+                        && game.near_house(0, t.0, t.1)
                     {
                         spot = Some(t);
                         break 'scan;
@@ -11486,7 +12044,7 @@ mod tests {
         }
         let spot = spot.expect("no open ground 10+ tiles out");
         game.build_mode = BuildMode::Wall;
-        assert!(game.try_build(tile_center(spot)));
+        assert!(game.try_build(0, tile_center(spot)));
         assert_eq!(game.build_sites().len(), 1);
     }
 
@@ -11494,10 +12052,10 @@ mod tests {
     fn knights_bridge_water_to_answer_a_rally() {
         let mut game = Game::new(1);
         game.entities.clear();
-        game.wood = 50;
+        game.realm_mut(0).wood = 50;
         // An empty treasury: spans must still go up, since knights charge no
         // gold for them (they're already paid for serving).
-        game.money = 0;
+        game.realm_mut(0).money = 0;
         game.world.ensure_region(-6, -10, 20, 10);
         // Clear a working lane near the origin (forced land), then moat the
         // middle in: a 2-tile ring of water around (10, 0) that no land or
@@ -11519,7 +12077,7 @@ mod tests {
             .push(Entity::new(Faction::Realm(0), Job::Knight, (0, 0)));
         // Enough civilians at home that the knight isn't recalled to farm (the
         // low-civilian retreat would turn it into a civilian otherwise).
-        let (hx, hy) = game.player_houses()[0];
+        let (hx, hy) = game.houses(0)[0];
         for _ in 0..4 {
             let t = adjacent_walkable(&game.world, hx, hy).expect("room by the house");
             game.entities
@@ -11529,14 +12087,14 @@ mod tests {
         // Plant the rally flag on the moated island. The only way there is
         // across the water, so the knight must lay its own bridges.
         game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(tile_center((10, 0))));
+        assert!(game.try_build(0, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         let mut arrived = false;
         for _ in 0..1500 {
             game.update(0.1, sim);
             // The flag lifts itself once a knight reaches it.
-            if game.rallies().is_empty() {
+            if game.realm(0).rallies().is_empty() {
                 arrived = true;
                 break;
             }
@@ -11560,7 +12118,7 @@ mod tests {
         e.job = Job::Horseman;
         e.max_hp = max_hp_for(Faction::Realm(0), Job::Horseman);
         e.hp = e.max_hp;
-        game.wood = 0;
+        game.realm_mut(0).wood = 0;
         k
     }
 
@@ -11583,14 +12141,14 @@ mod tests {
         let k = horseman_on_a_lane(&mut game);
         moat(&mut game, HORSEMAN_JUMP_REACH);
         game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(tile_center((10, 0))));
+        assert!(game.try_build(0, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         let (mut arrived, mut leapt) = (false, false);
         for _ in 0..600 {
             game.update(0.1, sim);
             leapt |= game.entities[k].jump.is_some();
-            if game.rallies().is_empty() {
+            if game.realm(0).rallies().is_empty() {
                 arrived = true;
                 break;
             }
@@ -11631,7 +12189,7 @@ mod tests {
         let k = horseman_on_a_lane(&mut game);
         moat(&mut game, HORSEMAN_JUMP_REACH + 1);
         game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(tile_center((10, 0))));
+        assert!(game.try_build(0, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         let flag = tile_center((10, 0));
@@ -11668,7 +12226,7 @@ mod tests {
             game.world.set_node(5, y, Resource::Wood, 5);
         }
         game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(tile_center((10, 0))));
+        assert!(game.try_build(0, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         for _ in 0..400 {
@@ -11738,14 +12296,14 @@ mod tests {
     fn realm_ready_to_grow(priority: Priority, money: u32) -> Game {
         let mut game = Game::new(1);
         game.entities.clear();
-        let (hx, hy) = game.player_houses()[0];
+        let (hx, hy) = game.houses(0)[0];
         for _ in 0..=MIN_CIVILIANS_TO_GROW + 2 {
             let t = adjacent_walkable(&game.world, hx, hy).expect("room by the house");
             game.entities
                 .push(Entity::new(Faction::Realm(0), Job::Civilian, t));
         }
-        game.priority = priority;
-        game.money = money;
+        game.realm_mut(0).priority = priority;
+        game.realm_mut(0).money = money;
         game.survey_villages();
         game
     }
@@ -11754,10 +12312,10 @@ mod tests {
     /// horsemen, bowmen and axemen raised.
     fn raise_until_full(game: &mut Game) -> (usize, usize, usize, usize) {
         for _ in 0..60 {
-            if game.population() >= game.pop_cap() {
+            if game.population(0) >= game.pop_cap(0) {
                 break;
             }
-            game.player_spawn_timer = 0.0;
+            game.realm_mut(0).spawn_timer = 0.0;
             game.handle_spawns(0.01);
         }
         game.soldiers_of(Faction::Realm(0))
@@ -11784,7 +12342,7 @@ mod tests {
             "bowmen outnumber the knights: {bowmen} to {knights}"
         );
         assert_eq!(
-            game.money,
+            game.realm(0).money,
             1000 - knights as u32 * KNIGHT_GOLD_COST
                 - horsemen as u32 * HORSEMAN_GOLD_COST
                 - bowmen as u32 * BOWMAN_GOLD_COST
@@ -11974,7 +12532,7 @@ mod tests {
         }
         game.entities
             .push(Entity::new(Faction::Realm(0), Job::Knight, (0, 0)));
-        let (hx, hy) = game.player_houses()[0];
+        let (hx, hy) = game.houses(0)[0];
         for _ in 0..4 {
             let t = adjacent_walkable(&game.world, hx, hy).expect("room by the house");
             game.entities
@@ -12141,7 +12699,7 @@ mod tests {
     fn knights_reach_a_flag_from_the_shore_rather_than_bridge_to_it() {
         let mut game = Game::new(1);
         let k = knight_on_a_lane(&mut game);
-        game.wood = 50;
+        game.realm_mut(0).wood = 50;
         // A small pond with the rally flag planted in the middle of it. The
         // flag counts as reached from its bank, so there's nothing to bridge.
         for y in -1..=1 {
@@ -12150,13 +12708,13 @@ mod tests {
             }
         }
         game.build_mode = BuildMode::Rally;
-        assert!(game.try_build(tile_center((10, 0))));
+        assert!(game.try_build(0, tile_center((10, 0))));
 
         let sim = (-6, -10, 20, 10);
         let mut arrived = false;
         for _ in 0..400 {
             game.update(0.1, sim);
-            if game.rallies().is_empty() {
+            if game.realm(0).rallies().is_empty() {
                 arrived = true;
                 break;
             }
@@ -12219,20 +12777,23 @@ mod tests {
     #[test]
     fn clicking_a_pending_site_cancels_and_refunds() {
         let mut game = Game::new(1);
-        game.wood = 50;
-        game.stone = 50;
-        game.money = 50;
+        game.realm_mut(0).wood = 50;
+        game.realm_mut(0).stone = 50;
+        game.realm_mut(0).money = 50;
         let spot = find_house_spot(&game);
         game.build_mode = BuildMode::House;
-        assert!(game.try_build(tile_center(spot)));
+        assert!(game.try_build(0, tile_center(spot)));
         // A different structure can't be ordered onto an occupied tile.
         game.build_mode = BuildMode::Wall;
-        assert!(!game.try_build(tile_center(spot)));
+        assert!(!game.try_build(0, tile_center(spot)));
         // Clicking it again in its own mode cancels and refunds everything.
         game.build_mode = BuildMode::House;
-        assert!(game.try_build(tile_center(spot)));
+        assert!(game.try_build(0, tile_center(spot)));
         assert!(game.build_sites().is_empty());
-        assert_eq!((game.wood, game.stone, game.money), (50, 50, 50));
+        assert_eq!(
+            (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
+            (50, 50, 50)
+        );
     }
 
     #[test]
@@ -12255,10 +12816,10 @@ mod tests {
     #[test]
     fn dragging_lays_a_line_of_orders_and_erases_it_again() {
         let mut game = Game::new(1);
-        game.wood = 1000;
-        game.stone = 1000;
-        game.money = 1000;
-        let (hx, hy) = game.player_houses()[0];
+        game.realm_mut(0).wood = 1000;
+        game.realm_mut(0).stone = 1000;
+        game.realm_mut(0).money = 1000;
+        let (hx, hy) = game.houses(0)[0];
         let (a, b) = ((hx + 2, hy + 3), (hx + 7, hy + 3));
         game.world.clear_tile(a.0, a.1);
         for (x, y) in tile_path(a, b) {
@@ -12267,43 +12828,46 @@ mod tests {
 
         // Flags and the like act on the press alone.
         game.build_mode = BuildMode::Rally;
-        assert_eq!(game.stroke_at(tile_center(a)), None);
+        assert_eq!(game.stroke_at(0, tile_center(a)), None);
 
         game.build_mode = BuildMode::Wall;
-        assert_eq!(game.stroke_at(tile_center(a)), Some(Stroke::Place));
-        assert!(game.try_build(tile_center(a)));
+        assert_eq!(game.stroke_at(0, tile_center(a)), Some(Stroke::Place));
+        assert!(game.try_build(0, tile_center(a)));
         for t in tile_path(a, b) {
-            assert!(game.stroke_build(t, Stroke::Place));
+            assert!(game.stroke_build(0, t, Stroke::Place));
         }
         assert_eq!(game.build_sites().len(), 6);
         // Sweeping back over the line doesn't cancel what it just laid.
         for t in tile_path(b, a) {
-            assert!(!game.stroke_build(t, Stroke::Place));
+            assert!(!game.stroke_build(0, t, Stroke::Place));
         }
         assert_eq!(game.build_sites().len(), 6);
 
         // A drag that starts on a pending order cancels the line instead.
-        assert_eq!(game.stroke_at(tile_center(b)), Some(Stroke::Cancel));
-        assert!(game.try_build(tile_center(b)));
+        assert_eq!(game.stroke_at(0, tile_center(b)), Some(Stroke::Cancel));
+        assert!(game.try_build(0, tile_center(b)));
         for t in tile_path(b, a) {
-            assert!(game.stroke_build(t, Stroke::Cancel));
+            assert!(game.stroke_build(0, t, Stroke::Cancel));
         }
         assert!(game.build_sites().is_empty());
-        assert_eq!((game.wood, game.stone, game.money), (1000, 1000, 1000));
+        assert_eq!(
+            (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
+            (1000, 1000, 1000)
+        );
     }
 
     #[test]
     fn autonomous_builders_raise_houses_in_marked_zones() {
         let mut game = Game::new(1);
         game.entities.clear();
-        game.wood = 1000;
-        game.stone = 1000;
-        game.money = 1000;
-        let center = game.start_center();
+        game.realm_mut(0).wood = 1000;
+        game.realm_mut(0).stone = 1000;
+        game.realm_mut(0).money = 1000;
+        let center = game.start_center(0);
         let anchor = (center.x.floor() as i32, center.y.floor() as i32);
         game.build_mode = BuildMode::AutoZone;
-        assert!(game.try_build(tile_center(anchor)));
-        assert_eq!(game.auto_zones().len(), 1);
+        assert!(game.try_build(0, tile_center(anchor)));
+        assert_eq!(game.realm(0).auto_zones().len(), 1);
 
         // The switch is off, so no orders appear on their own.
         let sim = (anchor.0 - 24, anchor.1 - 24, anchor.0 + 24, anchor.1 + 24);
@@ -12316,8 +12880,8 @@ mod tests {
         );
 
         // Flip it on with a civilian at hand, and the zone grows a house.
-        game.auto_build = true;
-        let houses0 = game.player_houses().len();
+        game.realm_mut(0).auto_build = true;
+        let houses0 = game.houses(0).len();
         game.update(0.1, sim);
         let site = game
             .build_sites()
@@ -12330,7 +12894,7 @@ mod tests {
         let mut grew = false;
         for _ in 0..1200 {
             game.update(0.1, sim);
-            if game.player_houses().len() > houses0 {
+            if game.houses(0).len() > houses0 {
                 grew = true;
                 break;
             }
@@ -12339,33 +12903,37 @@ mod tests {
 
         // Clicking inside the zone again clears it.
         game.build_mode = BuildMode::AutoZone;
-        assert!(game.try_build(tile_center(anchor)));
-        assert!(game.auto_zones().is_empty());
+        assert!(game.try_build(0, tile_center(anchor)));
+        assert!(game.realm(0).auto_zones().is_empty());
     }
 
     #[test]
     fn builder_state_survives_a_save() {
         let mut game = Game::new(1);
-        game.wood = 100;
-        game.stone = 100;
-        game.money = 100;
+        game.realm_mut(0).wood = 100;
+        game.realm_mut(0).stone = 100;
+        game.realm_mut(0).money = 100;
         let spot = find_house_spot(&game);
         game.build_mode = BuildMode::House;
-        assert!(game.try_build(tile_center(spot)));
+        assert!(game.try_build(0, tile_center(spot)));
         game.build_mode = BuildMode::AutoZone;
-        assert!(game.try_build(tile_center(spot)));
-        game.auto_build = true;
+        assert!(game.try_build(0, tile_center(spot)));
+        game.realm_mut(0).auto_build = true;
 
         let bytes = game.to_bytes(CAM);
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
-        assert!(loaded.auto_build);
-        assert_eq!(loaded.auto_zones(), game.auto_zones());
+        assert!(loaded.realm(0).auto_build);
+        assert_eq!(loaded.realm(0).auto_zones(), game.realm(0).auto_zones());
         assert_eq!(loaded.build_sites().len(), 1);
         assert_eq!(loaded.build_sites()[0].tile, spot);
         assert!(loaded.build_sites()[0].kind == SiteKind::House);
         assert_eq!(
-            (loaded.wood, loaded.stone, loaded.money),
-            (game.wood, game.stone, game.money),
+            (
+                loaded.realm(0).wood,
+                loaded.realm(0).stone,
+                loaded.realm(0).money
+            ),
+            (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
             "the reserved cost must ride along with the site"
         );
     }
@@ -12482,7 +13050,7 @@ mod tests {
 
         // An enemy shell cuts down one of the player's units ashore and
         // counts it among the realm's losses.
-        let lost0 = game.units_lost;
+        let lost0 = game.realm(0).units_lost;
         game.entities
             .push(Entity::new(Faction::Realm(0), Job::Civilian, (100, 0)));
         let before = game.entities.len();
@@ -12490,7 +13058,7 @@ mod tests {
             .push(ball(tile_center((100, 0)), Gunner::Navy(Faction::Enemy)));
         game.update_cannonballs(0.01);
         assert_eq!(game.entities.len(), before - 1, "villager should be slain");
-        assert_eq!(game.units_lost, lost0 + 1);
+        assert_eq!(game.realm(0).units_lost, lost0 + 1);
     }
 
     #[test]
@@ -12514,7 +13082,8 @@ mod tests {
         game.update_cannonballs(0.01);
         assert!(game.warships.is_empty(), "the enemy hull should have sunk");
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::EnemyShipSunk),
             "sinking an enemy ship should raise its alert"
@@ -12536,6 +13105,7 @@ mod tests {
         game.warships
             .push(Warship::new(Faction::Realm(0), at(1.5, 1.5)));
         let mut escort = Warship::new(Faction::Ally, at(2.5, 2.5));
+        escort.hired_by = Some(0);
         escort.goal = Some(at(9.0, 9.0));
         game.warships.push(escort);
         let mut raider = Warship::new(Faction::Enemy, at(3.5, 3.5));
@@ -12553,7 +13123,7 @@ mod tests {
         assert_eq!(loaded.warships()[2].faction, Faction::Enemy);
         assert_eq!(loaded.warships()[2].sortie, 42.0);
         assert_eq!(loaded.warships()[2].hp, 10.0);
-        assert_eq!(loaded.escorts(), 1);
+        assert_eq!(loaded.escorts(0), 1);
     }
 
     #[test]
@@ -12566,7 +13136,7 @@ mod tests {
         // Strip the v19 migrant tail, then the v18 tail (count + one record),
         // and stamp the old version.
         let migrants = 4 + 9 * game.entities.len();
-        let tail = migrants + 4 + (1 + 1 + 4 + 4 + 4);
+        let tail = v20_tail_len(&game) + migrants + 4 + (1 + 1 + 4 + 4 + 4);
         bytes.truncate(bytes.len() - tail);
         let mut bytes = with_legacy_houses(&bytes);
         bytes[4] = 17;
@@ -12584,11 +13154,12 @@ mod tests {
         game.pirates.clear();
         game.warships.clear();
         // Short of gold: refused, nothing afloat.
-        game.money = 0;
-        assert!(!game.hire_escort());
-        assert_eq!(game.escorts(), 0);
+        game.realm_mut(0).money = 0;
+        assert!(!game.hire_escort(0));
+        assert_eq!(game.escorts(0), 0);
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| matches!(a.kind, AlertKind::LaunchRefused(LaunchRefusal::Stockpile))),
             "a refused hire says why"
@@ -12597,13 +13168,15 @@ mod tests {
         // An escort afloat with nothing in sight and no flag stands down
         // once the sea has been quiet long enough, and says so.
         let mut escort = Warship::new(Faction::Ally, Vec2::new(0.5, 0.5));
+        escort.hired_by = Some(0);
         escort.goal = None;
         game.warships.push(escort);
-        game.alerts.clear();
+        game.realm_mut(0).alerts.clear();
         game.stand_down_escorts(ESCORT_STAND_DOWN + 1.0);
-        assert_eq!(game.escorts(), 0, "a quiet escort sails home");
+        assert_eq!(game.escorts(0), 0, "a quiet escort sails home");
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::EscortLeft),
             "the escort's leaving raises an alert"
@@ -12611,16 +13184,17 @@ mod tests {
 
         // One still crossing over (goal set) never stands down.
         let mut escort = Warship::new(Faction::Ally, Vec2::new(0.5, 0.5));
+        escort.hired_by = Some(0);
         escort.goal = Some(Vec2::new(50.0, 50.0));
         game.warships.push(escort);
         game.stand_down_escorts(ESCORT_STAND_DOWN + 1.0);
-        assert_eq!(game.escorts(), 1, "a crossing escort stays");
+        assert_eq!(game.escorts(0), 1, "a crossing escort stays");
 
         // Neither does one while the navy flag stands.
         game.warships[0].goal = None;
-        game.navy_rallies = vec![Vec2::new(5.0, 5.0)];
+        game.realm_mut(0).navy_rallies = vec![Vec2::new(5.0, 5.0)];
         game.stand_down_escorts(ESCORT_STAND_DOWN + 1.0);
-        assert_eq!(game.escorts(), 1, "a flagged escort stays");
+        assert_eq!(game.escorts(0), 1, "a flagged escort stays");
     }
 
     #[test]
@@ -12628,7 +13202,7 @@ mod tests {
         let mut game = Game::new(1);
         game.entities.clear();
         let anchor = game
-            .player_houses()
+            .houses(0)
             .first()
             .copied()
             .expect("the capital has houses");
@@ -12636,6 +13210,7 @@ mod tests {
         game.land_transport(Transport {
             pos: tile_center(anchor),
             faction: Faction::Enemy,
+            hired_by: None,
             path: Vec::new(),
             path_cursor: 0,
             anchor,
@@ -12652,15 +13227,13 @@ mod tests {
         assert_eq!(raiders, ENEMY_RAID_KNIGHTS, "every raider should land");
         assert_eq!(game.entities.len(), before + ENEMY_RAID_KNIGHTS);
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::EnemyTroopsLanded),
             "a landing raises its alert"
         );
-        assert!(
-            !game.player_houses().is_empty(),
-            "a raid never founds anything"
-        );
+        assert!(!game.houses(0).is_empty(), "a raid never founds anything");
     }
 
     #[test]
@@ -12668,8 +13241,10 @@ mod tests {
         let mut game = Game::new(1);
         game.warships.clear();
         let at = Vec2::new(12.0, 12.0);
-        game.push_alert(AlertKind::EnemyFleetSailed, at);
+        game.realm_mut(0)
+            .push_alert(AlertKind::EnemyFleetSailed, at);
         let i = game
+            .realm(0)
             .alerts()
             .iter()
             .position(|a| a.kind == AlertKind::EnemyFleetSailed)
@@ -12680,17 +13255,18 @@ mod tests {
         );
         // Nothing afloat to answer: the button is withheld and the click is
         // a no-op.
-        assert!(!game.can_respond(AlertResponse::RallyNavy));
-        game.respond_to_alert(i);
-        assert!(game.navy_rallies().is_empty());
+        assert!(!game.can_respond(0, AlertResponse::RallyNavy));
+        game.respond_to_alert(0, i);
+        assert!(game.realm(0).navy_rallies().is_empty());
         // With a warship afloat the flag is planted and the toast dismissed.
         game.warships
             .push(Warship::new(Faction::Realm(0), Vec2::new(0.5, 0.5)));
-        assert!(game.can_respond(AlertResponse::RallyNavy));
-        game.respond_to_alert(i);
-        assert_eq!(game.navy_rallies(), &[at]);
+        assert!(game.can_respond(0, AlertResponse::RallyNavy));
+        game.respond_to_alert(0, i);
+        assert_eq!(game.realm(0).navy_rallies(), &[at]);
         assert!(
             !game
+                .realm(0)
                 .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::EnemyFleetSailed),
@@ -12875,7 +13451,7 @@ mod tests {
         let v = home_village(&game);
         assert_eq!((v.knights, v.civilians), (1, 0));
         assert!(!v.threatened);
-        assert!(game.alerts().is_empty());
+        assert!(game.realm(0).alerts().is_empty());
 
         // A raider walks in: the village is threatened and one alert goes up,
         // and it stays one alert however long the raid lasts.
@@ -12886,27 +13462,27 @@ mod tests {
         ));
         for _ in 0..100 {
             game.survey_villages();
-            game.age_alerts(0.1);
+            game.realm_mut(0).age_alerts(0.1);
         }
         assert!(home_village(&game).threatened);
-        assert_eq!(game.alerts().len(), 1);
-        assert!(game.alerts()[0].kind == AlertKind::VillageThreatened);
+        assert_eq!(game.realm(0).alerts().len(), 1);
+        assert!(game.realm(0).alerts()[0].kind == AlertKind::VillageThreatened);
 
         // Once the raid is over and has been quiet for the cooldown, the old
         // toast is gone and a new raid alerts again.
         game.entities.retain(|e| e.faction == Faction::Realm(0));
         for _ in 0..25 {
             game.survey_villages();
-            game.age_alerts(1.0);
+            game.realm_mut(0).age_alerts(1.0);
         }
-        assert!(game.alerts().is_empty(), "alerts expire");
+        assert!(game.realm(0).alerts().is_empty(), "alerts expire");
         game.entities.push(Entity::new(
             Faction::Enemy,
             Job::Knight,
             (house.0 + 2, house.1),
         ));
         game.survey_villages();
-        assert_eq!(game.alerts().len(), 1, "a fresh raid alerts again");
+        assert_eq!(game.realm(0).alerts().len(), 1, "a fresh raid alerts again");
     }
 
     #[test]
@@ -12923,8 +13499,8 @@ mod tests {
         // Keep the economy pure: no knights, no enemies to raid the workers.
         game.entities
             .retain(|e| e.faction == Faction::Realm(0) && e.job == Job::Civilian);
-        let wood0 = game.wood;
-        let stone0 = game.stone;
+        let wood0 = game.realm(0).wood;
+        let stone0 = game.realm(0).stone;
         // Simulate with the view parked far away, so the capital's civilians are
         // all off-screen and only the rotating catch-up batches advance them.
         let sim = (5000, 5000, 5010, 5010);
@@ -12932,7 +13508,7 @@ mod tests {
             game.update(0.1, sim);
         }
         assert!(
-            game.wood + game.stone > wood0 + stone0,
+            game.realm(0).wood + game.realm(0).stone > wood0 + stone0,
             "off-screen civilians must keep stocking the pile"
         );
     }
@@ -12943,7 +13519,7 @@ mod tests {
         game.survey_villages();
         let capital_houses = game.world.houses_of(owner_of(Faction::Realm(0))).len();
         assert_eq!(
-            game.pop_cap(),
+            game.pop_cap(0),
             VILLAGE_POP_BASE + capital_houses * VILLAGE_POP_PER_HOUSE
         );
 
@@ -12966,7 +13542,7 @@ mod tests {
         let total_houses = game.world.houses_of(owner_of(Faction::Realm(0))).len();
         assert!(total_houses > capital_houses, "the camp must add houses");
         assert_eq!(
-            game.pop_cap(),
+            game.pop_cap(0),
             2 * VILLAGE_POP_BASE + total_houses * VILLAGE_POP_PER_HOUSE
         );
     }
@@ -13068,10 +13644,10 @@ mod tests {
 
         // Military priority and a full treasury would normally raise knights;
         // a short-handed realm raises hands instead.
-        game.priority = Priority::Military;
-        game.money = 10_000;
+        game.realm_mut(0).priority = Priority::Military;
+        game.realm_mut(0).money = 10_000;
         for _ in 0..3 {
-            game.player_spawn_timer = 0.0;
+            game.realm_mut(0).spawn_timer = 0.0;
             game.handle_spawns(0.01);
         }
         assert!(
@@ -13086,7 +13662,7 @@ mod tests {
             0,
             "hands come before soldiers while the workforce is short"
         );
-        assert_eq!(game.money, 10_000, "no knight was paid for");
+        assert_eq!(game.realm(0).money, 10_000, "no knight was paid for");
     }
 
     #[test]
@@ -13126,10 +13702,10 @@ mod tests {
         let mut from_colony = 0;
         for _ in 0..40 {
             game.ships.clear();
-            game.wood = 500;
-            game.stone = 500;
-            game.auto_trade = true;
-            game.trade_timer = 0.0;
+            game.realm_mut(0).wood = 500;
+            game.realm_mut(0).stone = 500;
+            game.realm_mut(0).auto_trade = true;
+            game.realm_mut(0).trade_timer = 0.0;
             game.plan_auto_trade(0.01);
             if let Some(s) = game.ships.first() {
                 let d_cap = s.pos.distance(tile_center(capital));
@@ -13156,17 +13732,17 @@ mod tests {
     fn docking_ships_bring_immigrants() {
         let mut game = Game::new(1);
         game.survey_villages();
-        let before = game.population();
-        let cap = game.pop_cap();
+        let before = game.population(0);
+        let cap = game.pop_cap(0);
         // Forty dockings: some bring families home, none breach the cap, and
         // every immigrant is one of the player's people with an allied origin.
         let mut settled = 0;
         for _ in 0..40 {
-            settled += game.welcome_immigrants();
+            settled += game.welcome_immigrants(0);
         }
         assert!(settled > 0, "forty dockings must bring someone home");
-        assert!(game.population() <= cap, "immigrants must respect the cap");
-        assert_eq!(game.population(), before + settled);
+        assert!(game.population(0) <= cap, "immigrants must respect the cap");
+        assert_eq!(game.population(0), before + settled);
         assert_eq!(
             game.entities
                 .iter()
@@ -13176,7 +13752,8 @@ mod tests {
             "immigrants keep their allied origin"
         );
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::ImmigrantsArrived),
             "no immigration alert"
@@ -13292,7 +13869,7 @@ mod tests {
     fn a_hired_company_answers_the_flag_and_sails_home() {
         for seed in 0..16 {
             let mut game = Game::new(seed);
-            if game.harbor_water().is_none() || find_ally_port(&game).is_none() {
+            if game.harbor_water(0).is_none() || find_ally_port(&game).is_none() {
                 continue;
             }
             // Garrison the first allied village with a company to spare.
@@ -13304,18 +13881,22 @@ mod tests {
             }
             game.survey_villages();
             // A flag the player planted, on the capital's shore.
-            let flag = game.start_center();
-            game.rallies = vec![Rally {
+            let flag = game.start_center(0);
+            game.realm_mut(0).rallies = vec![Rally {
                 pos: flag,
                 response: None,
             }];
-            game.money = MERC_HIRE_COST + 5;
+            game.realm_mut(0).money = MERC_HIRE_COST + 5;
             let allies_before = game.ally_count();
-            if !game.hire_mercenaries() {
+            if !game.hire_mercenaries(0) {
                 // This seed's allied port can't reach the capital's coast.
                 continue;
             }
-            assert_eq!(game.money, 5, "seed {seed}: the company wasn't paid for");
+            assert_eq!(
+                game.realm(0).money,
+                5,
+                "seed {seed}: the company wasn't paid for"
+            );
             assert_eq!(game.ally_count(), allies_before - MERC_KNIGHTS);
             let ship = game.transports().last().expect("no company at sea");
             assert!(
@@ -13324,7 +13905,8 @@ mod tests {
             );
             assert_eq!(ship.knights, MERC_KNIGHTS as u32);
             assert!(
-                game.alerts()
+                game.realm(0)
+                    .alerts()
                     .iter()
                     .any(|a| a.kind == AlertKind::MercenariesSailed),
                 "seed {seed}: no sailing alert"
@@ -13348,30 +13930,36 @@ mod tests {
                 "seed {seed}: ship never landed"
             );
             assert_eq!(
-                game.mercenaries(),
+                game.mercenaries(0),
                 MERC_KNIGHTS,
                 "seed {seed}: company lost"
             );
             assert!(
                 game.entities
                     .iter()
-                    .all(|e| !e.mercenary || e.faction == Faction::Ally),
+                    .all(|e| !e.mercenary() || e.faction == Faction::Ally),
                 "mercenaries stay allied knights"
             );
             assert!(
-                game.alerts()
+                game.realm(0)
+                    .alerts()
                     .iter()
                     .any(|a| a.kind == AlertKind::MercenariesLanded),
                 "seed {seed}: no landing alert"
             );
 
             // The flag lifted and no enemy about, the company stands down.
-            game.clear_rally();
-            game.entities.retain(|e| e.mercenary);
+            game.realm_mut(0).clear_rally();
+            game.entities.retain(|e| e.mercenary());
             game.stand_down_mercenaries(MERC_STAND_DOWN + 1.0);
-            assert_eq!(game.mercenaries(), 0, "seed {seed}: the company never left");
+            assert_eq!(
+                game.mercenaries(0),
+                0,
+                "seed {seed}: the company never left"
+            );
             assert!(
-                game.alerts()
+                game.realm(0)
+                    .alerts()
                     .iter()
                     .any(|a| a.kind == AlertKind::MercenariesLeft),
                 "seed {seed}: no leaving alert"
@@ -13432,7 +14020,7 @@ mod tests {
         game.survey_villages();
 
         let before = game.entities.len();
-        game.player_spawn_timer = 0.0;
+        game.realm_mut(0).spawn_timer = 0.0;
         game.handle_spawns(0.01);
         assert_eq!(game.entities.len(), before + 1, "a spawn must fire");
         let spawned = game.entities.last().unwrap();
@@ -13453,6 +14041,7 @@ mod tests {
         game.land_transport(Transport {
             pos: tile_center((hx, hy)),
             faction: Faction::Realm(0),
+            hired_by: None,
             path: Vec::new(),
             path_cursor: 0,
             anchor: (hx + 2, hy),
@@ -13468,13 +14057,15 @@ mod tests {
         );
         assert_eq!(game.civilian_count(Faction::Realm(0)), civs_before + 3);
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::SettlersJoined),
             "no reinforcement alert"
         );
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .all(|a| a.kind != AlertKind::ColonyFounded),
             "a reinforcement is not a founding"
@@ -13499,6 +14090,7 @@ mod tests {
         ));
         game.resolve_captures();
         let flag = *game
+            .realm(0)
             .rallies()
             .last()
             .expect("losing a village raises a rally");
@@ -13524,7 +14116,7 @@ mod tests {
         assert_eq!(auto, vec![Some(rally), None]);
 
         // A player-planted flag calls everyone, however far.
-        game.rallies = vec![Rally {
+        game.realm_mut(0).rallies = vec![Rally {
             pos: rally,
             response: None,
         }];
@@ -13565,8 +14157,8 @@ mod tests {
         game.sandbox_tool = SandboxTool::Rally;
         assert!(game.sandbox_click(Vec2::new(12.5, 0.5)));
         assert!(game.sandbox_click(Vec2::new(0.5, 14.5)));
-        assert_eq!(game.rallies().len(), 2);
-        assert!(game.rallies().iter().all(Rally::planted));
+        assert_eq!(game.realm(0).rallies().len(), 2);
+        assert!(game.realm(0).rallies().iter().all(Rally::planted));
 
         // Two knights are dealt to each flag.
         let dealt = game.assign_rallies();
@@ -13583,11 +14175,11 @@ mod tests {
         // Both companies arrive and both flags lift, each on its own.
         for _ in 0..300 {
             game.update(0.1, SANDBOX_SIM);
-            if game.rallies().is_empty() {
+            if game.realm(0).rallies().is_empty() {
                 break;
             }
         }
-        assert!(game.rallies().is_empty(), "a flag never lifted");
+        assert!(game.realm(0).rallies().is_empty(), "a flag never lifted");
         let near = |p: Vec2| {
             game.entities
                 .iter()
@@ -13607,8 +14199,8 @@ mod tests {
         assert!(game.sandbox_click(Vec2::new(3.5, 3.5)));
         assert!(game.sandbox_click(Vec2::new(6.5, 6.5)));
         assert!(game.sandbox_click(Vec2::new(3.5, 3.5)));
-        assert_eq!(game.rallies().len(), 1);
-        assert_eq!(game.rallies()[0].pos, Vec2::new(6.5, 6.5));
+        assert_eq!(game.realm(0).rallies().len(), 1);
+        assert_eq!(game.realm(0).rallies()[0].pos, Vec2::new(6.5, 6.5));
     }
 
     #[test]
@@ -13620,7 +14212,7 @@ mod tests {
             .push(Warship::new(Faction::Realm(0), Vec2::new(1.5, 0.5)));
         game.warships
             .push(Warship::new(Faction::Enemy, Vec2::new(2.5, 0.5)));
-        game.navy_rallies = vec![Vec2::new(-20.0, 0.0), Vec2::new(30.0, 0.0)];
+        game.realm_mut(0).navy_rallies = vec![Vec2::new(-20.0, 0.0), Vec2::new(30.0, 0.0)];
         let dealt = game.assign_navy_rallies();
         assert_eq!(
             dealt,
@@ -13632,13 +14224,13 @@ mod tests {
         );
 
         // Lifting one flag by clicking it leaves the other standing.
-        game.navy_rallies = vec![tile_center((4, 4)), tile_center((8, 8))];
+        game.realm_mut(0).navy_rallies = vec![tile_center((4, 4)), tile_center((8, 8))];
         game.place_brush = Brush::Water;
         game.sandbox_tool = SandboxTool::PlaceTile;
         assert!(game.sandbox_click(tile_center((4, 4))));
         game.build_mode = BuildMode::NavyRally;
-        assert!(game.try_build(tile_center((4, 4))));
-        assert_eq!(game.navy_rallies(), &[tile_center((8, 8))]);
+        assert!(game.try_build(0, tile_center((4, 4))));
+        assert_eq!(game.realm(0).navy_rallies(), &[tile_center((8, 8))]);
     }
 
     /// A simulation rectangle wide enough that everything on the testing
@@ -13650,7 +14242,7 @@ mod tests {
         let mut game = Game::new_sandbox();
         assert!(game.sandbox());
         assert!(game.entities.is_empty());
-        assert!(game.player_houses().is_empty());
+        assert!(game.houses(0).is_empty());
         assert!(game.world.houses_of(owner_of(Faction::Enemy)).is_empty());
         assert!(game.world.houses_of(owner_of(Faction::Ally)).is_empty());
 
@@ -13980,15 +14572,15 @@ mod tests {
         // A right-click clears the one tile, and nobody there counts as lost.
         assert_eq!(game.remove_units_at(Vec2::new(2.2, 2.9)), 5);
         assert_eq!(game.faction_counts(), (0, 0, 1));
-        assert_eq!(game.units_lost, 0);
+        assert_eq!(game.realm(0).units_lost, 0);
         assert_eq!(game.remove_units_at(Vec2::new(2.5, 2.5)), 0);
 
         game.sandbox_tool = SandboxTool::Rally;
         assert!(game.sandbox_click(Vec2::new(8.5, 8.5)));
-        assert!(!game.rallies().is_empty());
+        assert!(!game.realm(0).rallies().is_empty());
         game.clear_units();
         assert!(game.entities.is_empty());
-        assert!(game.rallies().is_empty());
+        assert!(game.realm(0).rallies().is_empty());
     }
 
     #[test]
@@ -13999,12 +14591,15 @@ mod tests {
 
         // Each brush stands the instant it is clicked, replacing what the tile
         // held, with no order queued and nothing spent.
-        let (wood, stone, money) = (game.wood, game.stone, game.money);
+        let (wood, stone, money) = (game.realm(0).wood, game.realm(0).stone, game.realm(0).money);
         game.place_brush = Brush::Water;
         assert!(game.sandbox_click(at(1, 0)));
         assert!(game.world.is_open_water(1, 0));
         assert!(game.build_sites().is_empty());
-        assert_eq!((game.wood, game.stone, game.money), (wood, stone, money));
+        assert_eq!(
+            (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
+            (wood, stone, money)
+        );
 
         game.place_brush = Brush::Bridge;
         assert!(game.sandbox_click(at(1, 0)));
@@ -14022,7 +14617,7 @@ mod tests {
         game.place_brush = Brush::House;
         assert!(game.sandbox_click(at(3, 0)));
         assert!(game.world.is_house(3, 0));
-        assert_eq!(game.player_houses(), &[(3, 0)]);
+        assert_eq!(game.houses(0), &[(3, 0)]);
         game.place_faction = Faction::Enemy;
         assert!(game.sandbox_click(at(4, 0)));
         assert_eq!(game.world.house_owner(4, 0), Some(owner_of(Faction::Enemy)));
@@ -14053,7 +14648,7 @@ mod tests {
         assert!(game.world.houses_of(owner_of(Faction::Enemy)).is_empty());
         game.place_brush = Brush::Grass;
         assert!(game.sandbox_click(at(3, 0)));
-        assert!(game.player_houses().is_empty());
+        assert!(game.houses(0).is_empty());
         assert!(game.world.is_open_grass(3, 0));
 
         // A right-click with someone standing there takes the unit, not the
@@ -14116,11 +14711,15 @@ mod tests {
     #[test]
     fn called_settlers_walk_the_road_and_stay() {
         let (mut game, outpost) = two_villages(8);
-        assert!(game.call_settlers(outpost), "a road joins the two villages");
-        // Eight at home, four kept back: a full party of three sets out.
-        assert_eq!(game.migrants(), MIGRANT_CIVILIANS);
         assert!(
-            game.alerts()
+            game.call_settlers(0, outpost),
+            "a road joins the two villages"
+        );
+        // Eight at home, four kept back: a full party of three sets out.
+        assert_eq!(game.migrants(0), MIGRANT_CIVILIANS);
+        assert!(
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::MigrantsSetOut),
             "setting out raises an alert"
@@ -14128,13 +14727,14 @@ mod tests {
 
         let sim = (-30, -30, 90, 30);
         let mut steps = 0;
-        while game.migrants() > 0 && steps < 3000 {
+        while game.migrants(0) > 0 && steps < 3000 {
             game.update(0.1, sim);
             steps += 1;
         }
-        assert_eq!(game.migrants(), 0, "the settlers never arrived");
+        assert_eq!(game.migrants(0), 0, "the settlers never arrived");
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::MigrantsArrived),
             "arriving raises an alert"
@@ -14156,14 +14756,15 @@ mod tests {
     fn calling_settlers_keeps_a_core_at_home() {
         // Five at home: only the one beyond the four kept back may go.
         let (mut game, outpost) = two_villages(5);
-        assert!(game.call_settlers(outpost));
-        assert_eq!(game.migrants(), 1);
+        assert!(game.call_settlers(0, outpost));
+        assert_eq!(game.migrants(0), 1);
         // Four left: nobody can be spared, and the toast says so.
         let (mut game, outpost) = two_villages(4);
-        assert!(!game.call_settlers(outpost));
-        assert_eq!(game.migrants(), 0);
+        assert!(!game.call_settlers(0, outpost));
+        assert_eq!(game.migrants(0), 0);
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::NoMigrants)),
             "a refused call says why"
@@ -14189,33 +14790,37 @@ mod tests {
         game.survey_villages();
 
         // Too poor for a ship: refused, nothing spent, nobody gone.
-        game.wood = 0;
-        assert!(!game.call_settlers(outpost));
+        game.realm_mut(0).wood = 0;
+        assert!(!game.call_settlers(0, outpost));
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::ShipCost)),
             "a call that needs a ship it can't afford says why"
         );
         assert_eq!(game.civilian_count(Faction::Realm(0)), 8);
 
-        game.wood = SETTLER_WOOD_COST;
-        game.stone = SETTLER_STONE_COST;
-        game.money = SETTLER_GOLD_COST;
+        game.realm_mut(0).wood = SETTLER_WOOD_COST;
+        game.realm_mut(0).stone = SETTLER_STONE_COST;
+        game.realm_mut(0).money = SETTLER_GOLD_COST;
         assert!(
-            game.call_settlers(outpost),
+            game.call_settlers(0, outpost),
             "the settlers must sail instead"
         );
-        assert_eq!(game.migrants(), 0, "nobody walks");
+        assert_eq!(game.migrants(0), 0, "nobody walks");
         assert_eq!(game.transports().len(), 1);
         assert_eq!(game.transports()[0].civilians as usize, SETTLER_CIVILIANS);
         assert_eq!(
             game.civilian_count(Faction::Realm(0)),
             8 - SETTLER_CIVILIANS
         );
-        assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
+        assert_eq!(
+            (game.realm(0).wood, game.realm(0).stone, game.realm(0).money),
+            (0, 0, 0)
+        );
         assert!(
-            game.near_player_village(game.transports()[0].anchor),
+            game.near_own_village(0, game.transports()[0].anchor),
             "the ship must land as a reinforcement, not a new colony"
         );
     }
@@ -14233,7 +14838,7 @@ mod tests {
 
         // A v18 save predates migrants: it loads with nobody on the road.
         let mut bytes = game.to_bytes(CAM);
-        bytes.truncate(bytes.len() - (4 + 9 * game.entities.len()));
+        bytes.truncate(bytes.len() - v20_tail_len(&game) - (4 + 9 * game.entities.len()));
         let mut bytes = with_legacy_houses(&bytes);
         bytes[4] = 18;
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v18 save must load");
@@ -14248,13 +14853,14 @@ mod tests {
         let (mut game, outpost) = two_villages(8);
         game.entities
             .push(Entity::new(Faction::Enemy, Job::Knight, (30, 1)));
-        game.wood = SETTLER_WOOD_COST;
-        game.stone = SETTLER_STONE_COST;
-        game.money = SETTLER_GOLD_COST;
-        assert!(!game.call_settlers(outpost));
-        assert_eq!(game.migrants(), 0);
+        game.realm_mut(0).wood = SETTLER_WOOD_COST;
+        game.realm_mut(0).stone = SETTLER_STONE_COST;
+        game.realm_mut(0).money = SETTLER_GOLD_COST;
+        assert!(!game.call_settlers(0, outpost));
+        assert_eq!(game.migrants(0), 0);
         assert!(
-            game.alerts()
+            game.realm(0)
+                .alerts()
                 .iter()
                 .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::RoadHeld)),
             "a held road is the reason given"
@@ -14268,19 +14874,19 @@ mod tests {
         }
         game.survey_villages();
         assert!(
-            game.call_settlers(outpost),
+            game.call_settlers(0, outpost),
             "the settlers must sail instead"
         );
-        assert_eq!(game.migrants(), 0, "nobody walks past the enemy");
+        assert_eq!(game.migrants(0), 0, "nobody walks past the enemy");
         assert_eq!(game.transports().len(), 1);
 
         // With the enemy gone, the road is clear again and they walk.
         let (mut game, outpost) = two_villages(8);
         game.entities
             .push(Entity::new(Faction::Enemy, Job::Knight, (30, 30)));
-        assert!(game.call_settlers(outpost));
+        assert!(game.call_settlers(0, outpost));
         assert_eq!(
-            game.migrants(),
+            game.migrants(0),
             MIGRANT_CIVILIANS,
             "a distant foe doesn't hold the road"
         );
