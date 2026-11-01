@@ -224,6 +224,17 @@ pub fn default_server() -> String {
     format!("localhost:{DEFAULT_PORT}")
 }
 
+/// This machine's address on the local network, to tell other players
+/// where a server hosted here listens. Asks the system which interface it
+/// would route out of; "connecting" a UDP socket sends nothing.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn lan_address() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then_some(ip)
+}
+
 /// What to tell a player whose connection never opened.
 fn unreachable_text(url: &str, error: &str) -> String {
     let mut text = format!(

@@ -19,7 +19,7 @@ use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
 use crate::gfx::{Instance, Renderer};
 use crate::online::{Event as NetEvent, Online};
 use crate::save;
-use crate::ui::{Action, MenuState, Scene as UiScene, View};
+use crate::ui::{Action, Hosting, MenuState, Scene as UiScene, View};
 use kingdom_core::game::{
     AUTO_ZONE_RADIUS, Anim, AxeWork, BuildMode, CamState, Dir, Entity, Faction, Game, Job,
     MissileKind, RealmId, SandboxTool, SiteKind, Stroke, faction_of, tile_at, tile_path,
@@ -210,6 +210,10 @@ pub struct State {
     game: Option<Game>,
     /// The connection to a match server, once the player makes one.
     online: Option<Online>,
+    /// The match server this game runs itself, while the player hosts one,
+    /// and the address to give the others.
+    #[cfg(not(target_arch = "wasm32"))]
+    hosted: Option<(kingdom_server::Hosted, String)>,
     /// Whether `game` is a match on that server: a copy the server keeps up
     /// to date, which this client draws and sends orders for but never
     /// steps or saves itself.
@@ -254,6 +258,8 @@ impl State {
             menu: MenuState::new(),
             game: None,
             online: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hosted: None,
             remote: false,
             evict_timer: 0.0,
             me: 0,
@@ -524,6 +530,61 @@ impl State {
         }
     }
 
+    /// Start a match server inside the game and connect to it, or put the
+    /// reason it couldn't start in front of the player.
+    fn host(&mut self, port: &str, name: &str) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (port, name);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Ok(port) = port.trim().parse::<u16>() else {
+                self.menu.connect_error = Some("Type a port number to host on".into());
+                return;
+            };
+            let config = kingdom_server::Config {
+                bind: std::net::SocketAddr::from(([0, 0, 0, 0], port)),
+                ..kingdom_server::Config::default()
+            };
+            match kingdom_server::host(config) {
+                Ok(hosted) => {
+                    let port = hosted.addr().port();
+                    let share = match crate::online::lan_address() {
+                        Some(ip) => format!("{ip}:{port}"),
+                        None => format!("this computer's address, port {port}"),
+                    };
+                    log::info!("hosting a server on port {port}");
+                    self.hosted = Some((hosted, share));
+                    // Reconnecting later goes back to this server.
+                    self.menu.server = format!("127.0.0.1:{port}");
+                    self.apply_action(Action::Connect {
+                        addr: self.menu.server.clone(),
+                        name: name.to_string(),
+                    });
+                }
+                Err(why) => self.menu.connect_error = Some(why),
+            }
+        }
+    }
+
+    /// Whether the menu may offer hosting, and what to show while hosting.
+    fn hosting(&self) -> Hosting {
+        #[cfg(target_arch = "wasm32")]
+        {
+            Hosting::Unavailable
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match &self.hosted {
+                Some((_, share)) => Hosting::On {
+                    share: share.clone(),
+                },
+                None => Hosting::Off,
+            }
+        }
+    }
+
     /// Back to the menu from a match on a server, with nothing of it kept.
     fn drop_remote_game(&mut self) {
         if !self.remote {
@@ -653,6 +714,16 @@ impl State {
             Action::Disconnect => {
                 self.drop_remote_game();
                 self.online = None;
+            }
+            Action::Host { port, name } => self.host(&port, &name),
+            Action::StopHosting => {
+                self.drop_remote_game();
+                self.online = None;
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some((hosted, _)) = self.hosted.take() {
+                    hosted.stop();
+                    log::info!("stopped hosting");
+                }
             }
             Action::Lobby(msg) => {
                 if let Some(online) = &mut self.online {
@@ -1369,6 +1440,7 @@ impl State {
         let instances = self.build_instances();
 
         // Build the egui frame (disjoint field borrows on self).
+        let hosting = self.hosting();
         let window = &self.window;
         let view = View {
             center: self.camera.center,
@@ -1395,6 +1467,7 @@ impl State {
                         slots: save::slots(),
                         has_game: false,
                         online: self.online.as_ref(),
+                        hosting,
                     },
                 ),
             },
@@ -1407,6 +1480,7 @@ impl State {
                         slots: save::slots(),
                         has_game,
                         online: self.online.as_ref(),
+                        hosting,
                     },
                 )
             }

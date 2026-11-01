@@ -112,6 +112,94 @@ type Shared = Arc<Mutex<Lobby>>;
 
 /// Run the server until it is interrupted.
 pub fn run(config: Config) {
+    let listener = match bind(&config) {
+        Ok(l) => l,
+        Err(e) => {
+            log::error!("{e}");
+            return;
+        }
+    };
+    serve(listener, config, async {
+        let _ = tokio::signal::ctrl_c().await;
+    });
+}
+
+/// A server running on a thread of its own, as the game starts one when a
+/// player hosts from the menu. Dropping it (or calling `stop`) shuts the
+/// server down, ending every match on it.
+pub struct Hosted {
+    addr: SocketAddr,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Hosted {
+    /// Where the server listens (the real port, when asked for port 0).
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Shut the server down and wait for it to finish.
+    pub fn stop(self) {
+        drop(self);
+    }
+}
+
+impl Drop for Hosted {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Start a server on a background thread. Fails at once, with a reason in
+/// words, if the address can't be listened on (most often: the port is
+/// already taken).
+pub fn host(config: Config) -> Result<Hosted, String> {
+    let listener = bind(&config)?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| format!("Cannot tell where the server listens: {e}"))?;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let thread = std::thread::Builder::new()
+        .name("kingdom-server".into())
+        .spawn(move || {
+            serve(listener, config, async {
+                let _ = stopped.await;
+            })
+        })
+        .map_err(|e| format!("Cannot start the server: {e}"))?;
+    Ok(Hosted {
+        addr,
+        stop: Some(stop),
+        thread: Some(thread),
+    })
+}
+
+/// Take the listening socket up front, so a taken port is reported to
+/// whoever asked rather than lost on a background thread.
+fn bind(config: &Config) -> Result<std::net::TcpListener, String> {
+    let listener = std::net::TcpListener::bind(config.bind).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            format!("Port {} is already in use", config.bind.port())
+        } else {
+            format!("Cannot listen on {}: {e}", config.bind)
+        }
+    })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("Cannot listen on {}: {e}", config.bind))?;
+    Ok(listener)
+}
+
+/// Serve on `listener` until `until` completes. Open connections and running
+/// matches are dropped then, not waited for: a WebSocket never finishes on
+/// its own.
+fn serve(listener: std::net::TcpListener, config: Config, until: impl Future<Output = ()>) {
     let runtime = tokio::runtime::Runtime::new().expect("start the async runtime");
     runtime.block_on(async move {
         let lobby: Shared = Arc::new(Mutex::new(Lobby::new(config.limits)));
@@ -122,7 +210,7 @@ pub fn run(config: Config) {
             log::info!("serving the web build from {}", dir.display());
             app = app.fallback_service(ServeDir::new(dir));
         }
-        let listener = match tokio::net::TcpListener::bind(config.bind).await {
+        let listener = match tokio::net::TcpListener::from_std(listener) {
             Ok(l) => l,
             Err(e) => {
                 log::error!("cannot listen on {}: {e}", config.bind);
@@ -135,14 +223,16 @@ pub fn run(config: Config) {
             config.limits.max_rooms,
             config.limits.max_slots
         );
-        let served = axum::serve(listener, app).with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            log::info!("shutting down");
-        });
-        if let Err(e) = served.await {
-            log::error!("server stopped: {e}");
+        tokio::select! {
+            served = axum::serve(listener, app) => {
+                if let Err(e) = served {
+                    log::error!("server stopped: {e}");
+                }
+            }
+            () = until => log::info!("shutting down"),
         }
     });
+    runtime.shutdown_background();
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(lobby): State<Shared>) -> impl IntoResponse {
@@ -190,6 +280,33 @@ async fn connection(mut socket: WebSocket, lobby: Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hosted server listens until stopped, and a second one can't take
+    /// the same port.
+    #[test]
+    fn a_hosted_server_listens_until_stopped() {
+        let config = Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            ..Config::default()
+        };
+        let hosted = host(config.clone()).expect("the server starts");
+        let addr = hosted.addr();
+        assert_ne!(addr.port(), 0);
+        assert!(
+            std::net::TcpStream::connect(addr).is_ok(),
+            "it accepts connections"
+        );
+        let taken = host(Config {
+            bind: addr,
+            ..config
+        });
+        assert!(taken.is_err_and(|e| e.contains("in use")));
+        hosted.stop();
+        assert!(
+            std::net::TcpStream::connect(addr).is_err(),
+            "it stopped listening"
+        );
+    }
 
     #[test]
     fn the_command_line_sets_the_limits() {

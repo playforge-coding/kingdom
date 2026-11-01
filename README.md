@@ -165,8 +165,8 @@ both natively and in the browser (via WebGL) using **Trunk**.
     stockpile lasts.
 - Units navigate with grid **pathfinding** (BFS) and treat water, buildings and
   resource nodes as obstacles, routing around them or across bridges.
-- **Multiplayer.** Run `kingdom-server` on any machine, and players connect
-  from the menu, open or join rooms, and play one match together, each running
+- **Multiplayer.** Press **Host** in the menu (native builds) or run
+  `kingdom-server` on any machine, and players connect from the menu, open or join rooms, and play one match together, each running
   a realm. The computer plays every seat nobody takes and any seat whose
   player leaves. Alliances between realms are proposed and accepted in the
   Realm panel.

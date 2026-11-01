@@ -81,7 +81,9 @@ plain files, so you can host it on any static web server.
 
 ## Match server
 
-To play with others, one machine runs the match server:
+To play with others, one machine runs the match server. The native game can
+host one from its menu with no extra build. To run one on its own, for
+example on a machine without a screen or to serve the web build:
 
 ```sh
 cargo run -p kingdom-server --release -- --web dist

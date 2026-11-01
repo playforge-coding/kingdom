@@ -1501,6 +1501,7 @@ dependencies = [
  "image",
  "js-sys",
  "kingdom-core",
+ "kingdom-server",
  "log",
  "pollster",
  "rustc-hash 2.1.3",
