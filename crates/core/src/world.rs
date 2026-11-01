@@ -74,6 +74,10 @@ pub struct Chunk {
     /// in this chunk. A clean chunk regenerates identically from the seed, so
     /// only dirty chunks are written to saves or held resident during eviction.
     pub dirty: bool,
+    /// The world's edit count when this chunk was last changed (see
+    /// `World::rev`), so a server can send a client only the chunks that
+    /// changed since it last looked. Zero for a chunk never edited.
+    pub rev: u64,
 }
 
 impl Chunk {
@@ -87,6 +91,7 @@ impl Chunk {
             caves: vec![false; CHUNK_TILES],
             huts: vec![None; CHUNK_TILES],
             dirty: false,
+            rev: 0,
         }
     }
 
@@ -124,6 +129,9 @@ pub struct World {
     /// `house_owner` layers, so spawning, trade and village surveys never
     /// scan the whole world. Read through `houses_of`.
     house_tiles: HashMap<Owner, Vec<(i32, i32)>>,
+    /// Counts every edit to any chunk. Each edited chunk remembers the count
+    /// at its last edit, which is how `chunks_since` finds what changed.
+    rev: u64,
     /// A flat world: every chunk is bare, endless grass with no water, trees,
     /// rocks or settlements, instead of terrain generated from the seed. This
     /// is the testing ground's empty grid (see `Game::new_sandbox`).
@@ -136,6 +144,7 @@ impl World {
             seed,
             chunks: HashMap::default(),
             house_tiles: HashMap::default(),
+            rev: 0,
             flat: false,
         }
     }
@@ -172,6 +181,12 @@ impl World {
             // chunk identical to what the seed regenerates carries no edits:
             // leave it clean so eviction can shed it and the next save skips it.
             chunk.dirty = !chunk.same_content(&generate_chunk(seed, cx, cy));
+            if chunk.dirty {
+                // An edited chunk counts as an edit, so a state update taken
+                // from the start carries it (see `chunks_since`).
+                w.rev += 1;
+                chunk.rev = w.rev;
+            }
             w.chunks.insert((cx, cy), chunk);
         }
         w.rescan_houses();
@@ -321,7 +336,63 @@ impl World {
     fn chunk_at_mut(&mut self, x: i32, y: i32) -> Option<&mut Chunk> {
         let c = self.chunks.get_mut(&(chunk_of(x), chunk_of(y)))?;
         c.dirty = true;
+        self.rev += 1;
+        c.rev = self.rev;
         Some(c)
+    }
+
+    /// The edit count so far: pass it back to `chunks_since` later to get
+    /// only the chunks changed in between.
+    pub fn rev(&self) -> u64 {
+        self.rev
+    }
+
+    /// Every chunk edited since the edit count stood at `since`. Clean
+    /// chunks never qualify: they regenerate identically from the seed on
+    /// the other side, so only edits need to travel.
+    pub fn chunks_since(&self, since: u64) -> impl Iterator<Item = (&(i32, i32), &Chunk)> {
+        self.chunks.iter().filter(move |(_, c)| c.rev > since)
+    }
+
+    /// Whether every edited chunk of `other` is held here with the same
+    /// content: the check a test makes that a client caught up.
+    pub fn holds_edits_of(&self, other: &World) -> bool {
+        other
+            .chunks
+            .iter()
+            .filter(|(_, c)| c.dirty)
+            .all(|(coord, c)| {
+                self.chunks
+                    .get(coord)
+                    .is_some_and(|mine| mine.same_content(c))
+            })
+    }
+
+    /// Take over every chunk of `other` this world lacks, keeping its own
+    /// where both hold one. How a client folds the chunks a state update
+    /// carried into the world it already had: the update's chunks are newer
+    /// and win, and everything it didn't mention stays as it was.
+    pub fn adopt_missing(&mut self, other: World) {
+        for (coord, chunk) in other.chunks {
+            self.chunks.entry(coord).or_insert(chunk);
+        }
+        self.rev = self.rev.max(other.rev);
+        self.rescan_houses();
+    }
+
+    /// Every mine (cave) tile currently loaded, for rebuilding the index.
+    pub fn all_cave_tiles(&self) -> Vec<(i32, i32)> {
+        let mut out = Vec::new();
+        for ((cx, cy), chunk) in self.chunks.iter() {
+            for ly in 0..CHUNK {
+                for lx in 0..CHUNK {
+                    if chunk.caves[li(lx, ly)] {
+                        out.push((cx * CHUNK + lx, cy * CHUNK + ly));
+                    }
+                }
+            }
+        }
+        out
     }
 
     // --- read accessors (default to water/empty for ungenerated chunks) ----

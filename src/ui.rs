@@ -10,7 +10,8 @@ use winit::event::WindowEvent;
 use winit::window::Window;
 
 use crate::atlas::MapColors;
-use crate::game::{
+use crate::online::{Online, Status};
+use kingdom_core::game::{
     AXEMAN_GOLD_COST, AlertKind, AlertResponse, BOWMAN_GOLD_COST, BRIDGE_WOOD_COST,
     BUILD_NEAR_RADIUS, BUILDER_WAGE, Brush, BuildMode, Command, ESCORT_HIRE_COST, Faction, Game,
     GatherPriority, HORSEMAN_GOLD_COST, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
@@ -21,6 +22,7 @@ use crate::game::{
     TROOP_WOOD_COST, WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST,
     WARSHIP_STONE_COST, WARSHIP_WOOD_COST, WOOD_PRICE,
 };
+use kingdom_core::net::ClientMsg;
 
 /// An action the UI is requesting the app perform this frame.
 pub enum Action {
@@ -44,6 +46,16 @@ pub enum Action {
     ToggleOverview,
     /// Give the player's realm an order.
     Order(Command),
+    /// Connect to a match server at this address under this name.
+    Connect {
+        addr: String,
+        name: String,
+    },
+    /// Close the connection to the match server.
+    Disconnect,
+    /// Something for the match server's lobby: open, join or leave a room,
+    /// or start the match.
+    Lobby(ClientMsg),
 }
 
 /// Where the camera is looking, for the minimap and the village list.
@@ -66,6 +78,31 @@ pub struct MenuState {
     /// The slot a first click on Delete has marked; a second click on the
     /// same slot's button actually removes it.
     pub confirm_delete: Option<String>,
+    /// The match server's address, as typed.
+    pub server: String,
+    /// The name other players see.
+    pub player_name: String,
+    /// The name and setup of a room this player opens on a server.
+    pub room_name: String,
+    pub room_settings: MatchSettings,
+    /// Why the last attempt to connect could not even begin (a malformed
+    /// address, say). A connection that fails later says why itself.
+    pub connect_error: Option<String>,
+}
+
+impl MenuState {
+    pub fn new() -> Self {
+        MenuState {
+            server: crate::online::default_server(),
+            player_name: "Player".into(),
+            room_name: "My room".into(),
+            room_settings: MatchSettings {
+                slots: 2,
+                ..MatchSettings::default()
+            },
+            ..MenuState::default()
+        }
+    }
 }
 
 /// HUD icons: Lucide SVGs (see `assets/icons/LICENSE`) drawn with white
@@ -122,6 +159,8 @@ pub enum Scene<'a> {
         /// Every save slot's name, for the load list.
         slots: Vec<String>,
         has_game: bool,
+        /// The connection to a match server, if the player made one.
+        online: Option<&'a Online>,
     },
     Game {
         game: &'a mut Game,
@@ -132,8 +171,9 @@ pub enum Scene<'a> {
         build_mode: &'a mut BuildMode,
         view: View,
         colors: &'a MapColors,
-        /// The slot name the HUD's save box edits.
-        save_name: &'a mut String,
+        /// The slot name the HUD's save box edits, or `None` in a match on
+        /// a server, which the server keeps and nobody saves.
+        save_name: Option<&'a mut String>,
     },
 }
 
@@ -206,7 +246,8 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
             menu,
             slots,
             has_game,
-        } => menu_ui(ui, menu, slots, *has_game),
+            online,
+        } => menu_ui(ui, menu, slots, *has_game, *online),
         Scene::Game {
             game,
             me,
@@ -223,7 +264,7 @@ fn build_ui(ui: &mut egui::Ui, scene: &mut Scene, minimap: &mut Minimap) -> Opti
                 let alert = alerts_ui(&ctx, game, *me, *view);
                 return hud.or(alert);
             }
-            let hud = game_ui(&ctx, game, *me, build_mode, save_name);
+            let hud = game_ui(&ctx, game, *me, build_mode, save_name.as_deref_mut());
             let realm = realm_ui(&ctx, game, *me, *view, colors, minimap);
             let alert = alerts_ui(&ctx, game, *me, *view);
             hud.or(realm).or(alert)
@@ -236,108 +277,326 @@ fn menu_ui(
     menu: &mut MenuState,
     slots: &[String],
     has_game: bool,
+    online: Option<&Online>,
 ) -> Option<Action> {
     let mut action = None;
     egui::CentralPanel::default().show(ui, |ui| {
-        ui.vertical_centered(|ui| {
-            ui.add_space(48.0);
-            let swords = icon(ui, icons::SWORDS).fit_to_exact_size(egui::vec2(20.0, 20.0));
-            ui.add(WidgetAtom::new((
-                swords.clone(),
-                RichText::new("KINGDOM").heading(),
-                swords,
-            )));
-            ui.label("Grow a kingdom on an endless procedural island.");
-            ui.add_space(24.0);
+        // Full width, so the column centers in the window and its text
+        // boxes keep their usual size.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(48.0);
+                    let swords = icon(ui, icons::SWORDS).fit_to_exact_size(egui::vec2(20.0, 20.0));
+                    ui.add(WidgetAtom::new((
+                        swords.clone(),
+                        RichText::new("KINGDOM").heading(),
+                        swords,
+                    )));
+                    ui.label("Grow a kingdom on an endless procedural island.");
+                    ui.add_space(24.0);
 
-            egui::Grid::new("menu_grid")
-                .spacing([8.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("Seed:");
-                    ui.text_edit_singleline(&mut menu.seed_text);
-                    if ui.button((icon(ui, icons::DICES), "Random")).clicked() {
-                        menu.seed_text = pseudo_random_seed().to_string();
-                    }
-                    ui.end_row();
-
-                    ui.label("Realms:");
-                    ui.add(egui::Slider::new(&mut menu.settings.slots, 1..=MAX_SLOTS));
-                    ui.small("Seats the computer fills").on_hover_text(
-                        "Every realm starts with one village and plays by your rules. \
-                             Each seat beyond yours is run by the computer.",
-                    );
-                    ui.end_row();
-
-                    if menu.settings.slots > 1 {
-                        ui.label("Alliances:");
-                        ui.checkbox(&mut menu.settings.ai_may_ally, "Computer realms may ally");
-                        ui.end_row();
-                    }
-                });
-
-            ui.add_space(12.0);
-            if ui
-                .button((icon(ui, icons::GLOBE), "Create World"))
-                .clicked()
-            {
-                let seed = parse_seed(&menu.seed_text);
-                action = Some(Action::CreateWorld(seed, menu.settings));
-            }
-
-            if has_game && ui.button((icon(ui, icons::PLAY), "Resume")).clicked() {
-                action = Some(Action::Resume);
-            }
-
-            if !slots.is_empty() {
-                ui.add_space(16.0);
-                ui.add(WidgetAtom::new((
-                    icon(ui, icons::FOLDER_OPEN),
-                    RichText::new("Saved Worlds").strong(),
-                )));
-                ui.add_space(4.0);
-                egui::Grid::new("saves_grid")
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        for name in slots {
-                            ui.label(name);
-                            if ui.button((icon(ui, icons::PLAY), "Load")).clicked() {
-                                action = Some(Action::Load(name.clone()));
-                            }
-                            let confirming = menu.confirm_delete.as_deref() == Some(name.as_str());
-                            let label = if confirming {
-                                "Really delete?"
-                            } else {
-                                "Delete"
-                            };
-                            if ui.button((icon(ui, icons::X), label)).clicked() {
-                                if confirming {
-                                    menu.confirm_delete = None;
-                                    action = Some(Action::DeleteSave(name.clone()));
-                                } else {
-                                    menu.confirm_delete = Some(name.clone());
-                                }
+                    egui::Grid::new("menu_grid")
+                        .spacing([8.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Seed:");
+                            ui.text_edit_singleline(&mut menu.seed_text);
+                            if ui.button((icon(ui, icons::DICES), "Random")).clicked() {
+                                menu.seed_text = pseudo_random_seed().to_string();
                             }
                             ui.end_row();
-                        }
-                    });
-            }
 
-            ui.add_space(16.0);
-            ui.small("A set seed is reproducible; leave it blank for a random one.");
+                            ui.label("Realms:");
+                            ui.add(egui::Slider::new(&mut menu.settings.slots, 1..=MAX_SLOTS));
+                            ui.small("Seats the computer fills").on_hover_text(
+                                "Every realm starts with one village and plays by your rules. \
+                             Each seat beyond yours is run by the computer.",
+                            );
+                            ui.end_row();
 
-            ui.add_space(24.0);
-            if ui
-                .button((icon(ui, icons::FLASK_CONICAL), "Testing Ground"))
-                .on_hover_text(
-                    "An empty gray grid with nobody on it. Click to place units of any \
+                            if menu.settings.slots > 1 {
+                                ui.label("Alliances:");
+                                ui.checkbox(
+                                    &mut menu.settings.ai_may_ally,
+                                    "Computer realms may ally",
+                                );
+                                ui.end_row();
+                            }
+                        });
+
+                    ui.add_space(12.0);
+                    if ui
+                        .button((icon(ui, icons::GLOBE), "Create World"))
+                        .clicked()
+                    {
+                        let seed = parse_seed(&menu.seed_text);
+                        action = Some(Action::CreateWorld(seed, menu.settings));
+                    }
+
+                    if has_game && ui.button((icon(ui, icons::PLAY), "Resume")).clicked() {
+                        action = Some(Action::Resume);
+                    }
+
+                    if !slots.is_empty() {
+                        ui.add_space(16.0);
+                        ui.add(WidgetAtom::new((
+                            icon(ui, icons::FOLDER_OPEN),
+                            RichText::new("Saved Worlds").strong(),
+                        )));
+                        ui.add_space(4.0);
+                        egui::Grid::new("saves_grid")
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                for name in slots {
+                                    ui.label(name);
+                                    if ui.button((icon(ui, icons::PLAY), "Load")).clicked() {
+                                        action = Some(Action::Load(name.clone()));
+                                    }
+                                    let confirming =
+                                        menu.confirm_delete.as_deref() == Some(name.as_str());
+                                    let label = if confirming {
+                                        "Really delete?"
+                                    } else {
+                                        "Delete"
+                                    };
+                                    if ui.button((icon(ui, icons::X), label)).clicked() {
+                                        if confirming {
+                                            menu.confirm_delete = None;
+                                            action = Some(Action::DeleteSave(name.clone()));
+                                        } else {
+                                            menu.confirm_delete = Some(name.clone());
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    }
+
+                    ui.add_space(16.0);
+                    ui.small("A set seed is reproducible; leave it blank for a random one.");
+
+                    ui.add_space(24.0);
+                    if ui
+                        .button((icon(ui, icons::FLASK_CONICAL), "Testing Ground"))
+                        .on_hover_text(
+                            "An empty gray grid with nobody on it. Click to place units of any \
                      faction and type and watch how they behave. It is never saved.",
-                )
-                .clicked()
-            {
-                action = Some(Action::CreateSandbox);
+                        )
+                        .clicked()
+                    {
+                        action = Some(Action::CreateSandbox);
+                    }
+
+                    ui.add_space(24.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    if let Some(a) = multiplayer_ui(ui, menu, online) {
+                        action = Some(a);
+                    }
+                    ui.add_space(24.0);
+                });
+            });
+    });
+    action
+}
+
+/// The menu's multiplayer section: the address and name to connect with,
+/// then the server's rooms, and once seated, the room and its seats.
+fn multiplayer_ui(
+    ui: &mut egui::Ui,
+    menu: &mut MenuState,
+    online: Option<&Online>,
+) -> Option<Action> {
+    let mut action = None;
+    ui.add(WidgetAtom::new((
+        icon(ui, icons::USERS),
+        RichText::new("Multiplayer").strong(),
+    )));
+    ui.add_space(4.0);
+
+    let Some(online) = online.filter(|o| o.status == Status::Connected) else {
+        // Not connected (or still trying): the address and name to use.
+        if let Some(o) = online
+            && o.status == Status::Connecting
+        {
+            ui.label(format!("Connecting to {}...", o.url));
+            if ui.button((icon(ui, icons::X), "Cancel")).clicked() {
+                action = Some(Action::Disconnect);
+            }
+            return action;
+        }
+        // Without a column count the grid sizes its text boxes from the
+        // previous frame, so they never grow past their first width.
+        egui::Grid::new("server_grid")
+            .num_columns(2)
+            .spacing([8.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Server:");
+                ui.add(egui::TextEdit::singleline(&mut menu.server).desired_width(200.0))
+                    .on_hover_text("An address like 192.168.1.20:7777 or wss://example.com");
+                ui.end_row();
+                ui.label("Your name:");
+                ui.add(egui::TextEdit::singleline(&mut menu.player_name).desired_width(200.0));
+                ui.end_row();
+            });
+        ui.add_space(4.0);
+        if ui.button((icon(ui, icons::GLOBE), "Connect")).clicked() {
+            action = Some(Action::Connect {
+                addr: menu.server.clone(),
+                name: menu.player_name.clone(),
+            });
+        }
+        let failed = match online.map(|o| &o.status) {
+            Some(Status::Failed(why)) => Some(why),
+            _ => menu.connect_error.as_ref(),
+        };
+        if let Some(why) = failed {
+            ui.add_space(4.0);
+            ui.colored_label(ui.visuals().warn_fg_color, why);
+        }
+        ui.add_space(4.0);
+        ui.small(
+            "Run kingdom-server on any machine to host rooms. Every seat nobody \
+             takes is played by the computer.",
+        );
+        return action;
+    };
+
+    let limits = online.limits.unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label(format!("Connected to {}", online.url));
+        if ui.button((icon(ui, icons::X), "Disconnect")).clicked() {
+            action = Some(Action::Disconnect);
+        }
+    });
+    if let Some(err) = &online.error {
+        ui.colored_label(ui.visuals().warn_fg_color, err);
+    }
+    ui.add_space(8.0);
+
+    if let Some((room, seat)) = &online.room {
+        // Seated: the room, who holds which seat, and Start for the host.
+        ui.label(RichText::new(&room.name).strong());
+        ui.small(format!(
+            "{}, computer alliances {}",
+            plural(room.seats.len(), "seat", "seats"),
+            if room.settings.ai_may_ally {
+                "on"
+            } else {
+                "off"
+            }
+        ));
+        ui.add_space(4.0);
+        egui::Grid::new("seats_grid")
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                for (k, holder) in room.seats.iter().enumerate() {
+                    ui.label(format!("Realm {}", k + 1));
+                    let mut who = match holder {
+                        Some(name) => name.clone(),
+                        None if room.running => "Computer".to_string(),
+                        None => "Open (the computer plays it if nobody joins)".to_string(),
+                    };
+                    if k as RealmId == *seat {
+                        who.push_str(" (you)");
+                    }
+                    if k as RealmId == room.host {
+                        who.push_str(" (host)");
+                    }
+                    ui.label(who);
+                    ui.end_row();
+                }
+            });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if *seat == room.host && !room.running {
+                if ui.button((icon(ui, icons::PLAY), "Start Match")).clicked() {
+                    action = Some(Action::Lobby(ClientMsg::Start));
+                }
+            } else if !room.running {
+                ui.label("Waiting for the host to start.");
+            }
+            if ui.button((icon(ui, icons::X), "Leave Room")).clicked() {
+                action = Some(Action::Lobby(ClientMsg::LeaveRoom));
             }
         });
+        return action;
+    }
+
+    // Browsing: the rooms there are, and a form to open one.
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Rooms").strong());
+        if ui.small_button("Refresh").clicked() {
+            action = Some(Action::Lobby(ClientMsg::ListRooms));
+        }
     });
+    if online.rooms.is_empty() {
+        ui.small("No rooms yet.");
+    } else {
+        egui::Grid::new("rooms_grid")
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                for room in &online.rooms {
+                    let taken = room.seats.iter().flatten().count();
+                    ui.label(&room.name);
+                    ui.label(format!("{taken} of {} seats taken", room.seats.len()));
+                    ui.label(if room.running { "Under way" } else { "Waiting" });
+                    let open = taken < room.seats.len()
+                        && (!room.running || limits.allow_join_in_progress);
+                    ui.add_enabled_ui(open, |ui| {
+                        if ui.button((icon(ui, icons::PLAY), "Join")).clicked() {
+                            action = Some(Action::Lobby(ClientMsg::JoinRoom(room.id)));
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+    }
+
+    if limits.allow_room_creation {
+        ui.add_space(12.0);
+        ui.label(RichText::new("Open a Room").strong());
+        egui::Grid::new("new_room_grid")
+            .num_columns(2)
+            .spacing([8.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Name:");
+                ui.add(egui::TextEdit::singleline(&mut menu.room_name).desired_width(200.0));
+                ui.end_row();
+                ui.label("Realms:");
+                menu.room_settings.slots = menu.room_settings.slots.clamp(1, limits.max_slots);
+                ui.add(egui::Slider::new(
+                    &mut menu.room_settings.slots,
+                    1..=limits.max_slots,
+                ));
+                ui.end_row();
+                if limits.allow_ai_diplomacy && menu.room_settings.slots > 1 {
+                    ui.label("Alliances:");
+                    ui.checkbox(
+                        &mut menu.room_settings.ai_may_ally,
+                        "Computer realms may ally",
+                    );
+                    ui.end_row();
+                }
+            });
+        let room_left = online.rooms.len() < limits.max_rooms;
+        ui.add_enabled_ui(room_left, |ui| {
+            if ui
+                .button((icon(ui, icons::PLUS), "Open Room"))
+                .on_disabled_hover_text("The server has as many rooms open as it allows.")
+                .clicked()
+            {
+                action = Some(Action::Lobby(ClientMsg::CreateRoom {
+                    name: menu.room_name.clone(),
+                    settings: MatchSettings {
+                        ai_may_ally: menu.room_settings.ai_may_ally && limits.allow_ai_diplomacy,
+                        ..menu.room_settings
+                    },
+                }));
+            }
+        });
+    }
     action
 }
 
@@ -502,7 +761,7 @@ fn game_ui(
     game: &Game,
     me: RealmId,
     build_mode: &mut BuildMode,
-    save_name: &mut String,
+    save_name: Option<&mut String>,
 ) -> Option<Action> {
     let mut action = None;
     // Every button that changes the realm goes through an order, so the
@@ -699,7 +958,7 @@ fn game_ui(
                         icon(ui, icons::SWORDS),
                         format!(
                             "Hire allied mercenaries ({} gold)",
-                            crate::game::MERC_HIRE_COST
+                            kingdom_core::game::MERC_HIRE_COST
                         ),
                     ))
                     .clicked()
@@ -727,8 +986,8 @@ fn game_ui(
                 "With a flag planted, {} allied knights ship over to answer it for {} gold. \
                  They fight beside you and hold your villages, then sail home once it's \
                  quiet. Only your own units can capture a village.",
-                crate::game::MERC_KNIGHTS,
-                crate::game::MERC_HIRE_COST
+                kingdom_core::game::MERC_KNIGHTS,
+                kingdom_core::game::MERC_HIRE_COST
             ));
             ui.separator();
 
@@ -926,6 +1185,7 @@ fn game_ui(
             );
             ui.separator();
 
+            if let Some(save_name) = save_name {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(save_name).desired_width(110.0));
                 let valid = crate::save::sanitize_name(save_name).is_some();
@@ -944,6 +1204,14 @@ fn game_ui(
                  also autosaves to the named slot every couple of minutes and \
                  when you leave.",
             );
+            } else if ui
+                // A match on a server: nothing to save here, only a way out.
+                .button((icon(ui, icons::MENU), "Leave Match"))
+                .on_hover_text("The computer takes your realm over until you come back.")
+                .clicked()
+            {
+                action = Some(Action::ToMenu);
+            }
 
             egui::CollapsingHeader::new("Help")
                 .default_open(false)
@@ -1072,12 +1340,12 @@ fn minimap_image(game: &Game, colors: &MapColors, area: (i32, i32, i32)) -> egui
             let x = (x0 as f32 + (px as f32 + 0.5) * step).floor() as i32;
             let shade = if !world.is_generated(x, y) {
                 0
-            } else if world.tile(x, y) == crate::world::Tile::Water {
+            } else if world.tile(x, y) == kingdom_core::world::Tile::Water {
                 if world.is_bridge(x, y) { 4 } else { 1 }
             } else {
                 match world.node(x, y).map(|n| n.kind) {
-                    Some(crate::world::Resource::Wood) => 3,
-                    Some(crate::world::Resource::Stone) => 4,
+                    Some(kingdom_core::world::Resource::Wood) => 3,
+                    Some(kingdom_core::world::Resource::Stone) => 4,
                     None => 2,
                 }
             };
@@ -1277,8 +1545,8 @@ fn realm_ui(
                 for other in others {
                     ui.horizontal(|ui| {
                         let who = match game.realm(other).controller {
-                            crate::game::Controller::Human => format!("Realm {}", other + 1),
-                            crate::game::Controller::Ai => {
+                            kingdom_core::game::Controller::Human => format!("Realm {}", other + 1),
+                            kingdom_core::game::Controller::Ai => {
                                 format!("Realm {} (computer)", other + 1)
                             }
                         };
@@ -1296,7 +1564,7 @@ fn realm_ui(
                                     .small_button("Leave")
                                     .on_hover_text(format!(
                                         "Gives notice: the alliance ends {} seconds later.",
-                                        crate::game::ALLIANCE_NOTICE
+                                        kingdom_core::game::ALLIANCE_NOTICE
                                     ))
                                     .clicked()
                                 {
@@ -1342,7 +1610,8 @@ fn realm_ui(
                 .filter(|v| v.faction == Faction::Realm(me))
                 .collect();
             mine.sort_by(|a, b| {
-                let rank = |v: &crate::game::Village| (!v.threatened, v.knights + v.civilians > 0);
+                let rank =
+                    |v: &kingdom_core::game::Village| (!v.threatened, v.knights + v.civilians > 0);
                 rank(a).cmp(&rank(b)).then(
                     a.center
                         .distance_squared(view.center)
@@ -1405,8 +1674,8 @@ fn realm_ui(
                                                  with the most to spare, which keeps {} at \
                                                  home. Where no road clear of the enemy leads \
                                                  here, they sail over as a settler ship instead.",
-                                                crate::game::MIGRANT_CIVILIANS,
-                                                crate::game::SETTLER_CIVILIANS_SPARED
+                                                kingdom_core::game::MIGRANT_CIVILIANS,
+                                                kingdom_core::game::SETTLER_CIVILIANS_SPARED
                                             ))
                                             .clicked()
                                     {

@@ -1,0 +1,16 @@
+[package]
+name = "kingdom-server"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "The Kingdom match server: hosts rooms of realms over WebSockets."
+
+[dependencies]
+kingdom-core = { path = "../core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+axum = { version = "0.8", features = ["ws"] }
+# Serves the web build next to the WebSocket endpoint, so a browser on the
+# LAN loads the game from the server it then talks to.
+tower-http = { version = "0.7", features = ["fs"] }
+log = "0.4"
+env_logger = "0.11"
