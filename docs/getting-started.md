@@ -79,6 +79,28 @@ native WebGPU support. If a browser advertises WebGPU but can't actually provide
 a GPU adapter, the game falls back to WebGL. The static `dist/` bundle is just
 plain files, so you can host it on any static web server.
 
+## Match server
+
+To play with others, one machine runs the match server:
+
+```sh
+cargo run -p kingdom-server --release -- --web dist
+```
+
+It listens on port 7777 and, with `--web dist`, also serves the web build
+from the step above. See **[Multiplayer](multiplayer.md)** for its options
+and how to join from the game's menu.
+
+## Tests
+
+The repository is a Cargo workspace: the game client at the root, the
+simulation in `crates/core`, and the match server in `crates/server`. Run
+every crate's tests with:
+
+```sh
+cargo test --workspace
+```
+
 ## Next steps
 
 - **[Controls & HUD](controls.md):** how to pan, zoom, and build.

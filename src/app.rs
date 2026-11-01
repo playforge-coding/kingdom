@@ -16,14 +16,16 @@ use winit::window::{Window, WindowId};
 
 use crate::atlas::{self, Atlas, MapColors, realm_sheet};
 use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
-use crate::game::{
+use crate::gfx::{Instance, Renderer};
+use crate::online::{Event as NetEvent, Online};
+use crate::save;
+use crate::ui::{Action, MenuState, Scene as UiScene, View};
+use kingdom_core::game::{
     AUTO_ZONE_RADIUS, Anim, AxeWork, BuildMode, CamState, Dir, Entity, Faction, Game, Job,
     MissileKind, RealmId, SandboxTool, SiteKind, Stroke, faction_of, tile_at, tile_path,
 };
-use crate::gfx::{Instance, Renderer};
-use crate::save;
-use crate::ui::{Action, MenuState, Scene as UiScene, View};
-use crate::world::{Resource, Tile};
+use kingdom_core::net::ClientMsg;
+use kingdom_core::world::{Resource, Tile};
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// A mild player-blue wash over the cargo-ship sprite that marks a settler
@@ -50,11 +52,11 @@ const SANDBOX_GAP: f32 = 0.04;
 /// The sprite sheet a transport's hull is drawn from. A realm's missions
 /// sail the cargo hull in a tint (see `transport_tint`); an allied company
 /// and an enemy raid sail their own faction's hull, drawn as is.
-fn transport_sheet(t: &crate::game::Transport) -> Cow<'static, str> {
+fn transport_sheet(t: &kingdom_core::game::Transport) -> Cow<'static, str> {
     Cow::Borrowed(match t.faction {
-        crate::game::Faction::Realm(_) => "cargo_ship",
-        crate::game::Faction::Enemy => "enemy_warship",
-        crate::game::Faction::Ally => "ally_warship",
+        kingdom_core::game::Faction::Realm(_) => "cargo_ship",
+        kingdom_core::game::Faction::Enemy => "enemy_warship",
+        kingdom_core::game::Faction::Ally => "ally_warship",
     })
 }
 
@@ -71,42 +73,42 @@ fn washed(color: [f32; 4], amount: f32) -> [f32; 4] {
 /// The hull tint for a transport: a wash of its realm's color on the cargo
 /// hull (mild for settlers, deeper for troops; the first realm keeps the
 /// classic blues), none on a faction's own hull.
-fn transport_tint(t: &crate::game::Transport, colors: &MapColors) -> [f32; 4] {
+fn transport_tint(t: &kingdom_core::game::Transport, colors: &MapColors) -> [f32; 4] {
     match t.faction {
-        crate::game::Faction::Realm(0) if t.knights > 0 => TROOP_TINT,
-        crate::game::Faction::Realm(0) => SETTLER_TINT,
-        crate::game::Faction::Realm(r) if t.knights > 0 => washed(colors.realm(r), 0.25),
-        crate::game::Faction::Realm(r) => washed(colors.realm(r), 0.55),
-        crate::game::Faction::Enemy | crate::game::Faction::Ally => WHITE,
+        kingdom_core::game::Faction::Realm(0) if t.knights > 0 => TROOP_TINT,
+        kingdom_core::game::Faction::Realm(0) => SETTLER_TINT,
+        kingdom_core::game::Faction::Realm(r) if t.knights > 0 => washed(colors.realm(r), 0.25),
+        kingdom_core::game::Faction::Realm(r) => washed(colors.realm(r), 0.55),
+        kingdom_core::game::Faction::Enemy | kingdom_core::game::Faction::Ally => WHITE,
     }
 }
 
 /// The tint of the banner planted on a transport's landing: the mission's
 /// own tint for a realm's, the allies' green for a hired company, the
 /// enemy's red for a raid.
-fn banner_tint(t: &crate::game::Transport, colors: &MapColors) -> [f32; 4] {
+fn banner_tint(t: &kingdom_core::game::Transport, colors: &MapColors) -> [f32; 4] {
     match t.faction {
-        crate::game::Faction::Realm(_) => transport_tint(t, colors),
-        crate::game::Faction::Enemy => RAID_TINT,
-        crate::game::Faction::Ally => MERC_TINT,
+        kingdom_core::game::Faction::Realm(_) => transport_tint(t, colors),
+        kingdom_core::game::Faction::Enemy => RAID_TINT,
+        kingdom_core::game::Faction::Ally => MERC_TINT,
     }
 }
 
 /// The sprite sheet a warship of `faction` is drawn from.
-fn warship_sheet(faction: crate::game::Faction) -> Cow<'static, str> {
+fn warship_sheet(faction: kingdom_core::game::Faction) -> Cow<'static, str> {
     match faction {
-        crate::game::Faction::Realm(r) => realm_sheet(r, "warship"),
-        crate::game::Faction::Enemy => Cow::Borrowed("enemy_warship"),
-        crate::game::Faction::Ally => Cow::Borrowed("ally_warship"),
+        kingdom_core::game::Faction::Realm(r) => realm_sheet(r, "warship"),
+        kingdom_core::game::Faction::Enemy => Cow::Borrowed("enemy_warship"),
+        kingdom_core::game::Faction::Ally => Cow::Borrowed("ally_warship"),
     }
 }
 
 /// The fill of a warship's hull bar, in its faction's color.
-fn hull_bar_tint(faction: crate::game::Faction, colors: &MapColors) -> [f32; 4] {
+fn hull_bar_tint(faction: kingdom_core::game::Faction, colors: &MapColors) -> [f32; 4] {
     let mut tint = match faction {
-        crate::game::Faction::Realm(r) => colors.realm(r),
-        crate::game::Faction::Enemy => [0.9, 0.25, 0.2, 1.0],
-        crate::game::Faction::Ally => [0.35, 0.85, 0.4, 1.0],
+        kingdom_core::game::Faction::Realm(r) => colors.realm(r),
+        kingdom_core::game::Faction::Enemy => [0.9, 0.25, 0.2, 1.0],
+        kingdom_core::game::Faction::Ally => [0.35, 0.85, 0.4, 1.0],
     };
     tint[3] = 0.95;
     tint
@@ -115,12 +117,12 @@ fn hull_bar_tint(faction: crate::game::Faction, colors: &MapColors) -> [f32; 4] 
 /// The tint a wall is drawn in, so walls read apart by owner: the first
 /// realm's plain, other realms' washed in their color, the allies' green and
 /// the enemy's red.
-fn wall_tint(owner: crate::world::Owner, colors: &MapColors) -> [f32; 4] {
-    match crate::game::faction_of(owner) {
-        crate::game::Faction::Realm(0) => WHITE,
-        crate::game::Faction::Realm(r) => washed(colors.realm(r), 0.5),
-        crate::game::Faction::Ally => [0.55, 1.0, 0.6, 1.0],
-        crate::game::Faction::Enemy => [1.0, 0.55, 0.5, 1.0],
+fn wall_tint(owner: kingdom_core::world::Owner, colors: &MapColors) -> [f32; 4] {
+    match kingdom_core::game::faction_of(owner) {
+        kingdom_core::game::Faction::Realm(0) => WHITE,
+        kingdom_core::game::Faction::Realm(r) => washed(colors.realm(r), 0.5),
+        kingdom_core::game::Faction::Ally => [0.55, 1.0, 0.6, 1.0],
+        kingdom_core::game::Faction::Enemy => [1.0, 0.55, 0.5, 1.0],
     }
 }
 
@@ -155,6 +157,8 @@ const OVERVIEW_VIEW_HEIGHT: f32 = 240.0;
 const OVERVIEW_CHUNK_BUDGET: usize = 6;
 /// Seconds of play between autosaves.
 const AUTOSAVE_INTERVAL: f32 = 120.0;
+/// Seconds between sheddings of far terrain in a match on a server.
+const REMOTE_EVICT_INTERVAL: f32 = 5.0;
 
 fn now_secs() -> f64 {
     #[cfg(target_arch = "wasm32")]
@@ -185,6 +189,11 @@ struct Input {
     /// While the left button is held in a mode that builds tile by tile: the
     /// last tile the drag reached and what it does to each new one.
     drag: Option<((i32, i32), Stroke)>,
+    /// The tiles the current drag has sent orders for, in a match on a
+    /// server. The local copy only learns of an order when the server's
+    /// next update arrives, so without this a sweep doubling back over a
+    /// tile would send its order twice and cancel it.
+    stroked: rustc_hash::FxHashSet<(i32, i32)>,
 }
 
 pub struct State {
@@ -199,9 +208,18 @@ pub struct State {
     scene: Scene,
     menu: MenuState,
     game: Option<Game>,
-    /// The realm this player runs. Always the first realm for now: a
-    /// single-player world has one, and the testing ground's units of
-    /// "yours" are its.
+    /// The connection to a match server, once the player makes one.
+    online: Option<Online>,
+    /// Whether `game` is a match on that server: a copy the server keeps up
+    /// to date, which this client draws and sends orders for but never
+    /// steps or saves itself.
+    remote: bool,
+    /// Seconds until a remote match's copy sheds the far terrain it
+    /// generated for drawing (`update` does this for a local game).
+    evict_timer: f32,
+    /// The realm this player runs: the first realm in a single-player
+    /// world (the testing ground's units of "yours" are its too), and the
+    /// seat the server gave in a match.
     me: RealmId,
     /// What a left-click on the map orders (see `BuildMode`). HUD state,
     /// not the game's: it is never saved and never leaves this machine.
@@ -233,8 +251,11 @@ impl State {
             detail_view_height: DEFAULT_VIEW_HEIGHT,
             ui,
             scene: Scene::Menu,
-            menu: MenuState::default(),
+            menu: MenuState::new(),
             game: None,
+            online: None,
+            remote: false,
+            evict_timer: 0.0,
             me: 0,
             build_mode: BuildMode::House,
             save_name: String::new(),
@@ -263,6 +284,7 @@ impl State {
     /// saved, and a name box emptied of anything usable skips the write.
     fn autosave(&mut self) {
         if let Some(game) = &self.game
+            && !self.remote
             && !game.sandbox()
             && let Some(name) = save::sanitize_name(&self.save_name)
         {
@@ -284,6 +306,7 @@ impl State {
         let dt = ((t - self.last_time) as f32).max(0.0);
         self.last_time = t;
 
+        self.poll_online();
         if self.scene != Scene::Playing {
             return;
         }
@@ -334,6 +357,21 @@ impl State {
             maxx + SIM_MARGIN,
             maxy + SIM_MARGIN,
         );
+        if self.remote {
+            // The server runs the match; tell it where to look closely, and
+            // let go of terrain generated for views long since left.
+            if let Some(online) = &mut self.online {
+                online.set_view((minx, miny, maxx, maxy));
+            }
+            self.evict_timer -= dt;
+            if self.evict_timer <= 0.0
+                && let Some(game) = &mut self.game
+            {
+                self.evict_timer = REMOTE_EVICT_INTERVAL;
+                game.evict_far_chunks(sim);
+            }
+            return;
+        }
         if let Some(game) = &mut self.game {
             game.update(dt, sim);
         }
@@ -360,7 +398,14 @@ impl State {
             self.input.drag = game
                 .stroke_at(self.me, self.build_mode, world)
                 .map(|s| (tile_at(world), s));
-            if game.sandbox() {
+            if self.remote {
+                let t = tile_at(world);
+                self.input.stroked.clear();
+                self.input.stroked.insert(t);
+                if let Some(online) = &mut self.online {
+                    online.send(&ClientMsg::Order(self.build_mode.command(t)));
+                }
+            } else if game.sandbox() {
                 game.sandbox_click(world);
             } else {
                 game.try_build(self.me, self.build_mode, world);
@@ -389,7 +434,14 @@ impl State {
         }
         if let Some(game) = &mut self.game {
             for t in tile_path(last, to) {
-                game.stroke_build(self.me, self.build_mode, t, stroke);
+                if !self.remote {
+                    game.stroke_build(self.me, self.build_mode, t, stroke);
+                } else if self.input.stroked.insert(t)
+                    && let Some(cmd) = game.stroke_order(self.build_mode, t, stroke)
+                    && let Some(online) = &mut self.online
+                {
+                    online.send(&ClientMsg::Order(cmd));
+                }
             }
         }
     }
@@ -430,9 +482,76 @@ impl State {
         self.colors = MapColors::from_atlas(&self.atlas);
     }
 
+    /// Handle what arrived from the match server: a match starting (or
+    /// joined under way), updates to fold into it, and the way out.
+    fn poll_online(&mut self) {
+        let Some(online) = &mut self.online else {
+            return;
+        };
+        for event in online.poll() {
+            match event {
+                NetEvent::Started { seat, world } => match Game::from_wire(&world) {
+                    Some(game) => {
+                        self.ensure_atlas(game.realm_count());
+                        self.me = seat;
+                        self.camera.center = game.start_center(seat);
+                        self.camera.view_height = DEFAULT_VIEW_HEIGHT;
+                        self.build_mode = BuildMode::House;
+                        self.input.drag = None;
+                        self.game = Some(game);
+                        self.remote = true;
+                        self.evict_timer = REMOTE_EVICT_INTERVAL;
+                        self.scene = Scene::Playing;
+                        log::info!("joined a match as realm {seat}");
+                    }
+                    None => {
+                        if let Some(online) = &mut self.online {
+                            online.error =
+                                Some("The server sent a world this version cannot read".into());
+                        }
+                    }
+                },
+                NetEvent::State(bytes) => {
+                    if self.remote
+                        && let Some(game) = &mut self.game
+                        && game.sync(&bytes).is_none()
+                    {
+                        log::warn!("an update from the server could not be read");
+                    }
+                }
+                NetEvent::Left => self.drop_remote_game(),
+            }
+        }
+    }
+
+    /// Back to the menu from a match on a server, with nothing of it kept.
+    fn drop_remote_game(&mut self) {
+        if !self.remote {
+            return;
+        }
+        self.remote = false;
+        self.game = None;
+        self.me = 0;
+        self.input.drag = None;
+        self.scene = Scene::Menu;
+    }
+
+    /// Give up a seat in a room before starting something else locally, so
+    /// the room's start doesn't pull this player away from it.
+    fn leave_room(&mut self) {
+        self.drop_remote_game();
+        if let Some(online) = &mut self.online
+            && online.room.is_some()
+        {
+            online.send(&ClientMsg::LeaveRoom);
+        }
+        self.me = 0;
+    }
+
     fn apply_action(&mut self, action: Action) {
         match action {
             Action::CreateWorld(seed, settings) => {
+                self.leave_room();
                 let game = Game::new_match(seed, settings);
                 self.ensure_atlas(game.realm_count());
                 self.camera.center = game.start_center(self.me);
@@ -444,6 +563,7 @@ impl State {
                 log::info!("created world with seed {seed}");
             }
             Action::CreateSandbox => {
+                self.leave_room();
                 self.game = Some(Game::new_sandbox());
                 self.camera.center = Vec2::ZERO;
                 self.camera.view_height = DEFAULT_VIEW_HEIGHT;
@@ -453,6 +573,7 @@ impl State {
             Action::Load(name) => {
                 if let Some(bytes) = save::read(&name) {
                     if let Some((game, cam)) = Game::from_bytes(&bytes) {
+                        self.leave_room();
                         self.ensure_atlas(game.realm_count());
                         self.camera.center = Vec2::new(cam.cx, cam.cy);
                         self.camera.view_height = cam.view_height;
@@ -475,6 +596,7 @@ impl State {
                 // The testing ground is never saved: a slot holding an empty
                 // grid would only mislead.
                 if let Some(game) = &self.game
+                    && !self.remote
                     && !game.sandbox()
                     && let Some(name) = save::sanitize_name(&name)
                 {
@@ -487,6 +609,11 @@ impl State {
                 save::delete(&name);
             }
             Action::ToMenu => {
+                if self.remote {
+                    // Out of the match; the computer takes the seat over.
+                    self.leave_room();
+                    return;
+                }
                 // Leaving for the menu is a natural stopping point, and often
                 // the way out of the game entirely, so take a snapshot.
                 self.autosave();
@@ -500,8 +627,36 @@ impl State {
             }
             Action::ToggleOverview => self.toggle_overview(),
             Action::Order(command) => {
-                if let Some(game) = &mut self.game {
+                if self.remote {
+                    if let Some(online) = &mut self.online {
+                        online.send(&ClientMsg::Order(command));
+                    }
+                } else if let Some(game) = &mut self.game {
                     game.apply(self.me, command);
+                }
+            }
+            Action::Connect { addr, name } => {
+                self.drop_remote_game();
+                match Online::connect(&addr, &name) {
+                    Ok(online) => {
+                        self.online = Some(online);
+                        self.menu.connect_error = None;
+                    }
+                    Err(why) => {
+                        // Kept on screen, as a dropped connection's reason is.
+                        log::warn!("{why}");
+                        self.online = None;
+                        self.menu.connect_error = Some(why);
+                    }
+                }
+            }
+            Action::Disconnect => {
+                self.drop_remote_game();
+                self.online = None;
+            }
+            Action::Lobby(msg) => {
+                if let Some(online) = &mut self.online {
+                    online.send(&msg);
                 }
             }
         }
@@ -1230,7 +1385,7 @@ impl State {
                         build_mode: &mut self.build_mode,
                         view,
                         colors: &self.colors,
-                        save_name: &mut self.save_name,
+                        save_name: (!self.remote).then_some(&mut self.save_name),
                     },
                 ),
                 None => self.ui.run(
@@ -1239,6 +1394,7 @@ impl State {
                         menu: &mut self.menu,
                         slots: save::slots(),
                         has_game: false,
+                        online: self.online.as_ref(),
                     },
                 ),
             },
@@ -1250,6 +1406,7 @@ impl State {
                         menu: &mut self.menu,
                         slots: save::slots(),
                         has_game,
+                        online: self.online.as_ref(),
                     },
                 )
             }
