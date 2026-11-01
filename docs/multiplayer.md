@@ -20,7 +20,8 @@ Nothing here changes how a single-player world plays.
   fills any seat nobody has taken, so a match with every seat taken has no
   computer-run empire at all. The computer plays by issuing the same orders a
   person would, which also means a seat whose player drops out keeps running
-  until they come back.
+  until they come back. There is a practical cap on seats (`MAX_SLOTS`), but
+  nothing is sized by it: raising the one constant is the whole change.
 - **Players choose their alliances.** Realms start at war with one another.
   An alliance needs both sides to agree; leaving one takes effect after a
   short notice. Whether computer-run realms may make alliances is up to the
@@ -51,7 +52,7 @@ flowchart LR
 | **Realms** | Every per-player thing (stockpile, flags, switches, alerts, hired help) lives in a `Realm`, and the game holds a list of them. Houses, ships and orders carry their owner. | Done |
 | **Orders** | Everything the HUD does is a `Command` the game applies for a given realm (`Game::apply`), so a remote player and the computer can give the same orders a local one does. The HUD only reads the game and hands orders back. | Done |
 | **Diplomacy** | A relations table (`Diplomacy`) decides who fights whom. Realms start at war; `ProposeAlliance`, `AcceptAlliance`, `DeclineAlliance` and `LeaveAlliance` orders change that, with a one-minute notice before an alliance ends. The Realm panel shows and drives it. A computer-run realm answers a proposal at once, accepting when the match allows it; weighing the offer properly comes with the computer players. | Done |
-| **Match setup** | Worlds with several starting villages spaced apart, seats filled by people or the computer, and unit colors generated per realm. | Planned |
+| **Match setup** | `MatchSettings` (seats, whether the computer's realms may ally) and `Game::new_match`, which plants one capital per seat around a ring, well apart, with the first seat a person's and the rest the computer's. The main menu offers the setting. Each realm past the first gets a hue of its own, and the atlas recolors every team-colored sprite for it. | Done |
 | **Computer players** | A player that runs a realm through the same orders a person uses. | Planned |
 | **Server and rooms** | A headless server running matches in rooms over WebSockets, and the client's lobby and connection screens. | Planned |
 
