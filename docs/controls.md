@@ -132,6 +132,9 @@ shows in red how many **enemy troop ships and warships** are at sea (see
 
 - **:lucide-save: Save:** write the current world to disk / IndexedDB (see **[Saves & Files](saves.md)**).
 - **:lucide-menu: Menu:** return to the main menu (your session stays resumable).
+- **:lucide-menu: Leave Match:** in a match on a server, this replaces both
+  buttons above. The server keeps the world, so there is nothing to save;
+  leaving hands your realm to the computer (see **[Multiplayer](multiplayer.md)**).
 
 ### Help
 

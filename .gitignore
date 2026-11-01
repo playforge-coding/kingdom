@@ -9,3 +9,6 @@ dist/
 # scripts/fetch-fonts.py (run before `zensical build`).
 /docs/fonts/
 /docs/stylesheets/fonts.css
+
+# Screenshots and logs from checking the game in a browser with Playwright.
+/.playwright-mcp/

@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use glam::Vec2;
+use serde::{Deserialize, Serialize};
 
 use crate::grid::Grid;
 use crate::pathfind;
@@ -44,7 +45,7 @@ impl Rng {
 /// single-player game.
 pub type RealmId = u8;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Faction {
     /// An empire run on the player's rules, whether a human or the computer
     /// is in charge of it: it gathers, builds, trades and recruits the way
@@ -316,14 +317,14 @@ pub enum Role {
     Builder,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Anim {
     Idle,
     Walk,
     Act,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Dir {
     Down,
     Up,
@@ -1165,7 +1166,7 @@ const AUTO_RALLY_RADIUS: f32 = 64.0;
 /// A knights' rally flag. Any number may stand at once; the soldiers
 /// answering them are shared out so every flag gets its fair share, nearest
 /// first (see `share_out`).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Rally {
     pub pos: Vec2,
     /// `None` for a flag the player planted, which calls every soldier in the
@@ -1580,7 +1581,7 @@ impl BuildMode {
 /// computer's players issue them too, and over the wire they are all a
 /// remote player ever sends. `Game::apply` carries one out for a realm and
 /// says whether it went through.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Command {
     /// Place a construction order of `kind` on `tile`, or cancel the pending
     /// order of that kind already there.
@@ -1689,7 +1690,7 @@ impl Brush {
 }
 
 /// What a construction site will become once a builder finishes it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SiteKind {
     House,
     Bridge,
@@ -1756,6 +1757,7 @@ pub const AUTO_ZONE_RADIUS: i32 = 5;
 const AUTO_BUILD_INTERVAL: f32 = 2.0;
 
 /// A sown sapling growing toward a harvestable tree (`grow` runs from 0 to 1).
+#[derive(Clone, Copy, Serialize, Deserialize)]
 struct Sapling {
     tile: Tile,
     grow: f32,
@@ -1818,6 +1820,7 @@ impl Transport {
 
 /// A pirate ship: a rare raider that prowls the open ocean and lobs cannonballs
 /// at the player's passing cargo ships. Purely transient and not saved.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Pirate {
     pub pos: Vec2,
     /// Heading, for both movement and which directional sprite frame to draw.
@@ -1917,7 +1920,7 @@ fn warship_max_hp(faction: Faction) -> f32 {
 /// Who fired a cannonball, which decides what it can hurt. A pirate's shot
 /// harms any hull afloat; a faction's shot harms pirates, hostile hulls, and
 /// hostile units ashore.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Gunner {
     Pirate,
     Navy(Faction),
@@ -1934,6 +1937,7 @@ impl Gunner {
 }
 
 /// A cannonball in flight. Its `gunner` decides who it can hurt.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Cannonball {
     pub pos: Vec2,
     vel: Vec2,
@@ -1943,7 +1947,7 @@ pub struct Cannonball {
 }
 
 /// What a [`Missile`] is.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum MissileKind {
     /// Loosed by a bowman: `ARROW_DAMAGE`.
     Arrow,
@@ -1972,6 +1976,7 @@ impl MissileKind {
 /// It strikes the first hostile unit it comes within `MISSILE_HIT_RADIUS` of,
 /// and never harms a hull or a structure. Transient, like a cannonball: a
 /// save taken mid-flight simply drops it.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Missile {
     pub kind: MissileKind,
     pub pos: Vec2,
@@ -2033,7 +2038,7 @@ pub struct Village {
 }
 
 /// Something the player should look at, shown as a clickable toast.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlertKind {
     VillageThreatened,
     HutRaided,
@@ -2114,7 +2119,7 @@ pub enum AlertKind {
 
 /// Why a settle or troop-landing order was refused, carried on its
 /// `LaunchRefused` toast so the player learns what to fix rather than guessing.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LaunchRefusal {
     /// The stockpile doesn't cover the expedition's wood, stone, or gold.
     Stockpile,
@@ -2148,7 +2153,7 @@ pub enum LaunchRefusal {
     RoadHeld,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Alert {
     pub kind: AlertKind,
     pub pos: Vec2,
@@ -2192,7 +2197,7 @@ impl AlertKind {
 }
 
 /// Which kind of villager the player's houses favor raising.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Priority {
     /// Mostly civilians (grow the economy).
     Agriculture,
@@ -2201,7 +2206,7 @@ pub enum Priority {
 }
 
 /// Which resource the player's civilians prefer to gather.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum GatherPriority {
     Balanced,
     Wood,
@@ -2219,7 +2224,7 @@ impl GatherPriority {
 }
 
 /// Camera state persisted alongside the game.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct CamState {
     pub cx: f32,
     pub cy: f32,
@@ -2580,7 +2585,7 @@ pub struct Game {
 /// How a match is set up: the choices a room's creator makes, within the
 /// limits the server sets (see the Multiplayer page of the docs). A
 /// single-player world is a match of one seat.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct MatchSettings {
     /// How many realms share the map. People take seats; the computer fills
     /// the rest. At least one.
@@ -4869,7 +4874,7 @@ impl Game {
     /// Rebuild the village list: cluster each faction's houses, then count the
     /// defenders standing in each and check whether a hostile unit is closing
     /// in. A threatened realm village raises an alert for that realm.
-    fn survey_villages(&mut self) {
+    pub fn survey_villages(&mut self) {
         let capture2 = CAPTURE_RADIUS * CAPTURE_RADIUS;
         let reach = CAPTURE_RADIUS + THREAT_MARGIN;
         let threat2 = reach * reach;
@@ -5058,8 +5063,9 @@ impl Game {
     /// units covers the widest region anything generates for itself
     /// (`ENSURE_MARGIN` on land, `PATROL_SCAN` at sea), so the realm doesn't
     /// churn through evict-regenerate cycles. Edited chunks are never evicted;
-    /// they're what saves are made of.
-    fn evict_far_chunks(&mut self, sim: (i32, i32, i32, i32)) {
+    /// they're what saves are made of. A client of a match, which never runs
+    /// `update`, calls this itself now and then.
+    pub fn evict_far_chunks(&mut self, sim: (i32, i32, i32, i32)) {
         let m = ENSURE_MARGIN.max(PATROL_SCAN);
         let mut keep: Vec<(i32, i32, i32, i32)> = Vec::with_capacity(
             1 + self.entities.len()
@@ -6057,14 +6063,25 @@ impl Game {
             self.place_tile(t, self.place_brush);
             return true;
         }
-        let Some(kind) = mode.site_kind() else {
-            return false;
-        };
+        match self.stroke_order(mode, t, stroke) {
+            Some(cmd) => self.apply(realm, cmd),
+            None => false,
+        }
+    }
+
+    /// The order a drag in `mode` gives as it reaches tile `t`, if it gives
+    /// one (see `stroke_build`): what a client of a match sends the server
+    /// for each tile a sweep crosses.
+    pub fn stroke_order(&self, mode: BuildMode, t: Tile, stroke: Stroke) -> Option<Command> {
+        if self.sandbox() {
+            return None;
+        }
+        let kind = mode.site_kind()?;
         let pending = self.site_at(t).is_some();
         match stroke {
-            Stroke::Place if !pending => self.order_build(realm, t, kind),
-            Stroke::Cancel if pending => self.order_build(realm, t, kind),
-            _ => false,
+            Stroke::Place if !pending => Some(Command::Order { tile: t, kind }),
+            Stroke::Cancel if pending => Some(Command::Order { tile: t, kind }),
+            _ => None,
         }
     }
 
@@ -10172,7 +10189,103 @@ fn anim_u8(a: Anim) -> u8 {
 }
 
 impl Game {
+    /// The game as a save: every edited chunk, and nothing transient.
     pub fn to_bytes(&self, cam: CamState) -> Vec<u8> {
+        let chunks: Vec<_> = self.world.chunks_iter().filter(|(_, c)| c.dirty).collect();
+        self.write(cam, chunks, None)
+    }
+
+    /// The game as the server sends it to a client: the save format, but
+    /// carrying only the chunks edited since the world's edit count stood at
+    /// `since` (zero for everything), followed by the transient state a
+    /// client needs to draw the moment (flags, alerts, saplings, pirates and
+    /// everything in flight). The client folds it into the world it has
+    /// with `sync`.
+    pub fn to_wire(&self, since: u64) -> Vec<u8> {
+        let chunks: Vec<_> = self.world.chunks_since(since).collect();
+        let live = Live {
+            rev: self.world.rev(),
+            rallies: self.realms.iter().map(|r| r.rallies.clone()).collect(),
+            navy_rallies: self.realms.iter().map(|r| r.navy_rallies.clone()).collect(),
+            alerts: self.realms.iter().map(|r| r.alerts.clone()).collect(),
+            saplings: self.saplings.clone(),
+            pirates: self.pirates.clone(),
+            cannonballs: self.cannonballs.clone(),
+            missiles: self.missiles.clone(),
+        };
+        self.write(CamState::default(), chunks, Some(&live))
+    }
+
+    /// Fold a `to_wire` update into this game: the chunks it carries replace
+    /// ours, the chunks it doesn't mention stay, and everything else (units,
+    /// fleets, realms, diplomacy, the moment's flags and alerts) is taken
+    /// from it whole. Returns the world's edit count the update was taken
+    /// at, to ask for the next one from, or `None` for a malformed update.
+    pub fn sync(&mut self, bytes: &[u8]) -> Option<u64> {
+        let (mut fresh, _, live) = Game::read(bytes)?;
+        let live = live?;
+        let old = std::mem::replace(&mut self.world, World::new(0));
+        fresh.world.adopt_missing(old);
+        fresh.cave_tiles = fresh.world.all_cave_tiles();
+        fresh.hut_tiles = fresh.world.all_hut_tiles();
+        for (i, realm) in fresh.realms.iter_mut().enumerate() {
+            realm.rallies = live.rallies.get(i).cloned().unwrap_or_default();
+            realm.navy_rallies = live.navy_rallies.get(i).cloned().unwrap_or_default();
+            realm.alerts = live.alerts.get(i).cloned().unwrap_or_default();
+        }
+        fresh.saplings = live.saplings;
+        fresh.pirates = live.pirates;
+        fresh.cannonballs = live.cannonballs;
+        fresh.missiles = live.missiles;
+        // The HUD's testing-ground picks are the client's, not the server's.
+        fresh.sandbox_tool = self.sandbox_tool;
+        fresh.place_faction = self.place_faction;
+        fresh.place_job = self.place_job;
+        fresh.place_brush = self.place_brush;
+        *self = fresh;
+        self.survey_villages();
+        Some(live.rev)
+    }
+
+    /// A game built from a `to_wire` update taken at edit count zero: how a
+    /// client first receives a match.
+    pub fn from_wire(bytes: &[u8]) -> Option<Game> {
+        let (mut game, _, live) = Game::read(bytes)?;
+        let live = live?;
+        game.cave_tiles = game.world.all_cave_tiles();
+        game.hut_tiles = game.world.all_hut_tiles();
+        for (i, realm) in game.realms.iter_mut().enumerate() {
+            realm.rallies = live.rallies.get(i).cloned().unwrap_or_default();
+            realm.navy_rallies = live.navy_rallies.get(i).cloned().unwrap_or_default();
+            realm.alerts = live.alerts.get(i).cloned().unwrap_or_default();
+        }
+        game.saplings = live.saplings;
+        game.pirates = live.pirates;
+        game.cannonballs = live.cannonballs;
+        game.missiles = live.missiles;
+        game.survey_villages();
+        Some(game)
+    }
+
+    /// Who runs `realm`: a person while one holds the seat, the computer
+    /// otherwise. The server flips this as players come and go.
+    pub fn set_controller(&mut self, realm: RealmId, controller: Controller) {
+        if let Some(r) = self.realms.get_mut(realm as usize) {
+            r.controller = controller;
+        }
+    }
+
+    /// The world's edit count (see `World::rev`).
+    pub fn world_rev(&self) -> u64 {
+        self.world.rev()
+    }
+
+    fn write(
+        &self,
+        cam: CamState,
+        chunks: Vec<(&(i32, i32), &crate::world::Chunk)>,
+        live: Option<&Live>,
+    ) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(MAGIC);
         wu8(&mut b, VERSION);
@@ -10254,7 +10367,6 @@ impl Game {
 
         // Only edited chunks go in the save; everything else regenerates from
         // the seed on load, keeping the file small on an endless map.
-        let chunks: Vec<_> = self.world.chunks_iter().filter(|(_, c)| c.dirty).collect();
         wu32(&mut b, chunks.len() as u32);
         for (coord, chunk) in chunks {
             wi32(&mut b, coord.0);
@@ -10448,10 +10560,25 @@ impl Game {
             wf32(&mut b, left);
         }
         wu8(&mut b, rel.ai_may_ally as u8);
+
+        // The wire's transient tail, never written to a save: a save loads
+        // with none of it, as it always has.
+        if let Some(live) = live {
+            let bytes = crate::net::encode(live);
+            wu32(&mut b, bytes.len() as u32);
+            b.extend_from_slice(&bytes);
+        }
         b
     }
 
     pub fn from_bytes(data: &[u8]) -> Option<(Game, CamState)> {
+        let (game, cam, _) = Game::read(data)?;
+        Some((game, cam))
+    }
+
+    /// Parse a save or wire blob: the game, the camera, and the transient
+    /// tail if the blob carried one.
+    fn read(data: &[u8]) -> Option<(Game, CamState, Option<Live>)> {
         let mut r = Reader { d: data, p: 0 };
         if data.get(0..4)? != MAGIC {
             return None;
@@ -10620,6 +10747,7 @@ impl Game {
                 // Provisional; `World::from_saved` re-marks each loaded chunk
                 // by comparing it against what the seed regenerates.
                 dirty: true,
+                rev: 0,
             };
             for _ in 0..n_tiles {
                 chunk.tiles.push(if r.u8()? == 1 {
@@ -10820,7 +10948,12 @@ impl Game {
         first.auto_zones = auto_zones;
         first.bridges = bridges;
         let mut realms = vec![first];
-        if version >= 20 {
+        // The realm section. The first builds to write version 20 (the
+        // per-tile house owner layer) ended the file before it, and the
+        // section came in under the same number, so a version 20 file that
+        // ends here is that earlier layout: one realm, as the header says.
+        let realm_section = version >= 21 || (version == 20 && r.p < data.len());
+        if realm_section {
             let count = r.u8()? as usize;
             let mut saved = Vec::with_capacity(count);
             for _ in 0..count {
@@ -10993,8 +11126,33 @@ impl Game {
             villages: Vec::new(),
             rng: Rng::new(seed as u64 ^ 0xD1B54A32D192ED03),
         };
-        Some((game, cam))
+        // The wire's transient tail, if this is a wire blob (a save ends
+        // with the diplomacy section).
+        let live = if version >= 21 && r.p < data.len() {
+            let len = r.u32()? as usize;
+            let bytes = data.get(r.p..r.p + len)?;
+            crate::net::decode::<Live>(bytes)
+        } else {
+            None
+        };
+        Some((game, cam, live))
     }
+}
+
+/// The transient state a `to_wire` update carries after the save sections:
+/// what a client needs to draw the moment but no save keeps.
+#[derive(Serialize, Deserialize)]
+struct Live {
+    /// The world's edit count the update was taken at.
+    rev: u64,
+    /// Per realm, in seat order.
+    rallies: Vec<Vec<Rally>>,
+    navy_rallies: Vec<Vec<Vec2>>,
+    alerts: Vec<Vec<Alert>>,
+    saplings: Vec<Sapling>,
+    pirates: Vec<Pirate>,
+    cannonballs: Vec<Cannonball>,
+    missiles: Vec<Missile>,
 }
 
 #[cfg(test)]
@@ -11424,6 +11582,37 @@ mod tests {
             loaded.world.houses_of(owner_of(Faction::Realm(0))).len(),
             game.world.houses_of(owner_of(Faction::Realm(0))).len()
         );
+    }
+
+    /// The first builds to write version 20 (the per-tile house owner layer)
+    /// ended the file where the realm section now begins, and that section
+    /// came in under the same version number. Such a file must still load,
+    /// as the one realm its header describes.
+    #[test]
+    fn loads_a_v20_save_written_before_the_realm_section() {
+        let mut game = Game::new(3);
+        game.realm_mut(0).money = 321;
+        game.realm_mut(0).wood = 45;
+        let mut bytes = game.to_bytes(CAM);
+        // The realm and owner sections, and the v21 diplomacy after them.
+        bytes.truncate(bytes.len() - v20_tail_len(&game));
+        bytes[4] = 20;
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("an early v20 save no longer loads");
+        assert_eq!(loaded.realm_count(), 1);
+        assert_eq!(loaded.realm(0).money, 321);
+        assert_eq!(loaded.realm(0).wood, 45);
+        assert_eq!(loaded.houses(0).len(), game.houses(0).len());
+        assert_eq!(loaded.entities.len(), game.entities.len());
+
+        // A version 20 file that does carry the realm section still reads it.
+        let mut bytes = game.to_bytes(CAM);
+        let n = game.realms.len();
+        let rel = &game.diplomacy;
+        let diplomacy = n * n + (4 + 2 * rel.proposals.len()) + (4 + 6 * rel.notices.len()) + 1;
+        bytes.truncate(bytes.len() - diplomacy);
+        bytes[4] = 20;
+        let (loaded, _cam) = Game::from_bytes(&bytes).expect("a later v20 save no longer loads");
+        assert_eq!(loaded.realm(0).money, 321);
     }
 
     #[test]
@@ -12436,6 +12625,65 @@ mod tests {
         let solo = Game::new_match(3, MatchSettings::default());
         assert_eq!(solo.realm_count(), 1);
         assert_eq!(solo.houses(0), Game::new(3).houses(0));
+    }
+
+    /// A wire update carries the chunks edited since the last one plus the
+    /// moment's transient state; folding it into an older copy of the game
+    /// gives the server's game back, flags, alerts and all, with the
+    /// untouched chunks kept.
+    #[test]
+    fn wire_updates_bring_a_client_up_to_date() {
+        // A client lists houses in tile order (it rescans), the server in
+        // the order they were raised.
+        fn sorted(tiles: &[Tile]) -> Vec<Tile> {
+            let mut v = tiles.to_vec();
+            v.sort_unstable();
+            v
+        }
+        let mut server = Game::new(3);
+        let sim = (-200, -200, 200, 200);
+        let first = server.to_wire(0);
+        // Only edited chunks travel; the client regenerates the rest from
+        // the seed, exactly as the server did.
+        let (partial, _, _) = Game::read(&first).expect("first blob parses");
+        assert!(partial.world.chunks_iter().count() < server.world.chunks_iter().count());
+        let mut client = Game::from_wire(&first).expect("first wire blob");
+        client.world.ensure_region(sim.0, sim.1, sim.2, sim.3);
+        assert!(client.world.holds_edits_of(&server.world));
+        assert_eq!(sorted(client.houses(0)), sorted(server.houses(0)));
+        let mut since = client.world_rev();
+
+        // The server plays on: a flag, a build order, some ticks.
+        assert!(server.apply(0, Command::ToggleRally((5, 5))));
+        let spot = find_house_spot(&server);
+        assert!(server.apply(
+            0,
+            Command::Order {
+                tile: spot,
+                kind: SiteKind::House
+            }
+        ));
+        for _ in 0..30 {
+            server.update(0.1, sim);
+        }
+        let update = server.to_wire(since);
+        // Only the chunks that changed travel.
+        let (partial, _, _) = Game::read(&update).expect("update parses");
+        assert!(partial.world.chunks_iter().count() < server.world.chunks_iter().count());
+        since = client.sync(&update).expect("update applies");
+        assert_eq!(since, server.world_rev());
+        assert_eq!(client.realm(0).rallies(), server.realm(0).rallies());
+        assert_eq!(client.entities.len(), server.entities.len());
+        assert_eq!(client.realm(0).wood, server.realm(0).wood);
+        assert_eq!(client.build_sites().len(), server.build_sites().len());
+        assert!(client.world.holds_edits_of(&server.world));
+        assert_eq!(sorted(client.houses(0)), sorted(server.houses(0)));
+        assert_eq!(client.villages().len(), server.villages().len());
+        // A save still ends at the diplomacy section: no transient tail.
+        let save = server.to_bytes(CAM);
+        let (_, _, live) = Game::read(&save).expect("save parses");
+        assert!(live.is_none());
+        assert!(client.sync(&save).is_none(), "a save is not a wire update");
     }
 
     /// A computer-run realm plays through orders: left to itself it switches
