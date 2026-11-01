@@ -51,7 +51,7 @@ const SANDBOX_GAP: f32 = 0.04;
 /// and an enemy raid sail their own faction's hull, drawn as is.
 fn transport_sheet(t: &crate::game::Transport) -> &'static str {
     match t.faction {
-        crate::game::Faction::Player => "cargo_ship",
+        crate::game::Faction::Realm(_) => "cargo_ship",
         crate::game::Faction::Enemy => "enemy_warship",
         crate::game::Faction::Ally => "ally_warship",
     }
@@ -61,8 +61,8 @@ fn transport_sheet(t: &crate::game::Transport) -> &'static str {
 /// (mild for settlers, deeper for troops), none on a faction's own hull.
 fn transport_tint(t: &crate::game::Transport) -> [f32; 4] {
     match t.faction {
-        crate::game::Faction::Player if t.knights > 0 => TROOP_TINT,
-        crate::game::Faction::Player => SETTLER_TINT,
+        crate::game::Faction::Realm(_) if t.knights > 0 => TROOP_TINT,
+        crate::game::Faction::Realm(_) => SETTLER_TINT,
         crate::game::Faction::Enemy | crate::game::Faction::Ally => WHITE,
     }
 }
@@ -72,7 +72,7 @@ fn transport_tint(t: &crate::game::Transport) -> [f32; 4] {
 /// red for a raid.
 fn banner_tint(t: &crate::game::Transport) -> [f32; 4] {
     match t.faction {
-        crate::game::Faction::Player => transport_tint(t),
+        crate::game::Faction::Realm(_) => transport_tint(t),
         crate::game::Faction::Enemy => RAID_TINT,
         crate::game::Faction::Ally => MERC_TINT,
     }
@@ -81,7 +81,7 @@ fn banner_tint(t: &crate::game::Transport) -> [f32; 4] {
 /// The sprite sheet a warship of `faction` is drawn from.
 fn warship_sheet(faction: crate::game::Faction) -> &'static str {
     match faction {
-        crate::game::Faction::Player => "warship",
+        crate::game::Faction::Realm(_) => "warship",
         crate::game::Faction::Enemy => "enemy_warship",
         crate::game::Faction::Ally => "ally_warship",
     }
@@ -90,7 +90,7 @@ fn warship_sheet(faction: crate::game::Faction) -> &'static str {
 /// The fill of a warship's hull bar, in its faction's color.
 fn hull_bar_tint(faction: crate::game::Faction) -> [f32; 4] {
     match faction {
-        crate::game::Faction::Player => [0.3, 0.55, 1.0, 0.95],
+        crate::game::Faction::Realm(_) => [0.3, 0.55, 1.0, 0.95],
         crate::game::Faction::Enemy => [0.9, 0.25, 0.2, 0.95],
         crate::game::Faction::Ally => [0.35, 0.85, 0.4, 0.95],
     }
@@ -693,7 +693,7 @@ impl State {
             let (cx, cy) = self.cursor_tile();
             let mut wash = match game.place_faction {
                 _ if !owned => WHITE,
-                Faction::Player => self.colors.player,
+                Faction::Realm(_) => self.colors.player,
                 Faction::Enemy => self.colors.enemy,
                 Faction::Ally => self.colors.ally,
             };
@@ -718,7 +718,7 @@ impl State {
             let key = (
                 e.pos.x.floor() as i32,
                 e.pos.y.floor() as i32,
-                matches!(e.faction, Faction::Player),
+                matches!(e.faction, Faction::Realm(_)),
                 e.job,
             );
             let count = stack.entry(key).or_insert(0);
@@ -760,7 +760,7 @@ impl State {
                 };
                 out.push(tinted([bx, by], [bw, bh], white, [0.15, 0.0, 0.0, 0.85]));
                 let col = match e.faction {
-                    Faction::Player => [0.3, 0.55, 1.0, 0.95],
+                    Faction::Realm(_) => [0.3, 0.55, 1.0, 0.95],
                     Faction::Ally => [0.25, 0.85, 0.3, 0.95],
                     Faction::Enemy => [0.9, 0.25, 0.2, 0.95],
                 };
@@ -904,7 +904,7 @@ impl State {
             color: WHITE,
         };
         let faction_color = |f: Faction| match f {
-            Faction::Player => c.player,
+            Faction::Realm(_) => c.player,
             Faction::Enemy => c.enemy,
             Faction::Ally => c.ally,
         };
@@ -966,7 +966,7 @@ impl State {
             let h = (v.max.1 - v.min.1) as f32 + 1.0 + 2.0 * pad;
             let base = faction_color(v.faction);
             out.push(solid([x0, y0], [w, h], with_alpha(base, 0.22)));
-            let edge = if v.faction == Faction::Player && v.threatened {
+            let edge = if v.faction == Faction::Realm(0) && v.threatened {
                 let mut e = c.enemy;
                 for (ch, b) in e.iter_mut().zip(base) {
                     *ch = b + (*ch - b) * pulse;
@@ -1247,11 +1247,11 @@ const AXE_SPIN_FPS: f32 = 20.0;
 fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
     // Civilians keep the classic farmer art whatever job they've taken up.
     let sheet = match (e.faction, e.job) {
-        (Faction::Player, Job::Civilian) => "farmer",
-        (Faction::Player, Job::Knight) => "knight",
-        (Faction::Player, Job::Horseman) => "horseman",
-        (Faction::Player, Job::Bowman) => "bowman",
-        (Faction::Player, Job::Axeman) => "axeman",
+        (Faction::Realm(_), Job::Civilian) => "farmer",
+        (Faction::Realm(_), Job::Knight) => "knight",
+        (Faction::Realm(_), Job::Horseman) => "horseman",
+        (Faction::Realm(_), Job::Bowman) => "bowman",
+        (Faction::Realm(_), Job::Axeman) => "axeman",
         (Faction::Enemy, Job::Civilian) => "enemy_farmer",
         (Faction::Enemy, Job::Knight) => "enemy_knight",
         (Faction::Enemy, Job::Horseman) => "enemy_horseman",

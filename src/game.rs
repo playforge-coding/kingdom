@@ -13,7 +13,7 @@ use glam::Vec2;
 
 use crate::grid::Grid;
 use crate::pathfind;
-use crate::world::{CHUNK, Node, Resource, Wall, World};
+use crate::world::{CHUNK, Node, Owner, Resource, Wall, World};
 
 pub type Tile = (i32, i32);
 
@@ -40,28 +40,38 @@ impl Rng {
     }
 }
 
+/// Index of an empire in `Game::realms`. Realm 0 is the player of a
+/// single-player game.
+pub type RealmId = u8;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Faction {
-    Player,
+    /// An empire run on the player's rules, whether a human or the computer
+    /// is in charge of it: it gathers, builds, trades and recruits the way
+    /// the player does. The id indexes `Game::realms`.
+    Realm(RealmId),
+    /// The computer's rival camps: villages that grow, bud and raid on their
+    /// own clock, at war with every realm and with the allies.
     Enemy,
-    /// A friendly third faction: the player's trade partner. Allies fight the
-    /// enemy on their own initiative but never join the player's battles, and
-    /// the player and allies never fight each other.
+    /// A friendly third faction: the realms' trade partner. Allies fight the
+    /// enemy on their own initiative but never join a realm's battles, and
+    /// realms and allies never fight each other.
     Ally,
 }
 
-/// The only truly hostile faction is the Enemy: it is at war with both the
-/// player and the allies, while player and allies stay at peace. So two
-/// factions clash exactly when precisely one of them is the Enemy.
+/// Who fights whom. The Enemy is at war with everyone else; realms and
+/// allies stay at peace; and two realms are at war with each other unless
+/// they are one and the same.
 fn hostile(a: Faction, b: Faction) -> bool {
-    (a == Faction::Enemy) != (b == Faction::Enemy)
+    match (a, b) {
+        (Faction::Realm(x), Faction::Realm(y)) => x != y,
+        _ => (a == Faction::Enemy) != (b == Faction::Enemy),
+    }
 }
 
-/// Hostility between two building owners (0 = player, 1 = enemy, 2 = ally),
-/// mirroring [`hostile`]: only enemy-owned structures are fair game, and only to
-/// non-enemies.
-fn owner_hostile(a: u8, b: u8) -> bool {
-    (a == owner_of(Faction::Enemy)) != (b == owner_of(Faction::Enemy))
+/// Hostility between two building owners, mirroring [`hostile`].
+fn owner_hostile(a: Owner, b: Owner) -> bool {
+    hostile(faction_of(a), faction_of(b))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -382,7 +392,7 @@ fn max_hp_for(faction: Faction, job: Job) -> f32 {
         (_, Job::Horseman) => 90.0,
         (_, Job::Bowman) => 40.0,
         (_, Job::Axeman) => 80.0,
-        (Faction::Player, Job::Civilian) => 28.0,
+        (Faction::Realm(_), Job::Civilian) => 28.0,
         (Faction::Enemy, Job::Civilian) => 22.0,
         (Faction::Ally, Job::Civilian) => 24.0,
     }
@@ -1148,19 +1158,26 @@ const DANGER_RADIUS: f32 = 6.0;
 /// A hut lets its occupants back out once no enemy is within this range.
 const HUT_SAFE_RADIUS: f32 = 9.0;
 
-fn owner_of(f: Faction) -> u8 {
+/// The owner byte the world files a faction's structures under: 0 for the
+/// first realm, 1 for the enemy, 2 for the allies, and 3 upward for every
+/// further realm. Saves store factions as this byte too, so a save from
+/// before there were further realms reads back unchanged.
+pub const fn owner_of(f: Faction) -> Owner {
     match f {
-        Faction::Player => 0,
+        Faction::Realm(0) => 0,
         Faction::Enemy => 1,
         Faction::Ally => 2,
+        Faction::Realm(r) => r + 2,
     }
 }
 
-fn faction_of(owner: u8) -> Faction {
+/// The inverse of [`owner_of`].
+pub const fn faction_of(owner: Owner) -> Faction {
     match owner {
+        0 => Faction::Realm(0),
         1 => Faction::Enemy,
         2 => Faction::Ally,
-        _ => Faction::Player,
+        r => Faction::Realm(r - 2),
     }
 }
 
@@ -1608,7 +1625,7 @@ impl Warship {
 fn warship_max_hp(faction: Faction) -> f32 {
     match faction {
         Faction::Enemy => ENEMY_WARSHIP_MAX_HP,
-        Faction::Player | Faction::Ally => WARSHIP_MAX_HP,
+        Faction::Realm(_) | Faction::Ally => WARSHIP_MAX_HP,
     }
 }
 
@@ -2070,7 +2087,7 @@ impl Game {
                 .iter()
                 .all(|&(hx, hy)| (hx - x).abs().max((hy - y).abs()) >= 2);
             if spaced {
-                world.set_house(x, y, owner_of(Faction::Player));
+                world.set_house(x, y, owner_of(Faction::Realm(0)));
                 player_house_tiles.push((x, y));
             }
         }
@@ -2086,7 +2103,7 @@ impl Game {
         let spawns = open_tiles_near(&world, anchor.0, anchor.1, 8);
         for (k, &t) in spawns.iter().step_by(3).take(6).enumerate() {
             let job = if k < 4 { Job::Civilian } else { Job::Knight };
-            entities.push(Entity::new(Faction::Player, job, t));
+            entities.push(Entity::new(Faction::Realm(0), job, t));
         }
 
         // Enemy settlements: several villages scattered around the map, each
@@ -2199,7 +2216,7 @@ impl Game {
         world.ensure_region(-ENSURE_MARGIN, -ENSURE_MARGIN, ENSURE_MARGIN, ENSURE_MARGIN);
         let mut game = Game::assemble(world, Vec::new(), Some(HashSet::default()), 0);
         game.sandbox_tool = SandboxTool::PlaceUnit;
-        game.place_faction = Faction::Player;
+        game.place_faction = Faction::Realm(0);
         game.place_job = Job::Knight;
         game
     }
@@ -2237,7 +2254,7 @@ impl Game {
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
             build_mode: BuildMode::House,
             sandbox_tool: SandboxTool::PlaceUnit,
-            place_faction: Faction::Player,
+            place_faction: Faction::Realm(0),
             place_job: Job::Knight,
             place_brush: Brush::Wall,
             priority: Priority::Agriculture,
@@ -2285,24 +2302,24 @@ impl Game {
     /// Where the camera should open on a fresh world: the center of the
     /// player's starting village (now planted on the coast, away from origin).
     pub fn start_center(&self) -> Vec2 {
-        if self.world.houses_of(owner_of(Faction::Player)).is_empty() {
+        if self.world.houses_of(owner_of(Faction::Realm(0))).is_empty() {
             return Vec2::ZERO;
         }
         let (sx, sy) = self
             .world
-            .houses_of(owner_of(Faction::Player))
+            .houses_of(owner_of(Faction::Realm(0)))
             .iter()
             .fold((0i64, 0i64), |(ax, ay), &(x, y)| {
                 (ax + x as i64, ay + y as i64)
             });
-        let n = self.world.houses_of(owner_of(Faction::Player)).len() as f32;
+        let n = self.world.houses_of(owner_of(Faction::Realm(0))).len() as f32;
         Vec2::new(sx as f32 / n + 0.5, sy as f32 / n + 0.5)
     }
 
     pub fn population(&self) -> usize {
         self.entities
             .iter()
-            .filter(|e| e.faction == Faction::Player)
+            .filter(|e| e.faction == Faction::Realm(0))
             .count()
     }
     fn enemy_count(&self) -> usize {
@@ -2342,14 +2359,14 @@ impl Game {
         let per_village: usize = self
             .villages
             .iter()
-            .filter(|v| v.faction == Faction::Player)
+            .filter(|v| v.faction == Faction::Realm(0))
             .map(|v| v.cap)
             .sum();
         let cap = if per_village > 0 {
             per_village
         } else {
             VILLAGE_POP_BASE
-                + self.world.houses_of(owner_of(Faction::Player)).len() * VILLAGE_POP_PER_HOUSE
+                + self.world.houses_of(owner_of(Faction::Realm(0))).len() * VILLAGE_POP_PER_HOUSE
         };
         cap.min(PLAYER_POP_MAX)
     }
@@ -2358,7 +2375,7 @@ impl Game {
     /// player already controls (their village or a house they built)?
     pub fn near_player_house(&self, x: i32, y: i32) -> bool {
         self.world
-            .houses_of(owner_of(Faction::Player))
+            .houses_of(owner_of(Faction::Realm(0)))
             .iter()
             .any(|&(hx, hy)| {
                 (hx - x).abs() <= BUILD_NEAR_RADIUS && (hy - y).abs() <= BUILD_NEAR_RADIUS
@@ -2370,7 +2387,7 @@ impl Game {
     /// random far-off stretch of coast.
     pub fn near_player_dock(&self, x: i32, y: i32) -> bool {
         self.world
-            .houses_of(owner_of(Faction::Player))
+            .houses_of(owner_of(Faction::Realm(0)))
             .iter()
             .any(|&(hx, hy)| {
                 (hx - x).abs() <= SHIP_NEAR_RADIUS && (hy - y).abs() <= SHIP_NEAR_RADIUS
@@ -2494,7 +2511,7 @@ impl Game {
         // Not on the testing ground, where there is no village to fall back
         // to and a lone knight is the whole point.
         let player_under =
-            !sandbox && self.civilian_count(Faction::Player) <= MIN_CIVILIANS_TO_GROW;
+            !sandbox && self.civilian_count(Faction::Realm(0)) <= MIN_CIVILIANS_TO_GROW;
         let enemy_under = !sandbox && self.civilian_count(Faction::Enemy) <= MIN_CIVILIANS_TO_GROW;
         let ally_under = !sandbox && self.civilian_count(Faction::Ally) <= MIN_CIVILIANS_TO_GROW;
         let pref = self.gather_priority.preferred();
@@ -2682,7 +2699,7 @@ impl Game {
             // A hut under attack with civilians inside raises an alarm flag
             // that rallies the knights nearby to save them.
             if let Some(h) = self.world.hut(tile.0, tile.1)
-                && h.owner == owner_of(Faction::Player)
+                && h.owner == owner_of(Faction::Realm(0))
                 && h.occupants > 0
             {
                 self.raise_rally(tile_center(tile), Some(AUTO_RALLY_RADIUS));
@@ -2691,7 +2708,7 @@ impl Game {
             if let Some(hut) = self.world.damage_hut(tile.0, tile.1, dmg) {
                 // Razed with civilians still inside, so they're lost with it.
                 let trapped = hut.occupants as u32;
-                if hut.owner == owner_of(Faction::Player) {
+                if hut.owner == owner_of(Faction::Realm(0)) {
                     self.units_lost += trapped;
                 } else if hut.owner == owner_of(Faction::Enemy) {
                     self.enemies_defeated += trapped;
@@ -2708,7 +2725,7 @@ impl Game {
             let Some(adt) = step_dt[i] else { continue };
             let faction = self.entities[i].faction;
             let under = match faction {
-                Faction::Player => player_under,
+                Faction::Realm(_) => player_under,
                 Faction::Enemy => enemy_under,
                 Faction::Ally => ally_under,
             };
@@ -2718,8 +2735,9 @@ impl Game {
                 // work for until a house of yours is painted down, so until
                 // then it gets no farm context and putters about like any
                 // other villager (see `ai_step`).
-                (Faction::Player, Job::Civilian)
-                    if !sandbox || !self.world.houses_of(owner_of(Faction::Player)).is_empty() =>
+                (Faction::Realm(_), Job::Civilian)
+                    if !sandbox
+                        || !self.world.houses_of(owner_of(Faction::Realm(0))).is_empty() =>
                 {
                     let mut farm = FarmCtx {
                         caves: &self.cave_tiles,
@@ -2738,7 +2756,7 @@ impl Game {
                         acting[i],
                         close_foe[i],
                         under,
-                        self.world.houses_of(owner_of(Faction::Player)),
+                        self.world.houses_of(owner_of(Faction::Realm(0))),
                         pref,
                         rally,
                         &self.hut_tiles,
@@ -2747,7 +2765,7 @@ impl Game {
                         adt,
                     )
                 }
-                (Faction::Player, _) => ai_step(
+                (Faction::Realm(_), _) => ai_step(
                     &self.world,
                     &mut self.entities[i],
                     &mut self.rng,
@@ -2756,7 +2774,7 @@ impl Game {
                     acting[i],
                     close_foe[i],
                     under,
-                    self.world.houses_of(owner_of(Faction::Player)),
+                    self.world.houses_of(owner_of(Faction::Realm(0))),
                     pref,
                     rally,
                     &self.hut_tiles,
@@ -2891,7 +2909,7 @@ impl Game {
             if self.entities[i].hp <= 0.0 {
                 match self.entities[i].faction {
                     Faction::Enemy => self.enemies_defeated += 1,
-                    Faction::Player => self.units_lost += 1,
+                    Faction::Realm(_) => self.units_lost += 1,
                     Faction::Ally => {}
                 }
                 self.entities.swap_remove(i);
@@ -3140,10 +3158,10 @@ impl Game {
             if self.population() >= self.pop_cap() {
                 break;
             }
-            let Some((t, _)) = self.spawn_site(Faction::Player) else {
+            let Some((t, _)) = self.spawn_site(Faction::Realm(0)) else {
                 break;
             };
-            let mut e = Entity::new(Faction::Player, Job::Civilian, t);
+            let mut e = Entity::new(Faction::Realm(0), Job::Civilian, t);
             e.origin = Faction::Ally;
             self.entities.push(e);
             at.get_or_insert(tile_center(t));
@@ -3243,7 +3261,7 @@ impl Game {
                 }
             }
             for &(x, y) in &houses {
-                self.world.set_house(x, y, owner_of(Faction::Player));
+                self.world.set_house(x, y, owner_of(Faction::Realm(0)));
             }
         }
         // Everyone steps ashore beside the new houses (or onto the anchor tile
@@ -3256,7 +3274,8 @@ impl Game {
                 .copied()
                 .unwrap_or(s.anchor);
             let spot = adjacent_walkable(&self.world, home.0, home.1).unwrap_or(s.anchor);
-            self.entities.push(Entity::new(Faction::Player, job, spot));
+            self.entities
+                .push(Entity::new(Faction::Realm(0), job, spot));
         }
         if reinforcing {
             log::info!("settlers landed at ({ax}, {ay}) and joined the standing village");
@@ -3354,7 +3373,7 @@ impl Game {
             .entities
             .iter()
             .enumerate()
-            .filter(|(_, e)| (e.faction == Faction::Player || e.mercenary) && e.is_soldier())
+            .filter(|(_, e)| (e.faction == Faction::Realm(0) || e.mercenary) && e.is_soldier())
             .map(|(i, _)| i)
             .collect();
         let units: Vec<Vec2> = answering.iter().map(|&i| self.entities[i].pos).collect();
@@ -3483,7 +3502,7 @@ impl Game {
                     let e = self.entities.swap_remove(ei);
                     match e.faction {
                         Faction::Enemy => self.enemies_defeated += 1,
-                        Faction::Player => self.units_lost += 1,
+                        Faction::Realm(_) => self.units_lost += 1,
                         Faction::Ally => {}
                     }
                 }
@@ -3614,7 +3633,7 @@ impl Game {
     fn resolve_shot(&mut self, bp: Vec2, r2: f32, gunner: Gunner) -> bool {
         // Cargo ships are the player's and unarmed: one hit sinks hull and
         // cargo together.
-        if gunner.harms(Faction::Player)
+        if gunner.harms(Faction::Realm(0))
             && let Some(si) = self
                 .ships
                 .iter()
@@ -3643,7 +3662,7 @@ impl Game {
             };
             log::info!("a transport was sunk, all souls lost at sea!");
             self.push_alert(kind, s.pos);
-            if s.faction == Faction::Player {
+            if s.faction == Faction::Realm(0) {
                 self.units_lost += s.civilians + s.knights;
             }
             return true;
@@ -3657,7 +3676,7 @@ impl Game {
             if self.warships[wi].hp <= 0.0 {
                 let w = self.warships.swap_remove(wi);
                 let kind = match w.faction {
-                    Faction::Player => AlertKind::WarshipSunk,
+                    Faction::Realm(_) => AlertKind::WarshipSunk,
                     Faction::Enemy => AlertKind::EnemyShipSunk,
                     Faction::Ally => AlertKind::EscortSunk,
                 };
@@ -3693,7 +3712,7 @@ impl Game {
                 let e = self.entities.swap_remove(ei);
                 match e.faction {
                     Faction::Enemy => self.enemies_defeated += 1,
-                    Faction::Player => self.units_lost += 1,
+                    Faction::Realm(_) => self.units_lost += 1,
                     Faction::Ally => {}
                 }
             }
@@ -3811,7 +3830,7 @@ impl Game {
             // over answers its own goal when no flag stands), the ship's own
             // goal for the enemy's.
             let orders = match faction {
-                Faction::Player => orders_of[i],
+                Faction::Realm(_) => orders_of[i],
                 Faction::Ally => orders_of[i].or(self.warships[i].goal),
                 Faction::Enemy => self.warships[i].goal,
             };
@@ -3965,7 +3984,7 @@ impl Game {
         let knights: Vec<Vec2> = self
             .entities
             .iter()
-            .filter(|e| (e.faction == Faction::Player || e.mercenary) && e.is_soldier())
+            .filter(|e| (e.faction == Faction::Realm(0) || e.mercenary) && e.is_soldier())
             .map(|e| e.pos)
             .collect();
         self.rallies.retain(|r| {
@@ -3984,36 +4003,36 @@ impl Game {
         // Enemy villages overrun by the player. Only the player can take enemy
         // ground; an allied unit passing through never flips it.
         for village in cluster(self.world.houses_of(owner_of(Faction::Enemy))) {
-            if self.village_taken(&village, Faction::Enemy, Faction::Player) {
+            if self.village_taken(&village, Faction::Enemy, Faction::Realm(0)) {
                 for &(x, y) in &village {
-                    self.world.set_house(x, y, owner_of(Faction::Player));
+                    self.world.set_house(x, y, owner_of(Faction::Realm(0)));
                     self.world.reown_walls_near(
                         x,
                         y,
                         4,
                         owner_of(Faction::Enemy),
-                        owner_of(Faction::Player),
+                        owner_of(Faction::Realm(0)),
                     );
                 }
                 let center = village_center(&village);
                 self.push_alert(AlertKind::VillageCaptured, center);
                 self.settle_captured_village(&village);
-                if self.incorporate_civilians(center, Faction::Enemy, Faction::Player) > 0 {
+                if self.incorporate_civilians(center, Faction::Enemy, Faction::Realm(0)) > 0 {
                     self.push_alert(AlertKind::PeopleIncorporated, center);
                 }
             }
         }
         // Player villages overrun by the enemy.
-        let player_tiles = self.world.houses_of(owner_of(Faction::Player)).to_vec();
+        let player_tiles = self.world.houses_of(owner_of(Faction::Realm(0))).to_vec();
         for village in cluster(&player_tiles) {
-            if self.village_taken(&village, Faction::Player, Faction::Enemy) {
+            if self.village_taken(&village, Faction::Realm(0), Faction::Enemy) {
                 for &(x, y) in &village {
                     self.world.set_house(x, y, owner_of(Faction::Enemy));
                     self.world.reown_walls_near(
                         x,
                         y,
                         4,
-                        owner_of(Faction::Player),
+                        owner_of(Faction::Realm(0)),
                         owner_of(Faction::Enemy),
                     );
                 }
@@ -4023,7 +4042,7 @@ impl Game {
                 let center = village_center(&village);
                 self.raise_rally(center, Some(AUTO_RALLY_RADIUS));
                 self.push_alert(AlertKind::VillageLost, center);
-                if self.incorporate_civilians(center, Faction::Player, Faction::Enemy) > 0 {
+                if self.incorporate_civilians(center, Faction::Realm(0), Faction::Enemy) > 0 {
                     self.push_alert(AlertKind::PeopleLost, center);
                 }
                 log::info!("village lost, knights rallying to retake it");
@@ -4055,7 +4074,7 @@ impl Game {
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                e.faction == Faction::Player
+                e.faction == Faction::Realm(0)
                     && e.is_soldier()
                     && !e.levy
                     && village
@@ -4182,8 +4201,8 @@ impl Game {
         let mut villages = Vec::new();
         for (faction, tiles) in [
             (
-                Faction::Player,
-                &self.world.houses_of(owner_of(Faction::Player)),
+                Faction::Realm(0),
+                &self.world.houses_of(owner_of(Faction::Realm(0))),
             ),
             (
                 Faction::Enemy,
@@ -4202,7 +4221,7 @@ impl Game {
                     .iter()
                     .fold((i32::MIN, i32::MIN), |m, &(x, y)| (m.0.max(x), m.1.max(y)));
                 let cap = match faction {
-                    Faction::Player => VILLAGE_POP_BASE + houses.len() * VILLAGE_POP_PER_HOUSE,
+                    Faction::Realm(_) => VILLAGE_POP_BASE + houses.len() * VILLAGE_POP_PER_HOUSE,
                     Faction::Enemy => enemy_village_cap(houses.len()),
                     Faction::Ally => ALLY_VILLAGE_POP,
                 };
@@ -4260,7 +4279,7 @@ impl Game {
         }
         let under_attack: Vec<Vec2> = villages
             .iter()
-            .filter(|v| v.faction == Faction::Player && v.threatened)
+            .filter(|v| v.faction == Faction::Realm(0) && v.threatened)
             .map(|v| v.center)
             .collect();
         for c in under_attack {
@@ -4392,7 +4411,7 @@ impl Game {
     /// The first open-water tile in the home harbor (within `SHIP_NEAR_RADIUS`
     /// of one of the player's houses), where a summoned warship can launch.
     fn harbor_water(&self) -> Option<Tile> {
-        for &(hx, hy) in self.world.houses_of(owner_of(Faction::Player)) {
+        for &(hx, hy) in self.world.houses_of(owner_of(Faction::Realm(0))) {
             for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                 for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                     let t = (hx + dx, hy + dy);
@@ -4406,7 +4425,7 @@ impl Game {
     }
 
     pub fn player_houses(&self) -> &[Tile] {
-        self.world.houses_of(owner_of(Faction::Player))
+        self.world.houses_of(owner_of(Faction::Realm(0)))
     }
 
     /// Every hut on the map, all factions.
@@ -4520,7 +4539,7 @@ impl Game {
         let (min, max) = (self.villages[pick].min, self.villages[pick].max);
         let big = self.villages[pick].houses >= CAMP_HORSEMAN_MIN_HOUSES;
         let houses: Vec<Tile> = match faction {
-            Faction::Player => self.world.houses_of(owner_of(Faction::Player)),
+            Faction::Realm(_) => self.world.houses_of(owner_of(Faction::Realm(0))),
             Faction::Enemy => self.world.houses_of(owner_of(Faction::Enemy)),
             Faction::Ally => self.world.houses_of(owner_of(Faction::Ally)),
         }
@@ -4609,10 +4628,10 @@ impl Game {
 
         self.player_spawn_timer -= dt;
         if self.player_spawn_timer <= 0.0 {
-            let civilians = self.civilian_count(Faction::Player);
+            let civilians = self.civilian_count(Faction::Realm(0));
             self.player_spawn_timer = spawn_interval(PLAYER_SPAWN_INTERVAL, civilians);
             if self.population() < self.pop_cap()
-                && let Some((t, _)) = self.spawn_site(Faction::Player)
+                && let Some((t, _)) = self.spawn_site(Faction::Realm(0))
             {
                 // Agriculture favors civilians (2:1); Military favors
                 // knights (1:2). Both still raise some of each.
@@ -4644,11 +4663,13 @@ impl Game {
                 // afford the horse, one light on bowmen raises a bowman when
                 // it can afford the bow, and likewise for axemen.
                 if job == Job::Knight && self.priority == Priority::Military {
-                    if self.money >= HORSEMAN_GOLD_COST && self.wants_horseman(Faction::Player) {
+                    if self.money >= HORSEMAN_GOLD_COST && self.wants_horseman(Faction::Realm(0)) {
                         job = Job::Horseman;
-                    } else if self.money >= BOWMAN_GOLD_COST && self.wants_bowman(Faction::Player) {
+                    } else if self.money >= BOWMAN_GOLD_COST && self.wants_bowman(Faction::Realm(0))
+                    {
                         job = Job::Bowman;
-                    } else if self.money >= AXEMAN_GOLD_COST && self.wants_axeman(Faction::Player) {
+                    } else if self.money >= AXEMAN_GOLD_COST && self.wants_axeman(Faction::Realm(0))
+                    {
                         job = Job::Axeman;
                     }
                 }
@@ -4667,7 +4688,7 @@ impl Game {
                     job = Job::Civilian;
                 }
                 self.player_spawn_cycle += 1;
-                self.entities.push(Entity::new(Faction::Player, job, t));
+                self.entities.push(Entity::new(Faction::Realm(0), job, t));
             }
         }
 
@@ -4743,7 +4764,7 @@ impl Game {
         };
         spaced(self.world.houses_of(owner_of(Faction::Enemy)))
             && spaced(self.world.houses_of(owner_of(Faction::Ally)))
-            && spaced(self.world.houses_of(owner_of(Faction::Player)))
+            && spaced(self.world.houses_of(owner_of(Faction::Realm(0))))
     }
 
     /// Like `village_spot_clear`, but only against enemy and allied houses:
@@ -4763,7 +4784,7 @@ impl Game {
     /// landing here join the standing village instead of founding a new one.
     fn near_player_village(&self, anchor: Tile) -> bool {
         self.world
-            .houses_of(owner_of(Faction::Player))
+            .houses_of(owner_of(Faction::Realm(0)))
             .iter()
             .any(|&(hx, hy)| (hx - anchor.0).abs().max((hy - anchor.1).abs()) <= REINFORCE_RADIUS)
     }
@@ -4774,7 +4795,7 @@ impl Game {
         if self.home_continent.is_none() {
             let seed_tile = self
                 .world
-                .houses_of(owner_of(Faction::Player))
+                .houses_of(owner_of(Faction::Realm(0)))
                 .iter()
                 .min_by_key(|(x, y)| x.abs() + y.abs())
                 .copied()
@@ -4938,7 +4959,7 @@ impl Game {
             Faction::Enemy => self
                 .villages
                 .iter()
-                .filter(|v| v.faction == Faction::Player)
+                .filter(|v| v.faction == Faction::Realm(0))
                 .map(|v| v.center)
                 .min_by(|a, b| {
                     a.distance_squared(center)
@@ -5399,7 +5420,7 @@ impl Game {
         let mut counts = (0, 0, 0);
         for e in &self.entities {
             match e.faction {
-                Faction::Player => counts.0 += 1,
+                Faction::Realm(_) => counts.0 += 1,
                 Faction::Enemy => counts.1 += 1,
                 Faction::Ally => counts.2 += 1,
             }
@@ -5448,7 +5469,7 @@ impl Game {
         {
             return refuse(self, LaunchRefusal::Stockpile);
         }
-        if self.civilian_count(Faction::Player) < SETTLER_CIVILIANS + SETTLER_CIVILIANS_SPARED {
+        if self.civilian_count(Faction::Realm(0)) < SETTLER_CIVILIANS + SETTLER_CIVILIANS_SPARED {
             return refuse(self, LaunchRefusal::Civilians);
         }
         let Some(anchor) = find_land_anchor(&mut self.world, t, SETTLE_ANCHOR_RADIUS) else {
@@ -5480,7 +5501,7 @@ impl Game {
             .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
         self.transports.push(Transport {
             pos: start,
-            faction: Faction::Player,
+            faction: Faction::Realm(0),
             path,
             path_cursor: 0,
             anchor,
@@ -5517,7 +5538,7 @@ impl Game {
         let standing = self
             .entities
             .iter()
-            .filter(|e| e.faction == Faction::Player && e.job == Job::Knight && !e.levy)
+            .filter(|e| e.faction == Faction::Realm(0) && e.job == Job::Knight && !e.levy)
             .count();
         if standing < TROOP_KNIGHTS {
             return refuse(self, LaunchRefusal::Knights);
@@ -5541,7 +5562,7 @@ impl Game {
             .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
         self.transports.push(Transport {
             pos: start,
-            faction: Faction::Player,
+            faction: Faction::Realm(0),
             path,
             path_cursor: 0,
             anchor,
@@ -5563,7 +5584,7 @@ impl Game {
             .entities
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.faction == Faction::Player && e.job == Job::Knight && !e.levy)
+            .filter(|(_, e)| e.faction == Faction::Realm(0) && e.job == Job::Knight && !e.levy)
             .map(|(i, _)| i)
             .collect();
         aboard.sort_by(|&a, &b| {
@@ -5601,7 +5622,7 @@ impl Game {
     fn collect_docks(&mut self) -> Vec<Tile> {
         let mut seen: HashSet<Tile> = HashSet::default();
         let mut docks = Vec::new();
-        let houses = self.world.houses_of(owner_of(Faction::Player)).to_vec();
+        let houses = self.world.houses_of(owner_of(Faction::Realm(0))).to_vec();
         for (hx, hy) in houses {
             self.world.ensure_region(
                 hx - SHIP_NEAR_RADIUS,
@@ -5630,7 +5651,9 @@ impl Game {
             .entities
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.faction == Faction::Player && e.job == Job::Civilian && !e.sheltered)
+            .filter(|(_, e)| {
+                e.faction == Faction::Realm(0) && e.job == Job::Civilian && !e.sheltered
+            })
             .map(|(i, _)| i)
             .collect();
         aboard.sort_by(|&a, &b| {
@@ -5669,7 +5692,7 @@ impl Game {
     /// village saying why, when no other village can spare anyone or neither
     /// road nor sea reaches it.
     pub fn call_settlers(&mut self, center: Vec2) -> bool {
-        let villages = cluster(self.world.houses_of(owner_of(Faction::Player)));
+        let villages = cluster(self.world.houses_of(owner_of(Faction::Realm(0))));
         let centers: Vec<Vec2> = villages.iter().map(|v| village_center(v)).collect();
         let Some(target) = (0..villages.len()).min_by(|&a, &b| {
             centers[a]
@@ -5689,7 +5712,7 @@ impl Game {
         let attr2 = VILLAGE_ATTRIBUTION_RADIUS * VILLAGE_ATTRIBUTION_RADIUS;
         let mut people: Vec<Vec<usize>> = vec![Vec::new(); villages.len()];
         for (i, e) in self.entities.iter().enumerate() {
-            if e.faction != Faction::Player
+            if e.faction != Faction::Realm(0)
                 || e.job != Job::Civilian
                 || e.sheltered
                 || e.migrate_to.is_some()
@@ -5727,7 +5750,7 @@ impl Game {
         // Over land: the party walks from the first village a road joins to
         // this one, as long as no enemy lies along it. The ones nearest the
         // destination answer the call.
-        let owner = owner_of(Faction::Player);
+        let owner = owner_of(Faction::Realm(0));
         let mut road_held = false;
         for &k in &sources {
             let mut party = people[k].clone();
@@ -5835,7 +5858,7 @@ impl Game {
                 .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - start));
             self.transports.push(Transport {
                 pos: start,
-                faction: Faction::Player,
+                faction: Faction::Realm(0),
                 path,
                 path_cursor: 0,
                 anchor,
@@ -5864,7 +5887,7 @@ impl Game {
         let threats: Vec<Tile> = self
             .entities
             .iter()
-            .filter(|e| e.is_soldier() && hostile(e.faction, Faction::Player))
+            .filter(|e| e.is_soldier() && hostile(e.faction, Faction::Realm(0)))
             .map(|e| e.tile())
             .chain(
                 self.world
@@ -5891,11 +5914,11 @@ impl Game {
         let mut arrived: Vec<Tile> = Vec::new();
         for e in &mut self.entities {
             let Some(dest) = e.migrate_to else { continue };
-            if e.faction != Faction::Player
+            if e.faction != Faction::Realm(0)
                 || e.job != Job::Civilian
                 || !self
                     .world
-                    .houses_of(owner_of(Faction::Player))
+                    .houses_of(owner_of(Faction::Realm(0)))
                     .contains(&dest)
             {
                 e.migrate_to = None;
@@ -5925,7 +5948,7 @@ impl Game {
         self.stone -= WARSHIP_STONE_COST;
         self.money -= WARSHIP_GOLD_COST;
         self.warships
-            .push(Warship::new(Faction::Player, tile_center(spot)));
+            .push(Warship::new(Faction::Realm(0), tile_center(spot)));
     }
 
     /// While the autonomous-trade switch is on, keep the harbor busy: on each
@@ -5970,7 +5993,7 @@ impl Game {
     fn plan_harbor_route(&mut self) -> Option<(Tile, Vec<Tile>)> {
         let allies = self.world.houses_of(owner_of(Faction::Ally)).to_vec();
         let mine: Vec<usize> = (0..self.villages.len())
-            .filter(|&i| self.villages[i].faction == Faction::Player)
+            .filter(|&i| self.villages[i].faction == Faction::Realm(0))
             .collect();
         let mut coastal: Vec<Vec<Tile>> = Vec::new();
         for i in mine {
@@ -5999,7 +6022,7 @@ impl Game {
         let (min, max) = (v.min, v.max);
         let houses: Vec<Tile> = self
             .world
-            .houses_of(owner_of(Faction::Player))
+            .houses_of(owner_of(Faction::Realm(0)))
             .iter()
             .copied()
             .filter(|&(x, y)| x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1)
@@ -6100,7 +6123,7 @@ impl Game {
             SiteKind::House => {
                 let ok = self.world.is_open_grass(x, y);
                 if ok {
-                    self.world.set_house(x, y, owner_of(Faction::Player));
+                    self.world.set_house(x, y, owner_of(Faction::Realm(0)));
                 }
                 ok
             }
@@ -6124,7 +6147,7 @@ impl Game {
                 let ok = self.world.is_open_grass(x, y);
                 if ok {
                     self.world
-                        .set_wall(x, y, owner_of(Faction::Player), WALL_MAX_HP);
+                        .set_wall(x, y, owner_of(Faction::Realm(0)), WALL_MAX_HP);
                 }
                 ok
             }
@@ -6132,7 +6155,7 @@ impl Game {
                 let ok = self.world.node(x, y).map(|n| n.kind) == Some(Resource::Wood);
                 if ok {
                     self.world
-                        .set_hut(x, y, owner_of(Faction::Player), HUT_MAX_HP);
+                        .set_hut(x, y, owner_of(Faction::Realm(0)), HUT_MAX_HP);
                     self.hut_tiles.push((x, y));
                 }
                 ok
@@ -6186,7 +6209,7 @@ impl Game {
                     }
                     let spaced = self
                         .world
-                        .houses_of(owner_of(Faction::Player))
+                        .houses_of(owner_of(Faction::Realm(0)))
                         .iter()
                         .all(|&(hx, hy)| (hx - t.0).abs().max((hy - t.1).abs()) >= 2);
                     if !spaced {
@@ -6225,7 +6248,7 @@ impl Game {
     pub fn role_counts(&self) -> (usize, usize, usize) {
         let mut counts = (0, 0, 0);
         for e in &self.entities {
-            if e.faction != Faction::Player || e.job != Job::Civilian {
+            if e.faction != Faction::Realm(0) || e.job != Job::Civilian {
                 continue;
             }
             match e.role() {
@@ -6503,7 +6526,7 @@ impl Game {
         let mut targets: Vec<usize> = Vec::new();
         let mut fewest = usize::MAX;
         for (i, v) in self.villages.iter().enumerate() {
-            if v.faction != Faction::Player {
+            if v.faction != Faction::Realm(0) {
                 continue;
             }
             if v.knights < fewest {
@@ -6638,17 +6661,17 @@ impl Game {
         self.levy_term = LEVY_SERVICE;
         self.levy_quiet = 0.0;
         for i in 0..self.entities.len() {
-            if self.civilian_count(Faction::Player) <= MIN_CIVILIANS_TO_GROW + 1 {
+            if self.civilian_count(Faction::Realm(0)) <= MIN_CIVILIANS_TO_GROW + 1 {
                 break;
             }
             let e = &self.entities[i];
-            if e.faction != Faction::Player || e.job != Job::Civilian {
+            if e.faction != Faction::Realm(0) || e.job != Job::Civilian {
                 continue;
             }
             let e = &mut self.entities[i];
             e.levy = true;
             e.job = Job::Knight;
-            e.max_hp = max_hp_for(Faction::Player, Job::Knight);
+            e.max_hp = max_hp_for(Faction::Realm(0), Job::Knight);
             e.hp = e.max_hp;
             // Shed any work state so the fresh recruit acts as a soldier.
             e.mine_target = None;
@@ -6685,7 +6708,7 @@ impl Game {
         let threatened = self
             .villages
             .iter()
-            .any(|v| v.faction == Faction::Player && v.threatened);
+            .any(|v| v.faction == Faction::Realm(0) && v.threatened);
         if self.levy_term > 0.0 || threatened {
             self.levy_quiet = 0.0;
             return;
@@ -6770,7 +6793,7 @@ fn ai_step(
         // A civilian of the player's works the village when handed a farm
         // context. Without one (the testing ground, where there is no village
         // to work) it shelters and wanders like any other villager below.
-        (Faction::Player, Job::Civilian) if farm.is_some() => {
+        (Faction::Realm(_), Job::Civilian) if farm.is_some() => {
             let farm = farm.expect("checked above");
             gather_behavior(world, e, owner, pref, home, farm, snap, grid, rng, dt)
         }
@@ -7138,7 +7161,16 @@ fn gather_behavior(
     let here = e.tile();
 
     // Survival first: if the enemy's near, drop everything and hide in a hut.
-    if let Some(ev) = seek_shelter(world, e, owner, Faction::Player, snap, grid, farm.huts, dt) {
+    if let Some(ev) = seek_shelter(
+        world,
+        e,
+        owner,
+        Faction::Realm(0),
+        snap,
+        grid,
+        farm.huts,
+        dt,
+    ) {
         release_cave(e, farm.cave_use);
         return ev;
     }
@@ -8917,7 +8949,7 @@ fn nearest_vessel(
 ) -> Option<Vec2> {
     let mut best = max;
     let mut pos = None;
-    if gunner.harms(Faction::Player) {
+    if gunner.harms(Faction::Realm(0)) {
         for s in ships {
             let d = (s.pos - from).length();
             if d < best {
@@ -9147,11 +9179,7 @@ impl<'a> Reader<'a> {
 }
 
 fn faction_u8(f: Faction) -> u8 {
-    match f {
-        Faction::Player => 0,
-        Faction::Enemy => 1,
-        Faction::Ally => 2,
-    }
+    owner_of(f)
 }
 fn job_u8(j: Job) -> u8 {
     match j {
@@ -9585,7 +9613,7 @@ impl Game {
             let hp = r.f32()?;
             // Owner, orders, and sortie come from the v18 tail section below;
             // until then every warship is the player's.
-            let mut w = Warship::new(Faction::Player, pos);
+            let mut w = Warship::new(Faction::Realm(0), pos);
             w.hp = hp;
             warships.push(w);
         }
@@ -9661,7 +9689,7 @@ impl Game {
                 // the single owner layer.
                 chunk.house_owner.resize(n_tiles, crate::world::NO_OWNER);
                 for owner in [
-                    owner_of(Faction::Player),
+                    owner_of(Faction::Realm(0)),
                     owner_of(Faction::Enemy),
                     owner_of(Faction::Ally),
                 ] {
@@ -9728,7 +9756,7 @@ impl Game {
                     .map_or(Dir::Right, |&t| dir_from_vec(tile_center(t) - pos));
                 transports.push(Transport {
                     pos,
-                    faction: Faction::Player,
+                    faction: Faction::Realm(0),
                     path,
                     path_cursor,
                     anchor,
@@ -9856,7 +9884,7 @@ impl Game {
             pirate_spawn_timer: PIRATE_SPAWN_INTERVAL,
             build_mode,
             sandbox_tool: SandboxTool::PlaceUnit,
-            place_faction: Faction::Player,
+            place_faction: Faction::Realm(0),
             place_job: Job::Knight,
             place_brush: Brush::Wall,
             priority,
@@ -9951,7 +9979,7 @@ mod tests {
             skip(&mut r, 8 + 3 * tiles);
             let owners = &bytes[r.p..r.p + tiles];
             for owner in [
-                owner_of(Faction::Player),
+                owner_of(Faction::Realm(0)),
                 owner_of(Faction::Enemy),
                 owner_of(Faction::Ally),
             ] {
@@ -9973,7 +10001,7 @@ mod tests {
     /// deadlock for want of the very hands it produces.
     fn strip_realm(game: &mut Game) {
         game.entities.clear();
-        for (x, y) in game.world.houses_of(owner_of(Faction::Player)).to_vec() {
+        for (x, y) in game.world.houses_of(owner_of(Faction::Realm(0))).to_vec() {
             game.world.clear_tile(x, y);
         }
         game.survey_villages();
@@ -10135,14 +10163,14 @@ mod tests {
             );
 
             // Crew up and sail.
-            let (hx, hy) = game.world.houses_of(owner_of(Faction::Player))[0];
+            let (hx, hy) = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
             let spot = adjacent_walkable(&game.world, hx, hy).expect("no walkable tile by home");
             for _ in 0..(SETTLER_CIVILIANS + SETTLER_CIVILIANS_SPARED) {
                 game.entities
-                    .push(Entity::new(Faction::Player, Job::Civilian, spot));
+                    .push(Entity::new(Faction::Realm(0), Job::Civilian, spot));
             }
-            let civs0 = game.civilian_count(Faction::Player);
-            let houses0 = game.world.houses_of(owner_of(Faction::Player)).len();
+            let civs0 = game.civilian_count(Faction::Realm(0));
+            let houses0 = game.world.houses_of(owner_of(Faction::Realm(0))).len();
             assert!(
                 game.try_build(tile_center(shore)),
                 "seed {seed}: expedition refused",
@@ -10169,7 +10197,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                game.civilian_count(Faction::Player),
+                game.civilian_count(Faction::Realm(0)),
                 civs0 - SETTLER_CIVILIANS,
                 "seed {seed}: the crew should leave the realm when it boards",
             );
@@ -10191,7 +10219,7 @@ mod tests {
                 "seed {seed}: ship never landed"
             );
             assert_eq!(
-                game.world.houses_of(owner_of(Faction::Player)).len(),
+                game.world.houses_of(owner_of(Faction::Realm(0))).len(),
                 houses0 + COLONY_HOUSES,
                 "seed {seed}: the colony's houses never went up",
             );
@@ -10199,7 +10227,7 @@ mod tests {
                 .entities
                 .iter()
                 .filter(|e| {
-                    e.faction == Faction::Player
+                    e.faction == Faction::Realm(0)
                         && e.job == Job::Civilian
                         && e.pos.distance(tile_center(landing)) <= 12.0
                 })
@@ -10219,7 +10247,7 @@ mod tests {
             let mine = game
                 .villages()
                 .iter()
-                .filter(|v| v.faction == Faction::Player)
+                .filter(|v| v.faction == Faction::Realm(0))
                 .count();
             assert!(mine >= 2, "seed {seed}: the colony never became a village");
             return;
@@ -10232,7 +10260,7 @@ mod tests {
         let mut game = Game::new(3);
         game.transports.push(Transport {
             pos: Vec2::new(12.5, -3.5),
-            faction: Faction::Player,
+            faction: Faction::Realm(0),
             path: vec![(13, -4), (14, -4), (15, -5)],
             path_cursor: 1,
             anchor: (18, -6),
@@ -10290,8 +10318,8 @@ mod tests {
         assert!(loaded.transports().is_empty());
         assert_eq!(loaded.money, game.money);
         assert_eq!(
-            loaded.world.houses_of(owner_of(Faction::Player)).len(),
-            game.world.houses_of(owner_of(Faction::Player)).len()
+            loaded.world.houses_of(owner_of(Faction::Realm(0))).len(),
+            game.world.houses_of(owner_of(Faction::Realm(0))).len()
         );
     }
 
@@ -10369,11 +10397,11 @@ mod tests {
             );
 
             // Muster a party and sail. Levies must not count toward it.
-            let (hx, hy) = game.world.houses_of(owner_of(Faction::Player))[0];
+            let (hx, hy) = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
             let spot = adjacent_walkable(&game.world, hx, hy).expect("no walkable tile by home");
             for _ in 0..TROOP_KNIGHTS {
                 game.entities
-                    .push(Entity::new(Faction::Player, Job::Knight, spot));
+                    .push(Entity::new(Faction::Realm(0), Job::Knight, spot));
             }
             assert!(
                 game.try_build(tile_center(shore)),
@@ -10391,7 +10419,7 @@ mod tests {
 
             // Strip the land war so the voyage is all that runs, then sail.
             game.entities.clear();
-            let houses0 = game.world.houses_of(owner_of(Faction::Player)).len();
+            let houses0 = game.world.houses_of(owner_of(Faction::Realm(0))).len();
             let sim = (port.0 - 6, port.1 - 6, port.0 + 6, port.1 + 6);
             let mut steps = 0;
             while !game.transports().is_empty() && steps < 20_000 {
@@ -10405,14 +10433,14 @@ mod tests {
             let knights_ashore = game
                 .entities
                 .iter()
-                .filter(|e| e.faction == Faction::Player && e.job == Job::Knight)
+                .filter(|e| e.faction == Faction::Realm(0) && e.job == Job::Knight)
                 .count();
             assert_eq!(
                 knights_ashore, TROOP_KNIGHTS,
                 "seed {seed}: the party should go ashore",
             );
             assert_eq!(
-                game.world.houses_of(owner_of(Faction::Player)).len(),
+                game.world.houses_of(owner_of(Faction::Realm(0))).len(),
                 houses0,
                 "seed {seed}: a troop landing must not found a colony",
             );
@@ -10442,7 +10470,7 @@ mod tests {
             let (hx, hy) = houses[k % houses.len()];
             let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot by the camp");
             game.entities
-                .push(Entity::new(Faction::Player, Job::Knight, spot));
+                .push(Entity::new(Faction::Realm(0), Job::Knight, spot));
         }
         game.resolve_captures();
         for &(x, y) in &houses {
@@ -10450,12 +10478,12 @@ mod tests {
         }
         assert!(
             game.world
-                .houses_of(owner_of(Faction::Player))
+                .houses_of(owner_of(Faction::Realm(0)))
                 .iter()
                 .any(|t| houses.contains(t)),
             "captured houses never joined the player's",
         );
-        assert_eq!(game.civilian_count(Faction::Player), 3);
+        assert_eq!(game.civilian_count(Faction::Realm(0)), 3);
         assert_eq!(
             game.entities
                 .iter()
@@ -10499,13 +10527,13 @@ mod tests {
         game.entities
             .push(Entity::new(Faction::Enemy, Job::Knight, outside));
         game.entities
-            .push(Entity::new(Faction::Player, Job::Knight, anchor));
+            .push(Entity::new(Faction::Realm(0), Job::Knight, anchor));
         game.resolve_captures();
 
         let turned: Vec<&Entity> = game
             .entities
             .iter()
-            .filter(|e| e.faction == Faction::Player && e.job == Job::Civilian)
+            .filter(|e| e.faction == Faction::Realm(0) && e.job == Job::Civilian)
             .collect();
         assert_eq!(turned.len(), 2, "two of the three villagers must turn");
         assert!(
@@ -10547,13 +10575,13 @@ mod tests {
         // most of them into its own realm.
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land");
         game.world
-            .set_house(anchor.0, anchor.1, owner_of(Faction::Player));
+            .set_house(anchor.0, anchor.1, owner_of(Faction::Realm(0)));
         game.world
-            .set_house(anchor.0 + 1, anchor.1, owner_of(Faction::Player));
+            .set_house(anchor.0 + 1, anchor.1, owner_of(Faction::Realm(0)));
         let outside = (anchor.0 + 10, anchor.1);
         for _ in 0..3 {
             game.entities
-                .push(Entity::new(Faction::Player, Job::Civilian, outside));
+                .push(Entity::new(Faction::Realm(0), Job::Civilian, outside));
         }
         game.entities
             .push(Entity::new(Faction::Enemy, Job::Knight, anchor));
@@ -10571,7 +10599,7 @@ mod tests {
             game.entities
                 .iter()
                 .filter(|e| e.faction == Faction::Enemy && e.job == Job::Civilian)
-                .all(|e| e.origin == Faction::Player),
+                .all(|e| e.origin == Faction::Realm(0)),
             "the taken keep their birth faction"
         );
         assert!(
@@ -10588,13 +10616,13 @@ mod tests {
         let i = game
             .entities
             .iter()
-            .position(|e| e.faction == Faction::Player)
+            .position(|e| e.faction == Faction::Realm(0))
             .expect("the player starts with units");
         game.entities[i].origin = Faction::Enemy;
         game.entities[i].mercenary = true;
         let bytes = game.to_bytes(CAM);
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
-        assert!(loaded.entities[i].faction == Faction::Player);
+        assert!(loaded.entities[i].faction == Faction::Realm(0));
         assert!(
             loaded.entities[i].origin == Faction::Enemy,
             "origin lost in the round trip"
@@ -10626,7 +10654,7 @@ mod tests {
             let (hx, hy) = houses[k % houses.len()];
             let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot by the camp");
             game.entities
-                .push(Entity::new(Faction::Player, Job::Knight, spot));
+                .push(Entity::new(Faction::Realm(0), Job::Knight, spot));
         }
         // An enemy prowling just outside the village (but out of capture
         // range) keeps the ground contested, so only half stand down.
@@ -10637,11 +10665,11 @@ mod tests {
             .push(Entity::new(Faction::Enemy, Job::Knight, lurker));
 
         game.resolve_captures();
-        assert_eq!(game.civilian_count(Faction::Player), 2);
+        assert_eq!(game.civilian_count(Faction::Realm(0)), 2);
         assert_eq!(
             game.entities
                 .iter()
-                .filter(|e| e.faction == Faction::Player && e.job == Job::Knight)
+                .filter(|e| e.faction == Faction::Realm(0) && e.job == Job::Knight)
                 .count(),
             2,
             "contested ground keeps half the knights under arms",
@@ -10655,7 +10683,7 @@ mod tests {
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land for a camp");
         let troops = |anchor| Transport {
             pos: tile_center(anchor),
-            faction: Faction::Player,
+            faction: Faction::Realm(0),
             path: Vec::new(),
             path_cursor: 0,
             anchor,
@@ -10722,7 +10750,7 @@ mod tests {
         // Open water in the village's own harbor, so the launch is refused for
         // want of a route rather than for being too far from home.
         let mut water = None;
-        'find: for &(hx, hy) in game.world.houses_of(owner_of(Faction::Player)) {
+        'find: for &(hx, hy) in game.world.houses_of(owner_of(Faction::Realm(0))) {
             for dy in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                 for dx in -SHIP_NEAR_RADIUS..=SHIP_NEAR_RADIUS {
                     if game.world.is_open_water(hx + dx, hy + dy) {
@@ -10924,10 +10952,10 @@ mod tests {
         let tile = (home.x as i32, home.y as i32);
         for _ in 0..10 {
             game.entities
-                .push(Entity::new(Faction::Player, Job::Civilian, tile));
+                .push(Entity::new(Faction::Realm(0), Job::Civilian, tile));
         }
         assert!(
-            game.civilian_count(Faction::Player) > MIN_CIVILIANS_TO_GROW + 1,
+            game.civilian_count(Faction::Realm(0)) > MIN_CIVILIANS_TO_GROW + 1,
             "need bodies to draft"
         );
         game.proclaim_draft();
@@ -10949,12 +10977,12 @@ mod tests {
 
     #[test]
     fn draft_raises_levies_on_credit() {
-        let farmers0 = Game::new(1).civilian_count(Faction::Player) + 10;
+        let farmers0 = Game::new(1).civilian_count(Faction::Realm(0)) + 10;
         let game = drafted_game();
 
         // Even a broke realm can call up levies, and none of it is paid yet.
         let (levies, owed) = game.levies_owed();
-        let converted = farmers0 - game.civilian_count(Faction::Player);
+        let converted = farmers0 - game.civilian_count(Faction::Realm(0));
         assert!(levies >= 1, "a draft with bodies should call some up");
         assert_eq!(levies, converted, "every call-up is a levy");
         assert_eq!(owed, levies as u32 * LEVY_GOLD_PAY);
@@ -10962,7 +10990,7 @@ mod tests {
         // The call-up is instant and takes everyone down to the working core,
         // which is always spared.
         assert_eq!(
-            game.civilian_count(Faction::Player),
+            game.civilian_count(Faction::Realm(0)),
             MIN_CIVILIANS_TO_GROW + 1
         );
         assert!(
@@ -10989,7 +11017,7 @@ mod tests {
         let tile = (home.x as i32, home.y as i32);
         for _ in 0..2 {
             game.entities
-                .push(Entity::new(Faction::Player, Job::Civilian, tile));
+                .push(Entity::new(Faction::Realm(0), Job::Civilian, tile));
         }
         game.proclaim_draft();
         assert_eq!(game.levies_owed().0, levies0 + 2);
@@ -11001,7 +11029,7 @@ mod tests {
         let mut game = drafted_game();
         let (levies, owed) = game.levies_owed();
         assert!(levies >= 1);
-        let farmers0 = game.civilian_count(Faction::Player);
+        let farmers0 = game.civilian_count(Faction::Realm(0));
         game.money = owed;
 
         // Through their term the levies stay under arms even with the realm
@@ -11012,7 +11040,7 @@ mod tests {
         // While a village is under threat, the levies stay under arms however
         // long it lasts.
         game.villages = vec![Village {
-            faction: Faction::Player,
+            faction: Faction::Realm(0),
             center: game.start_center(),
             min: (0, 0),
             max: (0, 0),
@@ -11035,7 +11063,7 @@ mod tests {
         }
         assert_eq!(game.levies_owed(), (0, 0));
         assert_eq!(game.money, 0, "each levy is paid exactly once");
-        assert_eq!(game.civilian_count(Faction::Player), farmers0 + levies);
+        assert_eq!(game.civilian_count(Faction::Realm(0)), farmers0 + levies);
         assert!(
             game.alerts()
                 .iter()
@@ -11049,7 +11077,7 @@ mod tests {
         let (levies, _) = game.levies_owed();
         assert!(levies >= 1);
         let units0 = game.entities.len();
-        let farmers0 = game.civilian_count(Faction::Player);
+        let farmers0 = game.civilian_count(Faction::Realm(0));
         // Enough gold for all but one.
         game.money = (levies as u32 - 1) * LEVY_GOLD_PAY;
         serve_out_term(&mut game);
@@ -11059,7 +11087,10 @@ mod tests {
         assert_eq!(game.levies_owed(), (0, 0));
         assert_eq!(game.money, 0);
         assert_eq!(game.entities.len(), units0 - 1, "the unpaid levy deserts");
-        assert_eq!(game.civilian_count(Faction::Player), farmers0 + levies - 1);
+        assert_eq!(
+            game.civilian_count(Faction::Realm(0)),
+            farmers0 + levies - 1
+        );
         assert!(
             game.alerts()
                 .iter()
@@ -11084,12 +11115,12 @@ mod tests {
 
         // The save holds only the edited chunks, and a load restores the realm
         // (regenerating pristine terrain from the seed on demand).
-        let mut houses = game.world.houses_of(owner_of(Faction::Player)).to_vec();
+        let mut houses = game.world.houses_of(owner_of(Faction::Realm(0))).to_vec();
         houses.sort_unstable();
         let bytes = game.to_bytes(CAM);
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
         assert_eq!(loaded.world.chunks_iter().count(), edited);
-        let mut loaded_houses = loaded.world.houses_of(owner_of(Faction::Player)).to_vec();
+        let mut loaded_houses = loaded.world.houses_of(owner_of(Faction::Realm(0))).to_vec();
         loaded_houses.sort_unstable();
         assert_eq!(loaded_houses, houses);
         for &(x, y) in &houses {
@@ -11122,9 +11153,9 @@ mod tests {
 
     #[test]
     fn allies_are_friendly_but_fight_the_enemy() {
-        assert!(hostile(Faction::Player, Faction::Enemy));
+        assert!(hostile(Faction::Realm(0), Faction::Enemy));
         assert!(hostile(Faction::Ally, Faction::Enemy));
-        assert!(!hostile(Faction::Player, Faction::Ally));
+        assert!(!hostile(Faction::Realm(0), Faction::Ally));
         assert!(!hostile(Faction::Ally, Faction::Ally));
     }
 
@@ -11266,7 +11297,7 @@ mod tests {
             game.wood = WARSHIP_WOOD_COST;
             game.stone = WARSHIP_STONE_COST;
             game.money = WARSHIP_GOLD_COST;
-            let land = game.world.houses_of(owner_of(Faction::Player))[0];
+            let land = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
             assert!(!game.try_build(tile_center(land)));
             assert_eq!(game.warships().len(), 1);
             return;
@@ -11329,7 +11360,7 @@ mod tests {
         );
         let wood_before = game.wood;
         game.entities
-            .push(Entity::new(Faction::Player, Job::Civilian, start));
+            .push(Entity::new(Faction::Realm(0), Job::Civilian, start));
 
         let sim = (spot.0 - 30, spot.1 - 30, spot.0 + 30, spot.1 + 30);
         let mut built = false;
@@ -11357,7 +11388,7 @@ mod tests {
         let spot = find_house_spot(&game);
         let start = stand_tile(&game.world, 0, spot).expect("the site must be workable");
         // A civilian deep in a long swing at something next to it.
-        let mut e = Entity::new(Faction::Player, Job::Civilian, start);
+        let mut e = Entity::new(Faction::Realm(0), Job::Civilian, start);
         e.target_node = Some(spot);
         e.harvest_timer = 1000.0;
         game.entities.push(e);
@@ -11404,7 +11435,7 @@ mod tests {
         // A civilian takes up the builder's job and the house goes up.
         let start = stand_tile(&game.world, 0, spot).expect("the site must be workable");
         game.entities
-            .push(Entity::new(Faction::Player, Job::Civilian, start));
+            .push(Entity::new(Faction::Realm(0), Job::Civilian, start));
         let mut built = false;
         for _ in 0..2000 {
             game.update(0.1, sim);
@@ -11485,14 +11516,14 @@ mod tests {
             }
         }
         game.entities
-            .push(Entity::new(Faction::Player, Job::Knight, (0, 0)));
+            .push(Entity::new(Faction::Realm(0), Job::Knight, (0, 0)));
         // Enough civilians at home that the knight isn't recalled to farm (the
         // low-civilian retreat would turn it into a civilian otherwise).
         let (hx, hy) = game.player_houses()[0];
         for _ in 0..4 {
             let t = adjacent_walkable(&game.world, hx, hy).expect("room by the house");
             game.entities
-                .push(Entity::new(Faction::Player, Job::Civilian, t));
+                .push(Entity::new(Faction::Realm(0), Job::Civilian, t));
         }
 
         // Plant the rally flag on the moated island. The only way there is
@@ -11527,7 +11558,7 @@ mod tests {
         let k = knight_on_a_lane(game);
         let e = &mut game.entities[k];
         e.job = Job::Horseman;
-        e.max_hp = max_hp_for(Faction::Player, Job::Horseman);
+        e.max_hp = max_hp_for(Faction::Realm(0), Job::Horseman);
         e.hp = e.max_hp;
         game.wood = 0;
         k
@@ -11658,7 +11689,7 @@ mod tests {
         let i = game
             .entities
             .iter()
-            .position(|e| e.faction == Faction::Player)
+            .position(|e| e.faction == Faction::Realm(0))
             .expect("the player starts with units");
         game.entities[i].job = Job::Horseman;
         let bytes = game.to_bytes(CAM);
@@ -11681,7 +11712,7 @@ mod tests {
         let i = game
             .entities
             .iter()
-            .position(|e| e.faction == Faction::Player)
+            .position(|e| e.faction == Faction::Realm(0))
             .expect("the player starts with units");
         game.entities[i].job = Job::Bowman;
         let bytes = game.to_bytes(CAM);
@@ -11711,7 +11742,7 @@ mod tests {
         for _ in 0..=MIN_CIVILIANS_TO_GROW + 2 {
             let t = adjacent_walkable(&game.world, hx, hy).expect("room by the house");
             game.entities
-                .push(Entity::new(Faction::Player, Job::Civilian, t));
+                .push(Entity::new(Faction::Realm(0), Job::Civilian, t));
         }
         game.priority = priority;
         game.money = money;
@@ -11729,7 +11760,7 @@ mod tests {
             game.player_spawn_timer = 0.0;
             game.handle_spawns(0.01);
         }
-        game.soldiers_of(Faction::Player)
+        game.soldiers_of(Faction::Realm(0))
     }
 
     #[test]
@@ -11786,7 +11817,7 @@ mod tests {
         let i = game
             .entities
             .iter()
-            .position(|e| e.faction == Faction::Player)
+            .position(|e| e.faction == Faction::Realm(0))
             .expect("the player starts with units");
         game.entities[i].job = Job::Axeman;
         game.entities[i].whirl = Some(Whirl {
@@ -11896,7 +11927,7 @@ mod tests {
             .expect("the knocked-aside arrow vanished");
         assert_eq!(
             m.thrower,
-            Faction::Player,
+            Faction::Realm(0),
             "the arrow still counts as the enemy's"
         );
         assert!(m.vel.x > 0.0, "the arrow kept flying the way it came in");
@@ -11917,7 +11948,7 @@ mod tests {
         let mut game = Game::new(1);
         knight_on_a_lane(&mut game);
         game.world.set_node(1, 0, Resource::Wood, 5);
-        let owner = owner_of(Faction::Player);
+        let owner = owner_of(Faction::Realm(0));
         let cost =
             |job| march_step_cost(&game.world, owner, mobility_of(job, true), (0, 0), (1, 0));
         assert!(
@@ -11926,7 +11957,7 @@ mod tests {
         );
         assert!(speed_of(Job::Axeman) < speed_of(Job::Knight));
         assert!(
-            max_hp_for(Faction::Player, Job::Axeman) > max_hp_for(Faction::Player, Job::Knight)
+            max_hp_for(Faction::Realm(0), Job::Axeman) > max_hp_for(Faction::Realm(0), Job::Knight)
         );
     }
 
@@ -11942,12 +11973,12 @@ mod tests {
             }
         }
         game.entities
-            .push(Entity::new(Faction::Player, Job::Knight, (0, 0)));
+            .push(Entity::new(Faction::Realm(0), Job::Knight, (0, 0)));
         let (hx, hy) = game.player_houses()[0];
         for _ in 0..4 {
             let t = adjacent_walkable(&game.world, hx, hy).expect("room by the house");
             game.entities
-                .push(Entity::new(Faction::Player, Job::Civilian, t));
+                .push(Entity::new(Faction::Realm(0), Job::Civilian, t));
         }
         0
     }
@@ -11963,7 +11994,7 @@ mod tests {
         let k = knight_on_a_lane(game);
         let e = &mut game.entities[k];
         e.job = Job::Bowman;
-        e.max_hp = max_hp_for(Faction::Player, Job::Bowman);
+        e.max_hp = max_hp_for(Faction::Realm(0), Job::Bowman);
         e.hp = e.max_hp;
         k
     }
@@ -12031,7 +12062,7 @@ mod tests {
             MissileKind::Arrow,
             start,
             start + Vec2::X,
-            Faction::Player,
+            Faction::Realm(0),
         ));
         let sim = (-6, -10, 20, 10);
         for _ in 0..10 {
@@ -12050,7 +12081,7 @@ mod tests {
         knight_on_a_lane(&mut game);
         game.world.set_node(1, 0, Resource::Wood, 5);
         game.world.carve_water(2, 0);
-        let owner = owner_of(Faction::Player);
+        let owner = owner_of(Faction::Realm(0));
         let foot = mobility_of(Job::Knight, true);
         assert!(
             march_step_cost(&game.world, owner, foot, (0, 0), (1, 0)).is_some(),
@@ -12295,7 +12326,7 @@ mod tests {
             .tile;
         let start = stand_tile(&game.world, 0, site).expect("the site must be workable");
         game.entities
-            .push(Entity::new(Faction::Player, Job::Civilian, start));
+            .push(Entity::new(Faction::Realm(0), Job::Civilian, start));
         let mut grew = false;
         for _ in 0..1200 {
             game.update(0.1, sim);
@@ -12363,9 +12394,9 @@ mod tests {
             life: 1.0,
             gunner,
         };
-        let navy = Gunner::Navy(Faction::Player);
+        let navy = Gunner::Navy(Faction::Realm(0));
 
-        game.warships.push(warship(Faction::Player, at(0.5, 0.5)));
+        game.warships.push(warship(Faction::Realm(0), at(0.5, 0.5)));
         game.pirates.push(pirate(at(20.5, 0.5)));
 
         // A pirate's shell wears down a warship (it doesn't sink in one hit).
@@ -12453,7 +12484,7 @@ mod tests {
         // counts it among the realm's losses.
         let lost0 = game.units_lost;
         game.entities
-            .push(Entity::new(Faction::Player, Job::Civilian, (100, 0)));
+            .push(Entity::new(Faction::Realm(0), Job::Civilian, (100, 0)));
         let before = game.entities.len();
         game.cannonballs
             .push(ball(tile_center((100, 0)), Gunner::Navy(Faction::Enemy)));
@@ -12478,7 +12509,7 @@ mod tests {
             pos: at(0.5, 0.5),
             vel: Vec2::ZERO,
             life: 1.0,
-            gunner: Gunner::Navy(Faction::Player),
+            gunner: Gunner::Navy(Faction::Realm(0)),
         });
         game.update_cannonballs(0.01);
         assert!(game.warships.is_empty(), "the enemy hull should have sunk");
@@ -12503,7 +12534,7 @@ mod tests {
         game.warships.clear();
         let at = |x: f32, y: f32| Vec2::new(x, y);
         game.warships
-            .push(Warship::new(Faction::Player, at(1.5, 1.5)));
+            .push(Warship::new(Faction::Realm(0), at(1.5, 1.5)));
         let mut escort = Warship::new(Faction::Ally, at(2.5, 2.5));
         escort.goal = Some(at(9.0, 9.0));
         game.warships.push(escort);
@@ -12515,7 +12546,7 @@ mod tests {
         let bytes = game.to_bytes(CAM);
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
         assert_eq!(loaded.warships().len(), 3);
-        assert_eq!(loaded.warships()[0].faction, Faction::Player);
+        assert_eq!(loaded.warships()[0].faction, Faction::Realm(0));
         assert_eq!(loaded.warships()[0].goal, None);
         assert_eq!(loaded.warships()[1].faction, Faction::Ally);
         assert_eq!(loaded.warships()[1].goal, Some(at(9.0, 9.0)));
@@ -12530,7 +12561,7 @@ mod tests {
         let mut game = Game::new(1);
         game.warships.clear();
         game.warships
-            .push(Warship::new(Faction::Player, Vec2::new(1.5, 1.5)));
+            .push(Warship::new(Faction::Realm(0), Vec2::new(1.5, 1.5)));
         let mut bytes = game.to_bytes(CAM);
         // Strip the v19 migrant tail, then the v18 tail (count + one record),
         // and stamp the old version.
@@ -12541,7 +12572,7 @@ mod tests {
         bytes[4] = 17;
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("a v17 save must load");
         assert_eq!(loaded.warships().len(), 1);
-        assert_eq!(loaded.warships()[0].faction, Faction::Player);
+        assert_eq!(loaded.warships()[0].faction, Faction::Realm(0));
         assert_eq!(loaded.warships()[0].goal, None);
         assert_eq!(loaded.warships()[0].sortie, 0.0);
     }
@@ -12654,7 +12685,7 @@ mod tests {
         assert!(game.navy_rallies().is_empty());
         // With a warship afloat the flag is planted and the toast dismissed.
         game.warships
-            .push(Warship::new(Faction::Player, Vec2::new(0.5, 0.5)));
+            .push(Warship::new(Faction::Realm(0), Vec2::new(0.5, 0.5)));
         assert!(game.can_respond(AlertResponse::RallyNavy));
         game.respond_to_alert(i);
         assert_eq!(game.navy_rallies(), &[at]);
@@ -12750,7 +12781,7 @@ mod tests {
         let enemy_hp0 = game.entities[0].hp;
 
         game.warships
-            .push(Warship::new(Faction::Player, tile_center((0, 0))));
+            .push(Warship::new(Faction::Realm(0), tile_center((0, 0))));
 
         // Sim window far away, so the enemy's own AI never runs. Only the navy
         // (which updates every frame) and the shells it fires move.
@@ -12805,7 +12836,7 @@ mod tests {
         assert!(open_sea(&game.world, 17, 0), "basin center is open sea");
 
         game.warships
-            .push(Warship::new(Faction::Player, tile_center((0, 0))));
+            .push(Warship::new(Faction::Realm(0), tile_center((0, 0))));
 
         let sim = (500, 500, 510, 510);
         let mut reached = false;
@@ -12824,12 +12855,12 @@ mod tests {
     fn survey_spots_a_raid_and_alerts_once() {
         let mut game = Game::new(1);
         game.entities.clear();
-        let house = game.world.houses_of(owner_of(Faction::Player))[0];
+        let house = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
         let home_village = |game: &Game| {
             game.villages()
                 .iter()
                 .find(|v| {
-                    v.faction == Faction::Player
+                    v.faction == Faction::Realm(0)
                         && (v.min.0..=v.max.0).contains(&house.0)
                         && (v.min.1..=v.max.1).contains(&house.1)
                 })
@@ -12839,7 +12870,7 @@ mod tests {
 
         // A lone knight at home: counted as a defender, and all is quiet.
         game.entities
-            .push(Entity::new(Faction::Player, Job::Knight, house));
+            .push(Entity::new(Faction::Realm(0), Job::Knight, house));
         game.survey_villages();
         let v = home_village(&game);
         assert_eq!((v.knights, v.civilians), (1, 0));
@@ -12863,7 +12894,7 @@ mod tests {
 
         // Once the raid is over and has been quiet for the cooldown, the old
         // toast is gone and a new raid alerts again.
-        game.entities.retain(|e| e.faction == Faction::Player);
+        game.entities.retain(|e| e.faction == Faction::Realm(0));
         for _ in 0..25 {
             game.survey_villages();
             game.age_alerts(1.0);
@@ -12891,7 +12922,7 @@ mod tests {
         let mut game = Game::new(1);
         // Keep the economy pure: no knights, no enemies to raid the workers.
         game.entities
-            .retain(|e| e.faction == Faction::Player && e.job == Job::Civilian);
+            .retain(|e| e.faction == Faction::Realm(0) && e.job == Job::Civilian);
         let wood0 = game.wood;
         let stone0 = game.stone;
         // Simulate with the view parked far away, so the capital's civilians are
@@ -12910,7 +12941,7 @@ mod tests {
     fn pop_cap_sums_per_village() {
         let mut game = Game::new(1);
         game.survey_villages();
-        let capital_houses = game.world.houses_of(owner_of(Faction::Player)).len();
+        let capital_houses = game.world.houses_of(owner_of(Faction::Realm(0))).len();
         assert_eq!(
             game.pop_cap(),
             VILLAGE_POP_BASE + capital_houses * VILLAGE_POP_PER_HOUSE
@@ -12919,8 +12950,8 @@ mod tests {
         // A second village far away raises the kingdom-wide allowance by its
         // own cap.
         let anchor = (
-            game.world.houses_of(owner_of(Faction::Player))[0].0 + VILLAGE_SPACING + 20,
-            game.world.houses_of(owner_of(Faction::Player))[0].1,
+            game.world.houses_of(owner_of(Faction::Realm(0)))[0].0 + VILLAGE_SPACING + 20,
+            game.world.houses_of(owner_of(Faction::Realm(0)))[0].1,
         );
         game.world
             .ensure_region(anchor.0 - 20, anchor.1 - 20, anchor.0 + 20, anchor.1 + 20);
@@ -12929,10 +12960,10 @@ mod tests {
         };
         let spots = open_tiles_near(&game.world, anchor.0, anchor.1, 4);
         for &(x, y) in spots.iter().step_by(4).take(4) {
-            game.world.set_house(x, y, owner_of(Faction::Player));
+            game.world.set_house(x, y, owner_of(Faction::Realm(0)));
         }
         game.survey_villages();
-        let total_houses = game.world.houses_of(owner_of(Faction::Player)).len();
+        let total_houses = game.world.houses_of(owner_of(Faction::Realm(0))).len();
         assert!(total_houses > capital_houses, "the camp must add houses");
         assert_eq!(
             game.pop_cap(),
@@ -13008,7 +13039,7 @@ mod tests {
         // the gates freezes construction.
         let lurker = (anchor.0 + 3, anchor.1);
         game.entities
-            .push(Entity::new(Faction::Player, Job::Knight, lurker));
+            .push(Entity::new(Faction::Realm(0), Job::Knight, lurker));
         game.survey_villages();
         let count = game.world.houses_of(owner_of(Faction::Enemy)).len();
         game.grow_enemy_village();
@@ -13025,13 +13056,13 @@ mod tests {
         // cut down below the workforce floor must still be able to recover.
         let mut game = Game::new(1);
         game.entities.clear();
-        let (hx, hy) = game.world.houses_of(owner_of(Faction::Player))[0];
+        let (hx, hy) = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
         let spot = adjacent_walkable(&game.world, hx, hy).expect("no spot by the capital");
         game.entities
-            .push(Entity::new(Faction::Player, Job::Civilian, spot));
+            .push(Entity::new(Faction::Realm(0), Job::Civilian, spot));
         game.survey_villages();
         assert!(
-            game.civilian_count(Faction::Player) <= MIN_CIVILIANS_TO_GROW,
+            game.civilian_count(Faction::Realm(0)) <= MIN_CIVILIANS_TO_GROW,
             "the realm must start below the workforce floor"
         );
 
@@ -13044,13 +13075,13 @@ mod tests {
             game.handle_spawns(0.01);
         }
         assert!(
-            game.civilian_count(Faction::Player) > 1,
+            game.civilian_count(Faction::Realm(0)) > 1,
             "a realm below the floor must still raise new civilians"
         );
         assert_eq!(
             game.entities
                 .iter()
-                .filter(|e| e.faction == Faction::Player && e.job == Job::Knight)
+                .filter(|e| e.faction == Faction::Realm(0) && e.job == Job::Knight)
                 .count(),
             0,
             "hands come before soldiers while the workforce is short"
@@ -13065,7 +13096,7 @@ mod tests {
         // that happens to lie nearest the allies.
         let mut game = Game::new(1);
         let port = find_ally_port(&game).expect("seed 1 plants allied coasts");
-        let capital = game.world.houses_of(owner_of(Faction::Player))[0];
+        let capital = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
         // A colony on some other coast: walk out from the capital until open
         // water sits beside land far enough off to be its own village.
         let mut colony = None;
@@ -13087,7 +13118,7 @@ mod tests {
             return; // this seed offers no second coast; nothing to prove here
         };
         game.world
-            .set_house(colony.0, colony.1, owner_of(Faction::Player));
+            .set_house(colony.0, colony.1, owner_of(Faction::Realm(0)));
         game.survey_villages();
 
         // Launch many ships and note which village each sailed from.
@@ -13139,7 +13170,7 @@ mod tests {
         assert_eq!(
             game.entities
                 .iter()
-                .filter(|e| e.faction == Faction::Player && e.origin == Faction::Ally)
+                .filter(|e| e.faction == Faction::Realm(0) && e.origin == Faction::Ally)
                 .count(),
             settled,
             "immigrants keep their allied origin"
@@ -13359,7 +13390,7 @@ mod tests {
         // in it doesn't take it, since the ally holds it for the player.
         let anchor = find_land_anchor(&mut game.world, (70, 0), 20).expect("no land");
         game.world
-            .set_house(anchor.0, anchor.1, owner_of(Faction::Player));
+            .set_house(anchor.0, anchor.1, owner_of(Faction::Realm(0)));
         game.entities
             .push(Entity::new(Faction::Ally, Job::Knight, anchor));
         game.entities
@@ -13391,13 +13422,13 @@ mod tests {
         let mut game = Game::new(1);
         // A fresh outpost with empty homes: the next new villager is raised
         // there, not at the bustling capital.
-        let (cx, cy) = game.world.houses_of(owner_of(Faction::Player))[0];
+        let (cx, cy) = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
         let anchor =
             find_land_anchor(&mut game.world, (cx + 100, cy), 30).expect("no land for an outpost");
         game.world
-            .set_house(anchor.0, anchor.1, owner_of(Faction::Player));
+            .set_house(anchor.0, anchor.1, owner_of(Faction::Realm(0)));
         game.world
-            .set_house(anchor.0 + 1, anchor.1, owner_of(Faction::Player));
+            .set_house(anchor.0 + 1, anchor.1, owner_of(Faction::Realm(0)));
         game.survey_villages();
 
         let before = game.entities.len();
@@ -13416,12 +13447,12 @@ mod tests {
         let mut game = Game::new(1);
         // Settlers dropping anchor by a village the player already holds join
         // it: more hands, no new houses, and the right toast.
-        let (hx, hy) = game.world.houses_of(owner_of(Faction::Player))[0];
-        let houses_before = game.world.houses_of(owner_of(Faction::Player)).len();
-        let civs_before = game.civilian_count(Faction::Player);
+        let (hx, hy) = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
+        let houses_before = game.world.houses_of(owner_of(Faction::Realm(0))).len();
+        let civs_before = game.civilian_count(Faction::Realm(0));
         game.land_transport(Transport {
             pos: tile_center((hx, hy)),
-            faction: Faction::Player,
+            faction: Faction::Realm(0),
             path: Vec::new(),
             path_cursor: 0,
             anchor: (hx + 2, hy),
@@ -13431,11 +13462,11 @@ mod tests {
             facing: Dir::Right,
         });
         assert_eq!(
-            game.world.houses_of(owner_of(Faction::Player)).len(),
+            game.world.houses_of(owner_of(Faction::Realm(0))).len(),
             houses_before,
             "a reinforcement must not found new houses"
         );
-        assert_eq!(game.civilian_count(Faction::Player), civs_before + 3);
+        assert_eq!(game.civilian_count(Faction::Realm(0)), civs_before + 3);
         assert!(
             game.alerts()
                 .iter()
@@ -13454,7 +13485,7 @@ mod tests {
     fn lost_village_rallies_only_nearby_knights() {
         let mut game = Game::new(1);
         game.entities.clear();
-        let village = cluster(game.world.houses_of(owner_of(Faction::Player)))
+        let village = cluster(game.world.houses_of(owner_of(Faction::Realm(0))))
             .into_iter()
             .next()
             .expect("the player starts with a village");
@@ -13480,12 +13511,12 @@ mod tests {
         let far = (rally + Vec2::splat(200.0)).floor();
         game.entities.clear();
         game.entities.push(Entity::new(
-            Faction::Player,
+            Faction::Realm(0),
             Job::Knight,
             (near.x as i32, near.y as i32),
         ));
         game.entities.push(Entity::new(
-            Faction::Player,
+            Faction::Realm(0),
             Job::Knight,
             (far.x as i32, far.y as i32),
         ));
@@ -13584,9 +13615,9 @@ mod tests {
     fn warships_split_between_two_navy_flags() {
         let mut game = Game::new_sandbox();
         game.warships
-            .push(Warship::new(Faction::Player, Vec2::new(0.5, 0.5)));
+            .push(Warship::new(Faction::Realm(0), Vec2::new(0.5, 0.5)));
         game.warships
-            .push(Warship::new(Faction::Player, Vec2::new(1.5, 0.5)));
+            .push(Warship::new(Faction::Realm(0), Vec2::new(1.5, 0.5)));
         game.warships
             .push(Warship::new(Faction::Enemy, Vec2::new(2.5, 0.5)));
         game.navy_rallies = vec![Vec2::new(-20.0, 0.0), Vec2::new(30.0, 0.0)];
@@ -13649,7 +13680,7 @@ mod tests {
     fn hardy_brawl(player: &[Tile], enemy: &[Tile]) -> Game {
         let mut game = Game::new_sandbox();
         game.place_job = Job::Knight;
-        for (faction, tiles) in [(Faction::Player, player), (Faction::Enemy, enemy)] {
+        for (faction, tiles) in [(Faction::Realm(0), player), (Faction::Enemy, enemy)] {
             game.place_faction = faction;
             for &t in tiles {
                 assert!(game.place_unit(t));
@@ -13678,7 +13709,7 @@ mod tests {
                             Stance::StepBack => "back",
                             Stance::Lunge => "lunge",
                         });
-                        format!("{:?} flee={} duel={:?}", e.faction as u8, e.flee, s)
+                        format!("{:?} flee={} duel={:?}", e.faction, e.flee, s)
                     };
                     assert!(
                         d >= COMBAT_SPACING - 0.05,
@@ -13906,7 +13937,7 @@ mod tests {
     #[test]
     fn placed_units_fight_it_out_on_the_testing_ground() {
         let mut game = Game::new_sandbox();
-        game.place_faction = Faction::Player;
+        game.place_faction = Faction::Realm(0);
         game.place_job = Job::Knight;
         assert!(game.sandbox_click(Vec2::new(0.5, 0.5)));
         assert!(game.sandbox_click(Vec2::new(0.5, 2.5)));
@@ -14072,11 +14103,11 @@ mod tests {
         let mut game = Game::new_sandbox();
         game.world.ensure_region(-30, -30, 90, 30);
         for t in [(0, 0), (3, 0), (60, 0), (63, 0)] {
-            game.world.set_house(t.0, t.1, owner_of(Faction::Player));
+            game.world.set_house(t.0, t.1, owner_of(Faction::Realm(0)));
         }
         for i in 0..people {
             game.entities
-                .push(Entity::new(Faction::Player, Job::Civilian, (i - 2, 2)));
+                .push(Entity::new(Faction::Realm(0), Job::Civilian, (i - 2, 2)));
         }
         game.survey_villages();
         (game, village_center(&[(60, 0), (63, 0)]))
@@ -14118,7 +14149,7 @@ mod tests {
             .filter(|e| e.pos.distance(outpost) < CIVILIAN_HOME_RADIUS as f32 + 2.0)
             .count();
         assert_eq!(there, MIGRANT_CIVILIANS, "the settlers must stay put");
-        assert_eq!(game.civilian_count(Faction::Player), 8, "nobody was lost");
+        assert_eq!(game.civilian_count(Faction::Realm(0)), 8, "nobody was lost");
     }
 
     #[test]
@@ -14166,7 +14197,7 @@ mod tests {
                 .any(|a| a.kind == AlertKind::LaunchRefused(LaunchRefusal::ShipCost)),
             "a call that needs a ship it can't afford says why"
         );
-        assert_eq!(game.civilian_count(Faction::Player), 8);
+        assert_eq!(game.civilian_count(Faction::Realm(0)), 8);
 
         game.wood = SETTLER_WOOD_COST;
         game.stone = SETTLER_STONE_COST;
@@ -14178,7 +14209,10 @@ mod tests {
         assert_eq!(game.migrants(), 0, "nobody walks");
         assert_eq!(game.transports().len(), 1);
         assert_eq!(game.transports()[0].civilians as usize, SETTLER_CIVILIANS);
-        assert_eq!(game.civilian_count(Faction::Player), 8 - SETTLER_CIVILIANS);
+        assert_eq!(
+            game.civilian_count(Faction::Realm(0)),
+            8 - SETTLER_CIVILIANS
+        );
         assert_eq!((game.wood, game.stone, game.money), (0, 0, 0));
         assert!(
             game.near_player_village(game.transports()[0].anchor),
@@ -14189,7 +14223,7 @@ mod tests {
     #[test]
     fn migrants_finish_the_trip_after_a_load() {
         let mut game = Game::new(1);
-        let house = game.world.houses_of(owner_of(Faction::Player))[0];
+        let house = game.world.houses_of(owner_of(Faction::Realm(0)))[0];
         game.entities[0].job = Job::Civilian;
         game.entities[0].migrate_to = Some(house);
         let bytes = game.to_bytes(CAM);

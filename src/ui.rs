@@ -339,7 +339,7 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
             ui.label("Faction");
             ui.horizontal(|ui| {
                 for (faction, name) in [
-                    (Faction::Player, "Yours"),
+                    (Faction::Realm(0), "Yours"),
                     (Faction::Enemy, "Enemy"),
                     (Faction::Ally, "Allied"),
                 ] {
@@ -433,7 +433,7 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
             let (yours, enemy, allied) = game.faction_counts();
             ui.label(
                 RichText::new(format!("Yours: {yours}"))
-                    .color(faction_color32(colors, Faction::Player)),
+                    .color(faction_color32(colors, Faction::Realm(0))),
             );
             ui.label(
                 RichText::new(format!("Enemy: {enemy}"))
@@ -835,7 +835,7 @@ fn game_ui(ctx: &egui::Context, game: &mut Game, save_name: &mut String) -> Opti
             let landing = game
                 .transports()
                 .iter()
-                .filter(|t| t.faction == Faction::Player && t.knights > 0)
+                .filter(|t| t.faction == Faction::Realm(0) && t.knights > 0)
                 .count();
             if landing > 0 {
                 icon_label(
@@ -967,7 +967,7 @@ fn color32(c: [f32; 4]) -> Color32 {
 
 fn faction_color32(colors: &MapColors, f: Faction) -> Color32 {
     color32(match f {
-        Faction::Player => colors.player,
+        Faction::Realm(_) => colors.player,
         Faction::Enemy => colors.enemy,
         Faction::Ally => colors.ally,
     })
@@ -984,7 +984,7 @@ fn minimap_area(game: &Game, view: View) -> (i32, i32, i32) {
     for v in game
         .villages()
         .iter()
-        .filter(|v| v.faction == Faction::Player)
+        .filter(|v| v.faction == Faction::Realm(0))
     {
         lo = lo.min(Vec2::new(v.min.0 as f32, v.min.1 as f32));
         hi = hi.max(Vec2::new(v.max.0 as f32 + 1.0, v.max.1 as f32 + 1.0));
@@ -1081,7 +1081,7 @@ fn minimap_ui(
         let at = to_screen(v.center);
         let r = 2.0 + (v.houses as f32).sqrt();
         painter.circle_filled(at, r, faction_color32(colors, v.faction));
-        if v.faction == Faction::Player && v.threatened {
+        if v.faction == Faction::Realm(0) && v.threatened {
             painter.circle_stroke(at, r + 2.0 + pulse * 3.0, Stroke::new(1.5, ALARM));
         }
     }
@@ -1201,7 +1201,7 @@ fn realm_ui(
             let count = |f: Faction| game.villages().iter().filter(|v| v.faction == f).count();
             ui.small(format!(
                 "Villages: {} yours, {} enemy, {} allied",
-                count(Faction::Player),
+                count(Faction::Realm(0)),
                 count(Faction::Enemy),
                 count(Faction::Ally)
             ));
@@ -1216,7 +1216,7 @@ fn realm_ui(
             let mut mine: Vec<_> = game
                 .villages()
                 .iter()
-                .filter(|v| v.faction == Faction::Player)
+                .filter(|v| v.faction == Faction::Realm(0))
                 .collect();
             mine.sort_by(|a, b| {
                 let rank = |v: &crate::game::Village| (!v.threatened, v.knights + v.civilians > 0);
