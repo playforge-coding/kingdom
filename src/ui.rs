@@ -15,7 +15,7 @@ use crate::game::{
     BUILD_NEAR_RADIUS, BUILDER_WAGE, Brush, BuildMode, Command, ESCORT_HIRE_COST, Faction, Game,
     GatherPriority, HORSEMAN_GOLD_COST, HOUSE_GOLD_COST, HOUSE_STONE_COST, HOUSE_WOOD_COST,
     HUT_GOLD_COST, Job, KNIGHT_GOLD_COST, LEVY_GOLD_PAY, LEVY_SERVICE, LaunchRefusal, MAX_ESCORTS,
-    MINE_GOLD_COST, MINE_STONE_COST, Priority, RealmId, SETTLER_CIVILIANS,
+    MINE_GOLD_COST, MINE_STONE_COST, Priority, RealmId, Relation, SETTLER_CIVILIANS,
     SETTLER_CIVILIANS_SPARED, SETTLER_GOLD_COST, SETTLER_STONE_COST, SETTLER_WOOD_COST,
     STONE_PRICE, SandboxTool, TROOP_GOLD_COST, TROOP_KNIGHTS, TROOP_STONE_COST, TROOP_WOOD_COST,
     WALL_GOLD_COST, WALL_STONE_COST, WALL_WOOD_COST, WARSHIP_GOLD_COST, WARSHIP_STONE_COST,
@@ -1222,6 +1222,7 @@ fn realm_ui(
 ) -> Option<Action> {
     let mut action = None;
     let mut call = None;
+    let mut order = None;
     egui::Window::new("Realm")
         .anchor(Align2::RIGHT_TOP, [-12.0, 12.0])
         .resizable(false)
@@ -1245,6 +1246,71 @@ fn realm_ui(
                 count(Faction::Ally)
             ));
             ui.separator();
+
+            // Other realms, and how you stand with each: at war unless both
+            // sides agreed to an alliance. Only shown when there is anyone to
+            // stand with.
+            let others: Vec<RealmId> = (0..game.realm_count()).filter(|&r| r != me).collect();
+            if !others.is_empty() {
+                ui.add(WidgetAtom::new((
+                    icon(ui, icons::SCROLL_TEXT),
+                    RichText::new("Diplomacy").heading(),
+                )));
+                for other in others {
+                    ui.horizontal(|ui| {
+                        let who = match game.realm(other).controller {
+                            crate::game::Controller::Human => format!("Realm {}", other + 1),
+                            crate::game::Controller::Ai => {
+                                format!("Realm {} (computer)", other + 1)
+                            }
+                        };
+                        ui.label(RichText::new(who).strong());
+                        match game.diplomacy().relation(me, other) {
+                            Relation::War => {
+                                ui.label(RichText::new("At war").color(ALARM));
+                                if ui.small_button("Propose alliance").clicked() {
+                                    order = Some(Command::ProposeAlliance(other));
+                                }
+                            }
+                            Relation::Allied => {
+                                ui.label("Allied");
+                                if ui
+                                    .small_button("Leave")
+                                    .on_hover_text(format!(
+                                        "Gives notice: the alliance ends {} seconds later.",
+                                        crate::game::ALLIANCE_NOTICE
+                                    ))
+                                    .clicked()
+                                {
+                                    order = Some(Command::LeaveAlliance(other));
+                                }
+                            }
+                            Relation::Leaving(left) => {
+                                ui.label(
+                                    RichText::new(format!("Alliance ends in {:.0}s", left.ceil()))
+                                        .color(CAUTION),
+                                );
+                            }
+                            Relation::Proposed => {
+                                ui.label("Proposal sent");
+                                if ui.small_button("Withdraw").clicked() {
+                                    order = Some(Command::DeclineAlliance(other));
+                                }
+                            }
+                            Relation::Offered => {
+                                ui.label(RichText::new("Offers an alliance").color(CAUTION));
+                                if ui.small_button("Accept").clicked() {
+                                    order = Some(Command::AcceptAlliance(other));
+                                }
+                                if ui.small_button("Decline").clicked() {
+                                    order = Some(Command::DeclineAlliance(other));
+                                }
+                            }
+                        }
+                    });
+                }
+                ui.separator();
+            }
 
             ui.add(WidgetAtom::new((
                 icon(ui, icons::CASTLE),
@@ -1336,6 +1402,9 @@ fn realm_ui(
         });
     if let Some(center) = call {
         action = Some(Action::Order(Command::CallSettlers(center)));
+    }
+    if let Some(cmd) = order {
+        action = Some(Action::Order(cmd));
     }
     action
 }
@@ -1539,6 +1608,31 @@ fn alerts_ui(ctx: &egui::Context, game: &mut Game, me: RealmId, view: View) -> O
                                     icons::USERS,
                                     color32([0.3, 0.55, 1.0, 1.0]),
                                     "Settlers arrived and joined the village",
+                                ),
+                                AlertKind::AllianceOffered => (
+                                    icons::SCROLL_TEXT,
+                                    CAUTION,
+                                    "A realm proposes an alliance; answer it in the Realm panel",
+                                ),
+                                AlertKind::AllianceFormed => (
+                                    icons::SCROLL_TEXT,
+                                    color32([0.3, 0.55, 1.0, 1.0]),
+                                    "An alliance was made",
+                                ),
+                                AlertKind::AllianceDeclined => (
+                                    icons::SCROLL_TEXT,
+                                    CAUTION,
+                                    "Your proposal of alliance was declined",
+                                ),
+                                AlertKind::AllianceNotice => (
+                                    icons::TRIANGLE_ALERT,
+                                    ALARM,
+                                    "An ally gave notice; the alliance ends soon",
+                                ),
+                                AlertKind::AllianceEnded => (
+                                    icons::SWORDS,
+                                    ALARM,
+                                    "An alliance has ended; you are at war again",
                                 ),
                             };
                             ui.add(icon(ui, glyph).tint(tint));

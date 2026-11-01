@@ -59,19 +59,172 @@ pub enum Faction {
     Ally,
 }
 
-/// Who fights whom. The Enemy is at war with everyone else; realms and
-/// allies stay at peace; and two realms are at war with each other unless
-/// they are one and the same.
-fn hostile(a: Faction, b: Faction) -> bool {
-    match (a, b) {
-        (Faction::Realm(x), Faction::Realm(y)) => x != y,
-        _ => (a == Faction::Enemy) != (b == Faction::Enemy),
-    }
+/// Seconds between a realm giving notice on an alliance and the alliance
+/// ending, so nobody can turn on an ally in the middle of a shared battle.
+pub const ALLIANCE_NOTICE: f32 = 60.0;
+
+/// Who fights whom. The Enemy is at war with every realm and with the
+/// allies; realms and the allies stay at peace; and two realms are at war
+/// with each other unless they have made an alliance (or are one and the
+/// same). An alliance needs both sides: one realm proposes, the other
+/// accepts. Leaving one takes `ALLIANCE_NOTICE` seconds to come into force.
+///
+/// The table is sized by the number of realms and nothing else; every
+/// relation is a pair of realm ids looked up in a flat `n * n` grid.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Diplomacy {
+    n: usize,
+    /// `allied[a * n + b]`, kept symmetric.
+    allied: Vec<bool>,
+    /// Standing proposals as (from, to).
+    proposals: Vec<(RealmId, RealmId)>,
+    /// Alliances under notice as (leaver, other, seconds left).
+    notices: Vec<(RealmId, RealmId, f32)>,
+    /// May the computer's realms make alliances? A match setting; when off,
+    /// a computer-run realm declines every proposal and never makes one.
+    pub ai_may_ally: bool,
 }
 
-/// Hostility between two building owners, mirroring [`hostile`].
-fn owner_hostile(a: Owner, b: Owner) -> bool {
-    hostile(faction_of(a), faction_of(b))
+/// How two realms stand with each other, as the HUD shows it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Relation {
+    War,
+    Allied,
+    /// Allied, but the alliance ends in this many seconds.
+    Leaving(f32),
+    /// `a` has proposed an alliance to `b` and awaits an answer.
+    Proposed,
+    /// `b` has proposed an alliance to `a`, which `a` may accept.
+    Offered,
+}
+
+impl Diplomacy {
+    /// Everyone at war, with no proposals standing.
+    pub fn new(realms: usize) -> Self {
+        Diplomacy {
+            n: realms,
+            allied: vec![false; realms * realms],
+            proposals: Vec::new(),
+            notices: Vec::new(),
+            ai_may_ally: true,
+        }
+    }
+
+    pub fn allied(&self, a: RealmId, b: RealmId) -> bool {
+        let (a, b) = (a as usize, b as usize);
+        a < self.n && b < self.n && self.allied[a * self.n + b]
+    }
+
+    fn set_allied(&mut self, a: RealmId, b: RealmId, on: bool) {
+        let (a, b) = (a as usize, b as usize);
+        if a < self.n && b < self.n && a != b {
+            self.allied[a * self.n + b] = on;
+            self.allied[b * self.n + a] = on;
+        }
+    }
+
+    /// Do units of `a` and `b` fight each other?
+    pub fn hostile(&self, a: Faction, b: Faction) -> bool {
+        match (a, b) {
+            (Faction::Realm(x), Faction::Realm(y)) => x != y && !self.allied(x, y),
+            _ => (a == Faction::Enemy) != (b == Faction::Enemy),
+        }
+    }
+
+    /// Hostility between two building owners, mirroring [`Self::hostile`].
+    fn owner_hostile(&self, a: Owner, b: Owner) -> bool {
+        self.hostile(faction_of(a), faction_of(b))
+    }
+
+    /// How realm `a` stands with realm `b`.
+    pub fn relation(&self, a: RealmId, b: RealmId) -> Relation {
+        if let Some(&(_, _, left)) = self
+            .notices
+            .iter()
+            .find(|&&(x, y, _)| (x == a && y == b) || (x == b && y == a))
+        {
+            return Relation::Leaving(left);
+        }
+        if self.allied(a, b) {
+            return Relation::Allied;
+        }
+        if self.proposals.contains(&(a, b)) {
+            return Relation::Proposed;
+        }
+        if self.proposals.contains(&(b, a)) {
+            return Relation::Offered;
+        }
+        Relation::War
+    }
+
+    /// `from` proposes an alliance to `to`. Nothing happens if they are
+    /// already allied or the proposal already stands; a proposal that meets
+    /// one coming the other way is an acceptance.
+    fn propose(&mut self, from: RealmId, to: RealmId) -> bool {
+        if from == to || (to as usize) >= self.n || self.allied(from, to) {
+            return false;
+        }
+        if self.proposals.contains(&(to, from)) {
+            return self.accept(from, to);
+        }
+        if self.proposals.contains(&(from, to)) {
+            return false;
+        }
+        self.proposals.push((from, to));
+        true
+    }
+
+    /// `to` accepts the proposal `from` made. False if none stands.
+    fn accept(&mut self, to: RealmId, from: RealmId) -> bool {
+        let Some(i) = self.proposals.iter().position(|&p| p == (from, to)) else {
+            return false;
+        };
+        self.proposals.swap_remove(i);
+        self.proposals.retain(|&p| p != (to, from));
+        self.set_allied(from, to, true);
+        true
+    }
+
+    /// `to` declines the proposal `from` made, or `from` withdraws its own.
+    fn decline(&mut self, a: RealmId, b: RealmId) -> bool {
+        let before = self.proposals.len();
+        self.proposals.retain(|&p| p != (a, b) && p != (b, a));
+        self.proposals.len() < before
+    }
+
+    /// `leaver` gives notice on its alliance with `other`. The alliance
+    /// holds for `ALLIANCE_NOTICE` more seconds, then ends.
+    fn leave(&mut self, leaver: RealmId, other: RealmId) -> bool {
+        if !self.allied(leaver, other) {
+            return false;
+        }
+        if self
+            .notices
+            .iter()
+            .any(|&(x, y, _)| (x == leaver && y == other) || (x == other && y == leaver))
+        {
+            return false;
+        }
+        self.notices.push((leaver, other, ALLIANCE_NOTICE));
+        true
+    }
+
+    /// Run the notice clocks down; returns the alliances that ended this
+    /// tick as (leaver, other).
+    fn tick(&mut self, dt: f32) -> Vec<(RealmId, RealmId)> {
+        let mut ended = Vec::new();
+        for n in &mut self.notices {
+            n.2 -= dt;
+            if n.2 <= 0.0 {
+                ended.push((n.0, n.1));
+            }
+        }
+        self.notices.retain(|n| n.2 > 0.0);
+        for &(a, b) in &ended {
+            self.set_allied(a, b, false);
+        }
+        ended
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -1472,6 +1625,14 @@ pub enum Command {
     /// Take the one-click action of the realm's alert at this index.
     RespondToAlert(usize),
     DismissAlert(usize),
+    /// Propose an alliance to another realm (or accept the one it offered).
+    ProposeAlliance(RealmId),
+    /// Accept the alliance another realm proposed.
+    AcceptAlliance(RealmId),
+    /// Decline the alliance another realm proposed, or withdraw your own.
+    DeclineAlliance(RealmId),
+    /// Give notice on an alliance; it ends `ALLIANCE_NOTICE` seconds later.
+    LeaveAlliance(RealmId),
 }
 
 /// What a left-button drag does on each tile it crosses after the press,
@@ -1764,10 +1925,10 @@ enum Gunner {
 
 impl Gunner {
     /// Would this gunner's shot harm something owned by `faction`?
-    fn harms(self, faction: Faction) -> bool {
+    fn harms(self, rel: &Diplomacy, faction: Faction) -> bool {
         match self {
             Gunner::Pirate => true,
-            Gunner::Navy(g) => hostile(g, faction),
+            Gunner::Navy(g) => rel.hostile(g, faction),
         }
     }
 }
@@ -1939,6 +2100,16 @@ pub enum AlertKind {
     MigrantsSetOut,
     /// Civilians called from another village walked in and joined this one.
     MigrantsArrived,
+    /// Another realm proposed an alliance; the Realm panel can answer it.
+    AllianceOffered,
+    /// An alliance was made, by your acceptance or theirs.
+    AllianceFormed,
+    /// Your proposal was turned down.
+    AllianceDeclined,
+    /// An ally gave notice: the alliance ends after `ALLIANCE_NOTICE`.
+    AllianceNotice,
+    /// An alliance ran out its notice and ended; you are at war again.
+    AllianceEnded,
 }
 
 /// Why a settle or troop-landing order was refused, carried on its
@@ -2335,6 +2506,8 @@ pub struct Game {
     /// single-player game. Never empty, and never reordered: units, fleets
     /// and tiles refer to realms by index.
     realms: Vec<Realm>,
+    /// Who among the realms is at war with whom.
+    diplomacy: Diplomacy,
     /// Cargo ships currently at sea, sailing out to sell their goods.
     ships: Vec<Ship>,
     /// Transports at sea: settler ships out to found new villages and troop
@@ -2579,6 +2752,7 @@ impl Game {
         Game {
             world,
             entities,
+            diplomacy: Diplomacy::new(realms.len()),
             realms,
             ships: Vec::new(),
             transports: Vec::new(),
@@ -2621,6 +2795,64 @@ impl Game {
 
     pub fn realm_mut(&mut self, realm: RealmId) -> &mut Realm {
         &mut self.realms[realm as usize]
+    }
+
+    /// Who among the realms is at war with whom.
+    pub fn diplomacy(&self) -> &Diplomacy {
+        &self.diplomacy
+    }
+
+    /// How many realms share the map.
+    pub fn realm_count(&self) -> RealmId {
+        self.realms.len() as RealmId
+    }
+
+    /// Do units of `a` and `b` fight each other?
+    fn hostile(&self, a: Faction, b: Faction) -> bool {
+        self.diplomacy.hostile(a, b)
+    }
+
+    /// Run the alliance notice clocks, and tell both sides when one ends.
+    fn tick_diplomacy(&mut self, dt: f32) {
+        for (a, b) in self.diplomacy.tick(dt) {
+            let at = self.start_center(b);
+            self.realm_mut(a).push_alert(AlertKind::AllianceEnded, at);
+            let at = self.start_center(a);
+            self.realm_mut(b).push_alert(AlertKind::AllianceEnded, at);
+            log::info!("the alliance between realm {a} and realm {b} ended");
+        }
+    }
+
+    /// A proposal reached a realm the computer runs: it answers at once, by
+    /// the match's rule on whether its realms may ally at all. (A real
+    /// weighing of the offer belongs to the computer player, which comes
+    /// later; until then a permitted alliance is always accepted.)
+    fn answer_proposal(&mut self, to: RealmId, from: RealmId) {
+        if self.realm(to).controller != Controller::Ai {
+            return;
+        }
+        if self.diplomacy.ai_may_ally {
+            self.form_alliance(to, from);
+        } else {
+            self.diplomacy.decline(to, from);
+            let at = self.start_center(to);
+            self.realm_mut(from)
+                .push_alert(AlertKind::AllianceDeclined, at);
+        }
+    }
+
+    /// `to` accepts `from`'s proposal: the alliance forms and both hear of it.
+    fn form_alliance(&mut self, to: RealmId, from: RealmId) -> bool {
+        if !self.diplomacy.accept(to, from) {
+            return false;
+        }
+        let at = self.start_center(to);
+        self.realm_mut(from)
+            .push_alert(AlertKind::AllianceFormed, at);
+        let at = self.start_center(from);
+        self.realm_mut(to).push_alert(AlertKind::AllianceFormed, at);
+        log::info!("realm {from} and realm {to} formed an alliance");
+        true
     }
 
     /// The ids of every realm, for walking them all. A plain range, so it
@@ -2765,6 +2997,7 @@ impl Game {
             self.enemy_sea_raid(dt);
         }
         self.grow_saplings(dt);
+        self.tick_diplomacy(dt);
 
         // Decide who is stepped this frame, and by how much. Everyone near the
         // view runs at the full frame rate; the rest of the realm accrues time
@@ -2902,7 +3135,7 @@ impl Game {
                 let mut best: Option<Vec2> = None;
                 let mut bd = BOW_RANGE * BOW_RANGE;
                 grid.for_each_within(pi, BOW_RANGE, |j, pj| {
-                    if j == i || !hostile(fi, snap[j].1) {
+                    if j == i || !self.diplomacy.hostile(fi, snap[j].1) {
                         return;
                     }
                     let d = pi.distance_squared(pj);
@@ -2925,7 +3158,7 @@ impl Game {
                         let other = &self.entities[j];
                         let blade = matches!(other.job, Job::Knight | Job::Horseman | Job::Axeman);
                         let d = pi.distance_squared(pj);
-                        if blade && hostile(fi, snap[j].1) && d <= td {
+                        if blade && self.diplomacy.hostile(fi, snap[j].1) && d <= td {
                             td = d;
                             threat = Some(pj);
                         }
@@ -2946,7 +3179,8 @@ impl Game {
             // unless the foe dodges clear (see `cavalry_step`).
             if let Some(c) = self.entities[i].charge {
                 if c.phase == ChargePhase::Run
-                    && let Some(j) = nearest_foe(&snap, &grid, pi, fi, COMBAT_RANGE)
+                    && let Some(j) =
+                        nearest_foe(&self.diplomacy, &snap, &grid, pi, fi, COMBAT_RANGE)
                 {
                     let e = &mut self.entities[i];
                     e.charge = None;
@@ -2970,7 +3204,7 @@ impl Game {
             let mut best: Option<usize> = None;
             let mut bd = DUEL_RADIUS * DUEL_RADIUS;
             grid.for_each_within(pi, DUEL_RADIUS, |j, pj| {
-                if j == i || !hostile(fi, snap[j].1) {
+                if j == i || !self.diplomacy.hostile(fi, snap[j].1) {
                     return;
                 }
                 let d = pi.distance_squared(pj);
@@ -3021,15 +3255,21 @@ impl Game {
                     acting[i] = true;
                     self.entities[i].facing = dir_from_vec(snap[j].0 - pi);
                 }
-            } else if let Some(wall) =
-                adjacent_enemy_wall(&self.world, owner_of(fi), self.entities[i].tile())
-            {
+            } else if let Some(wall) = adjacent_enemy_wall(
+                &self.diplomacy,
+                &self.world,
+                owner_of(fi),
+                self.entities[i].tile(),
+            ) {
                 *wall_damage.entry(wall).or_insert(0.0) += siege_dps(self.entities[i].job) * adt;
                 acting[i] = true;
                 self.entities[i].facing = dir_from_vec(tile_center(wall) - pi);
-            } else if let Some(hut) =
-                adjacent_enemy_hut(&self.world, owner_of(fi), self.entities[i].tile())
-            {
+            } else if let Some(hut) = adjacent_enemy_hut(
+                &self.diplomacy,
+                &self.world,
+                owner_of(fi),
+                self.entities[i].tile(),
+            ) {
                 *hut_damage.entry(hut).or_insert(0.0) += siege_dps(self.entities[i].job) * adt;
                 acting[i] = true;
                 self.entities[i].facing = dir_from_vec(tile_center(hut) - pi);
@@ -3094,6 +3334,7 @@ impl Game {
                         site_claims: &mut site_claims,
                     };
                     ai_step(
+                        &self.diplomacy,
                         &self.world,
                         &mut self.entities[i],
                         &mut self.rng,
@@ -3112,6 +3353,7 @@ impl Game {
                     )
                 }
                 (Faction::Realm(r), _) => ai_step(
+                    &self.diplomacy,
                     &self.world,
                     &mut self.entities[i],
                     &mut self.rng,
@@ -3129,6 +3371,7 @@ impl Game {
                     adt,
                 ),
                 (Faction::Enemy, _) => ai_step(
+                    &self.diplomacy,
                     &self.world,
                     &mut self.entities[i],
                     &mut self.rng,
@@ -3151,6 +3394,7 @@ impl Game {
                     // keep to their own affairs.
                     let merc = self.entities[i].mercenary();
                     ai_step(
+                        &self.diplomacy,
                         &self.world,
                         &mut self.entities[i],
                         &mut self.rng,
@@ -3251,7 +3495,7 @@ impl Game {
                 }
                 let mut near = false;
                 grid.for_each_within(snap[i].0, BATTLE_RADIUS, |j, _| {
-                    near |= hostile(snap[i].1, snap[j].1);
+                    near |= self.diplomacy.hostile(snap[i].1, snap[j].1);
                 });
                 near
             })
@@ -3330,7 +3574,7 @@ impl Game {
                     let dodged = self.entities[j]
                         .duel
                         .is_some_and(|d| d.stance == Stance::StepBack && d.dodge);
-                    if j != i && hostile(fi, snap[j].1) && !dodged {
+                    if j != i && self.diplomacy.hostile(fi, snap[j].1) && !dodged {
                         damage[j] += SPIN_DAMAGE;
                     }
                 });
@@ -3338,7 +3582,7 @@ impl Game {
             return true;
         }
         let following_through = e.reload > AXE_RELOAD - AXE_THROW_POSE;
-        let Some(j) = nearest_foe(snap, grid, pi, fi, AXE_RANGE) else {
+        let Some(j) = nearest_foe(&self.diplomacy, snap, grid, pi, fi, AXE_RANGE) else {
             *acting = following_through;
             return following_through;
         };
@@ -3384,7 +3628,7 @@ impl Game {
             if !other.is_soldier() || other.flee > 0.0 {
                 return;
             }
-            if hostile(fi, snap[j].1) {
+            if self.diplomacy.hostile(fi, snap[j].1) {
                 foes += 1;
                 center += pj;
             } else if snap[j].1 == fi {
@@ -3675,7 +3919,7 @@ impl Game {
         let faction = Faction::Realm(realm);
         let target = self
             .factions()
-            .filter(|&f| hostile(f, faction))
+            .filter(|&f| self.hostile(f, faction))
             .flat_map(|f| self.world.houses_of(owner_of(f)).iter())
             .map(|&h| tile_center(h))
             .min_by(|a, b| {
@@ -3827,10 +4071,9 @@ impl Game {
             m.age += dt;
             m.pos += m.vel * dt;
             let (ap, thrower, damage) = (m.pos, m.thrower, m.kind.damage());
-            if let Some(&(_, side)) = spinning
-                .iter()
-                .find(|&&(p, f)| hostile(thrower, f) && p.distance_squared(ap) < deflect2)
-            {
+            if let Some(&(_, side)) = spinning.iter().find(|&&(p, f)| {
+                self.diplomacy.hostile(thrower, f) && p.distance_squared(ap) < deflect2
+            }) {
                 let spread = SPIN_DEFLECT_SPREAD as i32;
                 let turn = (self.rng.range(-spread, spread + 1) as f32).to_radians();
                 let m = &mut self.missiles[ai];
@@ -3840,10 +4083,9 @@ impl Game {
                 ai += 1;
                 continue;
             }
-            let struck = self
-                .entities
-                .iter()
-                .position(|e| hostile(thrower, e.faction) && e.pos.distance_squared(ap) < r2);
+            let struck = self.entities.iter().position(|e| {
+                self.diplomacy.hostile(thrower, e.faction) && e.pos.distance_squared(ap) < r2
+            });
             if let Some(ei) = struck {
                 self.entities[ei].hp -= damage;
                 if self.entities[ei].hp <= 0.0 {
@@ -3886,6 +4128,7 @@ impl Game {
             // Steer toward the nearest vessel in sight (any faction's cargo
             // ship, transport, or warship), else wander.
             let target = nearest_vessel(
+                &self.diplomacy,
                 &self.ships,
                 &self.transports,
                 &self.warships,
@@ -3932,6 +4175,7 @@ impl Game {
             if self.pirates[i].reload <= 0.0 {
                 let pp = self.pirates[i].pos;
                 if let Some(t) = nearest_vessel(
+                    &self.diplomacy,
                     &self.ships,
                     &self.transports,
                     &self.warships,
@@ -3979,9 +4223,10 @@ impl Game {
     /// could harm, unarmored hulls first (they sink from one hit), and returns
     /// whether it struck something.
     fn resolve_shot(&mut self, bp: Vec2, r2: f32, gunner: Gunner) -> bool {
+        let rel = &self.diplomacy;
         // Cargo ships are unarmed: one hit sinks hull and cargo together.
         if let Some(si) = self.ships.iter().position(|s| {
-            gunner.harms(Faction::Realm(s.realm)) && (s.pos - bp).length_squared() < r2
+            gunner.harms(rel, Faction::Realm(s.realm)) && (s.pos - bp).length_squared() < r2
         }) {
             log::info!("a cargo ship was sunk, its cargo lost at sea!");
             let s = self.ships.swap_remove(si);
@@ -3995,7 +4240,7 @@ impl Game {
         if let Some(si) = self
             .transports
             .iter()
-            .position(|s| gunner.harms(s.faction) && (s.pos - bp).length_squared() < r2)
+            .position(|s| gunner.harms(rel, s.faction) && (s.pos - bp).length_squared() < r2)
         {
             let s = self.transports.swap_remove(si);
             log::info!("a transport was sunk, all souls lost at sea!");
@@ -4022,7 +4267,7 @@ impl Game {
         if let Some(wi) = self
             .warships
             .iter()
-            .position(|w| gunner.harms(w.faction) && (w.pos - bp).length_squared() < r2)
+            .position(|w| gunner.harms(rel, w.faction) && (w.pos - bp).length_squared() < r2)
         {
             self.warships[wi].hp -= CANNON_DAMAGE;
             if self.warships[wi].hp <= 0.0 {
@@ -4062,7 +4307,7 @@ impl Game {
         if let Some(ei) = self
             .entities
             .iter()
-            .position(|e| hostile(g, e.faction) && e.pos.distance_squared(bp) < r2)
+            .position(|e| rel.hostile(g, e.faction) && e.pos.distance_squared(bp) < r2)
         {
             self.entities[ei].hp -= CANNON_DAMAGE;
             if self.entities[ei].hp <= 0.0 {
@@ -4113,6 +4358,7 @@ impl Game {
         let gunner = Gunner::Navy(faction);
         let mut best = WARSHIP_DETECT_RANGE;
         let mut target = nearest_vessel(
+            &self.diplomacy,
             &self.ships,
             &self.transports,
             &self.warships,
@@ -4131,7 +4377,7 @@ impl Game {
             }
         }
         for e in &self.entities {
-            if !hostile(faction, e.faction) {
+            if !self.hostile(faction, e.faction) {
                 continue;
             }
             let d = (e.pos - from).length();
@@ -4316,7 +4562,7 @@ impl Game {
             let danger = self
                 .entities
                 .iter()
-                .any(|e| hostile(e.faction, faction) && e.pos.distance_squared(center) <= r2);
+                .any(|e| self.hostile(e.faction, faction) && e.pos.distance_squared(center) <= r2);
             if danger {
                 continue;
             }
@@ -4421,7 +4667,7 @@ impl Game {
         let contested = self
             .entities
             .iter()
-            .any(|e| hostile(e.faction, by) && e.pos.distance_squared(center) <= danger2);
+            .any(|e| self.hostile(e.faction, by) && e.pos.distance_squared(center) <= danger2);
         let r2 = CAPTURE_RADIUS * CAPTURE_RADIUS;
         let mut inside: Vec<usize> = self
             .entities
@@ -4538,7 +4784,7 @@ impl Game {
             if !inside {
                 continue;
             }
-            if !hostile(e.faction, owner) {
+            if !self.hostile(e.faction, owner) {
                 return None;
             }
             if e.faction == Faction::Ally {
@@ -4604,7 +4850,7 @@ impl Game {
                             }
                             Job::Civilian => v.civilians += 1,
                         }
-                    } else if hostile(e.faction, faction) && d2 <= threat2 {
+                    } else if self.diplomacy.hostile(e.faction, faction) && d2 <= threat2 {
                         v.threatened = true;
                     }
                 }
@@ -5582,6 +5828,46 @@ impl Game {
                 realm.dismiss_alert(i);
                 had
             }
+            Command::ProposeAlliance(other) => {
+                if other as usize >= self.realms.len() || other == realm {
+                    return false;
+                }
+                // A proposal that meets one coming the other way is an
+                // acceptance, with the alliance's own alerts.
+                if self.diplomacy.relation(realm, other) == Relation::Offered {
+                    return self.form_alliance(realm, other);
+                }
+                if !self.diplomacy.propose(realm, other) {
+                    return false;
+                }
+                let at = self.start_center(realm);
+                self.realm_mut(other)
+                    .push_alert(AlertKind::AllianceOffered, at);
+                self.answer_proposal(other, realm);
+                true
+            }
+            Command::AcceptAlliance(other) => self.form_alliance(realm, other),
+            Command::DeclineAlliance(other) => {
+                let offered = self.diplomacy.relation(realm, other) == Relation::Offered;
+                if !self.diplomacy.decline(realm, other) {
+                    return false;
+                }
+                if offered {
+                    let at = self.start_center(realm);
+                    self.realm_mut(other)
+                        .push_alert(AlertKind::AllianceDeclined, at);
+                }
+                true
+            }
+            Command::LeaveAlliance(other) => {
+                if !self.diplomacy.leave(realm, other) {
+                    return false;
+                }
+                let at = self.start_center(realm);
+                self.realm_mut(other)
+                    .push_alert(AlertKind::AllianceNotice, at);
+                true
+            }
         }
     }
 
@@ -6279,11 +6565,11 @@ impl Game {
         let threats: Vec<Tile> = self
             .entities
             .iter()
-            .filter(|e| e.is_soldier() && hostile(e.faction, faction))
+            .filter(|e| e.is_soldier() && self.hostile(e.faction, faction))
             .map(|e| e.tile())
             .chain(
                 self.factions()
-                    .filter(|&f| hostile(f, faction))
+                    .filter(|&f| self.hostile(f, faction))
                     .flat_map(|f| self.world.houses_of(owner_of(f)).iter().copied()),
             )
             .filter(near_road)
@@ -6791,7 +7077,8 @@ impl Game {
             let engaged = !self.realm(realm).rallies.is_empty()
                 || self.entities.iter().filter(|e| hired(e)).any(|m| {
                     self.entities.iter().any(|e| {
-                        hostile(e.faction, Faction::Ally) && e.pos.distance_squared(m.pos) <= r2
+                        self.diplomacy.hostile(e.faction, Faction::Ally)
+                            && e.pos.distance_squared(m.pos) <= r2
                     })
                 });
             let r = self.realm_mut(realm);
@@ -7177,6 +7464,7 @@ impl Game {
 
 #[allow(clippy::too_many_arguments)]
 fn ai_step(
+    rel: &Diplomacy,
     world: &World,
     e: &mut Entity,
     rng: &mut Rng,
@@ -7205,7 +7493,7 @@ fn ai_step(
         // to work) it shelters and wanders like any other villager below.
         (Faction::Realm(_), Job::Civilian) if farm.is_some() => {
             let farm = farm.expect("checked above");
-            gather_behavior(world, e, owner, pref, home, farm, snap, grid, rng, dt)
+            gather_behavior(rel, world, e, owner, pref, home, farm, snap, grid, rng, dt)
         }
         (_, Job::Knight | Job::Horseman | Job::Bowman | Job::Axeman) => {
             if under_limit {
@@ -7214,14 +7502,14 @@ fn ai_step(
             } else {
                 let mobility = mobility_of(e.job, bridge_ok);
                 soldier_behavior(
-                    world, e, owner, rng, snap, grid, rally, huts, mobility, acting, foe, dt,
+                    rel, world, e, owner, rng, snap, grid, rally, huts, mobility, acting, foe, dt,
                 )
             }
         }
         (_, Job::Civilian) => {
             // Enemy and allied civilians shelter in their own huts when a hostile
             // faction closes in, then putter around their village.
-            if let Some(ev) = seek_shelter(world, e, owner, e.faction, snap, grid, huts, dt) {
+            if let Some(ev) = seek_shelter(rel, world, e, owner, e.faction, snap, grid, huts, dt) {
                 return ev;
             }
             wander_behavior(world, e, owner, None, rng, dt);
@@ -7495,6 +7783,7 @@ fn plan_plant(
 /// vice versa. Only the enemy triggers a flight to shelter.) Answered from the
 /// spatial grid so every civilian can afford to ask it every frame.
 fn enemy_within(
+    rel: &Diplomacy,
     snap: &[(Vec2, Faction)],
     grid: &Grid,
     pos: Vec2,
@@ -7503,7 +7792,7 @@ fn enemy_within(
 ) -> bool {
     let mut found = false;
     grid.for_each_within(pos, r, |i, _| {
-        found = found || hostile(snap[i].1, faction);
+        found = found || rel.hostile(snap[i].1, faction);
     });
     found
 }
@@ -7526,6 +7815,7 @@ fn nearest_shelter(world: &World, owner: u8, huts: &[Tile], start: Tile) -> Opti
 /// or `None` while still running); `None` means "no need to flee".
 #[allow(clippy::too_many_arguments)]
 fn seek_shelter(
+    rel: &Diplomacy,
     world: &World,
     e: &mut Entity,
     owner: u8,
@@ -7535,7 +7825,7 @@ fn seek_shelter(
     huts: &[Tile],
     dt: f32,
 ) -> Option<Option<StepEvent>> {
-    if !enemy_within(snap, grid, e.pos, faction, DANGER_RADIUS) {
+    if !enemy_within(rel, snap, grid, e.pos, faction, DANGER_RADIUS) {
         return None;
     }
     let hut = nearest_shelter(world, owner, huts, e.tile())?;
@@ -7557,6 +7847,7 @@ fn seek_shelter(
 
 #[allow(clippy::too_many_arguments)]
 fn gather_behavior(
+    rel: &Diplomacy,
     world: &World,
     e: &mut Entity,
     owner: u8,
@@ -7571,7 +7862,7 @@ fn gather_behavior(
     let here = e.tile();
 
     // Survival first: if the enemy's near, drop everything and hide in a hut.
-    if let Some(ev) = seek_shelter(world, e, owner, e.faction, snap, grid, farm.huts, dt) {
+    if let Some(ev) = seek_shelter(rel, world, e, owner, e.faction, snap, grid, farm.huts, dt) {
         release_cave(e, farm.cave_use);
         return ev;
     }
@@ -7850,6 +8141,7 @@ fn gather_behavior(
 
 #[allow(clippy::too_many_arguments)]
 fn soldier_behavior(
+    rel: &Diplomacy,
     world: &World,
     e: &mut Entity,
     owner: u8,
@@ -7966,7 +8258,7 @@ fn soldier_behavior(
 
     // A horseman out on a charge rides it through.
     if e.charge.is_some() {
-        cavalry_step(world, e, owner, snap, grid, dt);
+        cavalry_step(rel, world, e, owner, snap, grid, dt);
         return None;
     }
 
@@ -7994,7 +8286,7 @@ fn soldier_behavior(
     // rather than trotting up.
     if mobility == Mobility::Mounted
         && e.charge_cooldown <= 0.0
-        && let Some(j) = nearest_foe(snap, grid, e.pos, e.faction, CHARGE_RANGE)
+        && let Some(j) = nearest_foe(rel, snap, grid, e.pos, e.faction, CHARGE_RANGE)
         && e.pos.distance(snap[j].0) >= CHARGE_MIN_RANGE
         && clear_run(world, owner, e.pos, snap[j].0)
     {
@@ -8002,7 +8294,7 @@ fn soldier_behavior(
             phase: ChargePhase::Run,
             time: CHARGE_TIME,
         });
-        cavalry_step(world, e, owner, snap, grid, dt);
+        cavalry_step(rel, world, e, owner, snap, grid, dt);
         return None;
     }
 
@@ -8018,10 +8310,10 @@ fn soldier_behavior(
     let faction = e.faction;
     let foes: HashSet<Tile> = snap
         .iter()
-        .filter(|&&(_, f)| hostile(f, faction))
+        .filter(|&&(_, f)| rel.hostile(f, faction))
         .map(|&(p, _)| (p.x.floor() as i32, p.y.floor() as i32))
         .collect();
-    let siege = !ranged && any_hostile_hut(world, owner, huts);
+    let siege = !ranged && any_hostile_hut(rel, world, owner, huts);
 
     if e.may_replan() {
         e.repath = REPLAN_TICK;
@@ -8029,13 +8321,13 @@ fn soldier_behavior(
             if ranged {
                 let mut in_bowshot = false;
                 grid.for_each_within(tile_center((x, y)), BOW_STANDOFF, |j, _| {
-                    in_bowshot |= hostile(snap[j].1, faction);
+                    in_bowshot |= rel.hostile(snap[j].1, faction);
                 });
                 return in_bowshot;
             }
             foes.contains(&(x, y))
-                || adjacent_enemy_wall(world, owner, (x, y)).is_some()
-                || adjacent_enemy_hut(world, owner, (x, y)).is_some()
+                || adjacent_enemy_wall(rel, world, owner, (x, y)).is_some()
+                || adjacent_enemy_hut(rel, world, owner, (x, y)).is_some()
         };
         // Engage the quickest-reached foe or enemy structure, counting any
         // hacking or bridging on the way in with the walking, so an obstacle is
@@ -8182,6 +8474,7 @@ fn back_away(world: &World, e: &mut Entity, owner: u8, threat: Vec2, dt: f32) {
 /// reach. The charge is called off when no foe is left near, the way is
 /// blocked, the wheel left too little room, or the run goes on too long.
 fn cavalry_step(
+    rel: &Diplomacy,
     world: &World,
     e: &mut Entity,
     owner: u8,
@@ -8198,7 +8491,7 @@ fn cavalry_step(
         e.charge_cooldown = CHARGE_RETRY;
         set_anim(e, Anim::Idle, dt);
     };
-    let Some(j) = nearest_foe(snap, grid, e.pos, e.faction, CHARGE_RANGE + 1.0) else {
+    let Some(j) = nearest_foe(rel, snap, grid, e.pos, e.faction, CHARGE_RANGE + 1.0) else {
         return call_off(e);
     };
     let foe = snap[j].0;
@@ -8234,6 +8527,7 @@ fn cavalry_step(
 
 /// The index of the nearest unit hostile to `faction` within `r` of `pos`.
 fn nearest_foe(
+    rel: &Diplomacy,
     snap: &[(Vec2, Faction)],
     grid: &Grid,
     pos: Vec2,
@@ -8244,7 +8538,7 @@ fn nearest_foe(
     let mut bd = r * r;
     grid.for_each_within(pos, r, |j, pj| {
         let d = pos.distance_squared(pj);
-        if hostile(faction, snap[j].1) && d <= bd {
+        if rel.hostile(faction, snap[j].1) && d <= bd {
             bd = d;
             best = Some(j);
         }
@@ -9028,11 +9322,11 @@ fn plan_gather_kind(
 
 /// A hostile-owned wall adjacent to `tile`, if any (which knights hack down).
 /// Friendly and allied walls are left alone.
-fn adjacent_enemy_wall(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
+fn adjacent_enemy_wall(rel: &Diplomacy, world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
         let (nx, ny) = (tile.0 + dx, tile.1 + dy);
         if let Some(w) = world.wall(nx, ny)
-            && owner_hostile(w.owner, owner)
+            && rel.owner_hostile(w.owner, owner)
         {
             return Some((nx, ny));
         }
@@ -9040,22 +9334,22 @@ fn adjacent_enemy_wall(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     None
 }
 
-/// Does the enemy still hold any hut? Cheap gate before a knight commits to a
+/// Does a foe still hold any hut? Cheap gate before a knight commits to a
 /// full-budget assault BFS when no foe is on the field.
-fn any_hostile_hut(world: &World, owner: u8, huts: &[Tile]) -> bool {
+fn any_hostile_hut(rel: &Diplomacy, world: &World, owner: u8, huts: &[Tile]) -> bool {
     huts.iter().any(|&(x, y)| {
         world
             .hut(x, y)
-            .is_some_and(|h| owner_hostile(h.owner, owner))
+            .is_some_and(|h| rel.owner_hostile(h.owner, owner))
     })
 }
 
 /// A hostile-owned hut adjacent to `tile`, if any (which knights break into).
-fn adjacent_enemy_hut(world: &World, owner: u8, tile: Tile) -> Option<Tile> {
+fn adjacent_enemy_hut(rel: &Diplomacy, world: &World, owner: u8, tile: Tile) -> Option<Tile> {
     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
         let (nx, ny) = (tile.0 + dx, tile.1 + dy);
         if let Some(h) = world.hut(nx, ny)
-            && owner_hostile(h.owner, owner)
+            && rel.owner_hostile(h.owner, owner)
         {
             return Some((nx, ny));
         }
@@ -9341,6 +9635,7 @@ fn open_sea(world: &World, x: i32, y: i32) -> bool {
 /// `max` of `from` that `gunner` would fire on, if any. Cargo ships fly
 /// their realm's flag; the rest their own faction's.
 fn nearest_vessel(
+    rel: &Diplomacy,
     ships: &[Ship],
     transports: &[Transport],
     warships: &[Warship],
@@ -9352,7 +9647,7 @@ fn nearest_vessel(
     let mut pos = None;
     for s in ships
         .iter()
-        .filter(|s| gunner.harms(Faction::Realm(s.realm)))
+        .filter(|s| gunner.harms(rel, Faction::Realm(s.realm)))
     {
         let d = (s.pos - from).length();
         if d < best {
@@ -9360,14 +9655,14 @@ fn nearest_vessel(
             pos = Some(s.pos);
         }
     }
-    for s in transports.iter().filter(|s| gunner.harms(s.faction)) {
+    for s in transports.iter().filter(|s| gunner.harms(rel, s.faction)) {
         let d = (s.pos - from).length();
         if d < best {
             best = d;
             pos = Some(s.pos);
         }
     }
-    for w in warships.iter().filter(|w| gunner.harms(w.faction)) {
+    for w in warships.iter().filter(|w| gunner.harms(rel, w.faction)) {
         let d = (w.pos - from).length();
         if d < best {
             best = d;
@@ -9529,7 +9824,7 @@ const MAGIC: &[u8; 4] = b"KGDM";
 /// version listed in `from_bytes` loadable: new sections go at the tail of the
 /// blob and default to empty when a save predates them, so upgrading the game
 /// never strands a player's world.
-const VERSION: u8 = 20;
+const VERSION: u8 = 21;
 /// Oldest save version `from_bytes` still accepts. Version 13 is the last
 /// format before transports (it has no transport section to read), v14's
 /// transports carried only settlers (no per-ship knight count), v15 predates
@@ -9957,6 +10252,27 @@ impl Game {
         for w in &self.warships {
             wu8(&mut b, realm_u8(w.hired_by));
         }
+
+        // v21 tail section: diplomacy. The alliance grid (one byte per pair,
+        // realm count squared), the standing proposals, the alliances under
+        // notice with their clocks, and whether the computer's realms may
+        // ally. Older saves lack it and load with every realm at war.
+        let rel = &self.diplomacy;
+        for &allied in &rel.allied {
+            wu8(&mut b, allied as u8);
+        }
+        wu32(&mut b, rel.proposals.len() as u32);
+        for &(from, to) in &rel.proposals {
+            wu8(&mut b, from);
+            wu8(&mut b, to);
+        }
+        wu32(&mut b, rel.notices.len() as u32);
+        for &(a, c, left) in &rel.notices {
+            wu8(&mut b, a);
+            wu8(&mut b, c);
+            wf32(&mut b, left);
+        }
+        wu8(&mut b, rel.ai_may_ally as u8);
         b
     }
 
@@ -10389,6 +10705,40 @@ impl Game {
                 }
             }
         }
+
+        // Diplomacy (v21 tail section); older saves leave every realm at war.
+        let mut diplomacy = Diplomacy::new(realms.len());
+        if version >= 21 {
+            let n = realms.len();
+            for slot in diplomacy.allied.iter_mut() {
+                *slot = r.u8()? != 0;
+            }
+            let count = r.u32()? as usize;
+            for _ in 0..count {
+                let (from, to) = (r.u8()?, r.u8()?);
+                if (from as usize) < n && (to as usize) < n && from != to {
+                    diplomacy.proposals.push((from, to));
+                }
+            }
+            let count = r.u32()? as usize;
+            for _ in 0..count {
+                let (a, c, left) = (r.u8()?, r.u8()?, r.f32()?);
+                if (a as usize) < n && (c as usize) < n && a != c && left > 0.0 {
+                    diplomacy.notices.push((a, c, left));
+                }
+            }
+            diplomacy.ai_may_ally = r.u8()? != 0;
+            // The grid is kept symmetric and nobody is allied with themselves,
+            // whatever a damaged file says.
+            for a in 0..n {
+                diplomacy.allied[a * n + a] = false;
+                for c in 0..a {
+                    let on = diplomacy.allied[a * n + c] && diplomacy.allied[c * n + a];
+                    diplomacy.allied[a * n + c] = on;
+                    diplomacy.allied[c * n + a] = on;
+                }
+            }
+        }
         // Nothing may point at a realm the save doesn't hold.
         let last = (realms.len() - 1) as RealmId;
         for s in &mut ships {
@@ -10434,6 +10784,7 @@ impl Game {
             world,
             entities,
             realms,
+            diplomacy,
             ships,
             transports,
             warships,
@@ -10544,12 +10895,17 @@ mod tests {
             .iter()
             .map(|r| 1 + 6 * 4 + 4 + tiles(&r.auto_zones) + tiles(&r.bridges))
             .sum();
+        let n = game.realms.len();
+        let rel = &game.diplomacy;
+        // The v21 diplomacy section follows the v20 ones.
+        let diplomacy = n * n + (4 + 2 * rel.proposals.len()) + (4 + 6 * rel.notices.len()) + 1;
         1 + realms
             + (4 + game.ships.len())
             + (4 + game.build_sites.len())
             + (4 + game.entities.len())
             + (4 + game.transports.len())
             + (4 + game.warships.len())
+            + diplomacy
     }
 
     /// Clear the board for a long, isolated run: every unit removed and every
@@ -11752,10 +12108,102 @@ mod tests {
 
     #[test]
     fn allies_are_friendly_but_fight_the_enemy() {
-        assert!(hostile(Faction::Realm(0), Faction::Enemy));
-        assert!(hostile(Faction::Ally, Faction::Enemy));
-        assert!(!hostile(Faction::Realm(0), Faction::Ally));
-        assert!(!hostile(Faction::Ally, Faction::Ally));
+        let rel = Diplomacy::new(1);
+        assert!(rel.hostile(Faction::Realm(0), Faction::Enemy));
+        assert!(rel.hostile(Faction::Ally, Faction::Enemy));
+        assert!(!rel.hostile(Faction::Realm(0), Faction::Ally));
+        assert!(!rel.hostile(Faction::Ally, Faction::Ally));
+    }
+
+    /// Two realms are at war until both agree to an alliance; leaving one
+    /// takes its notice period, during which both still count as allied.
+    #[test]
+    fn alliances_need_both_sides_and_end_on_notice() {
+        let mut rel = Diplomacy::new(3);
+        assert!(rel.hostile(Faction::Realm(0), Faction::Realm(1)));
+        assert_eq!(rel.relation(0, 1), Relation::War);
+        // One side proposing changes nothing on the field.
+        assert!(rel.propose(0, 1));
+        assert!(!rel.propose(0, 1), "a standing proposal isn't repeated");
+        assert_eq!(rel.relation(0, 1), Relation::Proposed);
+        assert_eq!(rel.relation(1, 0), Relation::Offered);
+        assert!(rel.hostile(Faction::Realm(0), Faction::Realm(1)));
+        // Declining clears it; a counter-proposal is an acceptance.
+        assert!(rel.decline(1, 0));
+        assert_eq!(rel.relation(0, 1), Relation::War);
+        assert!(rel.propose(0, 1));
+        assert!(rel.propose(1, 0));
+        assert_eq!(rel.relation(0, 1), Relation::Allied);
+        assert!(!rel.hostile(Faction::Realm(0), Faction::Realm(1)));
+        assert!(!rel.hostile(Faction::Realm(1), Faction::Realm(0)));
+        // Alliances are pairwise: the third realm is still at war with both.
+        assert!(rel.hostile(Faction::Realm(2), Faction::Realm(0)));
+        assert!(rel.hostile(Faction::Realm(2), Faction::Realm(1)));
+        // Notice: still allied until the clock runs out, then at war again.
+        assert!(rel.leave(1, 0));
+        assert!(!rel.leave(1, 0), "notice is given once");
+        assert!(matches!(rel.relation(0, 1), Relation::Leaving(_)));
+        assert!(rel.tick(ALLIANCE_NOTICE / 2.0).is_empty());
+        assert!(!rel.hostile(Faction::Realm(0), Faction::Realm(1)));
+        assert_eq!(rel.tick(ALLIANCE_NOTICE), vec![(1, 0)]);
+        assert_eq!(rel.relation(0, 1), Relation::War);
+        assert!(rel.hostile(Faction::Realm(0), Faction::Realm(1)));
+    }
+
+    /// Alliance orders go through the game: a computer-run realm answers at
+    /// once by the match's rule, both sides hear of it, and an allied realm's
+    /// soldiers no longer count as a threat to a village.
+    #[test]
+    fn alliance_orders_reach_the_other_realm() {
+        let mut game = Game::new(3);
+        game.realms.push(Realm::new(Controller::Ai, None));
+        game.realms.push(Realm::new(Controller::Human, None));
+        game.diplomacy = Diplomacy::new(3);
+
+        // A computer-run realm that may ally accepts on the spot.
+        assert!(game.apply(0, Command::ProposeAlliance(1)));
+        assert_eq!(game.diplomacy().relation(0, 1), Relation::Allied);
+        assert!(
+            game.realm(0)
+                .alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::AllianceFormed)
+        );
+        // One that may not declines, and says so.
+        game.diplomacy.ai_may_ally = false;
+        game.realm_mut(0).alerts.clear();
+        assert!(game.apply(0, Command::LeaveAlliance(1)));
+        for _ in 0..((ALLIANCE_NOTICE / 0.1) as usize + 2) {
+            game.tick_diplomacy(0.1);
+        }
+        assert_eq!(game.diplomacy().relation(0, 1), Relation::War);
+        assert!(game.apply(0, Command::ProposeAlliance(1)));
+        assert_eq!(game.diplomacy().relation(0, 1), Relation::War);
+        assert!(
+            game.realm(0)
+                .alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::AllianceDeclined)
+        );
+
+        // A person's realm hears the offer and answers in its own time.
+        assert!(game.apply(0, Command::ProposeAlliance(2)));
+        assert_eq!(game.diplomacy().relation(2, 0), Relation::Offered);
+        assert!(
+            game.realm(2)
+                .alerts()
+                .iter()
+                .any(|a| a.kind == AlertKind::AllianceOffered)
+        );
+        assert!(
+            !game.apply(2, Command::AcceptAlliance(1)),
+            "nothing offered by 1"
+        );
+        assert!(game.apply(2, Command::AcceptAlliance(0)));
+        assert_eq!(game.diplomacy().relation(0, 2), Relation::Allied);
+        // Orders naming no realm, or oneself, change nothing.
+        assert!(!game.apply(0, Command::ProposeAlliance(0)));
+        assert!(!game.apply(0, Command::ProposeAlliance(7)));
     }
 
     /// Orders are how everything reaches a realm: the switches and settings
@@ -11800,11 +12248,12 @@ mod tests {
 
     #[test]
     fn realms_are_at_war_with_each_other_but_not_themselves() {
-        assert!(hostile(Faction::Realm(0), Faction::Realm(1)));
-        assert!(hostile(Faction::Realm(1), Faction::Realm(0)));
-        assert!(!hostile(Faction::Realm(1), Faction::Realm(1)));
-        assert!(hostile(Faction::Realm(1), Faction::Enemy));
-        assert!(!hostile(Faction::Realm(1), Faction::Ally));
+        let rel = Diplomacy::new(2);
+        assert!(rel.hostile(Faction::Realm(0), Faction::Realm(1)));
+        assert!(rel.hostile(Faction::Realm(1), Faction::Realm(0)));
+        assert!(!rel.hostile(Faction::Realm(1), Faction::Realm(1)));
+        assert!(rel.hostile(Faction::Realm(1), Faction::Enemy));
+        assert!(!rel.hostile(Faction::Realm(1), Faction::Ally));
         // Owner bytes round-trip for realms past the first, and keep the
         // first realm, the enemy and the allies on the bytes saves always used.
         for r in 0..5 {
@@ -11878,10 +12327,16 @@ mod tests {
             "the first realm was credited instead"
         );
 
+        // An alliance under notice rides along in the save.
+        game.diplomacy = Diplomacy::new(2);
+        assert!(game.diplomacy.propose(0, 1) && game.diplomacy.accept(1, 0));
+        assert!(game.diplomacy.leave(0, 1));
+        game.diplomacy.ai_may_ally = false;
         let bytes = game.to_bytes(CAM);
         let (loaded, _cam) = Game::from_bytes(&bytes).expect("failed to parse save");
         assert_eq!(loaded.realms.len(), 2);
         assert_eq!(loaded.realm(1).controller, Controller::Ai);
+        assert_eq!(loaded.diplomacy(), game.diplomacy());
         assert_eq!(loaded.realm(1).money, 7);
         assert_eq!(loaded.realm(1).auto_zones(), &[(anchor.0, anchor.1 + 5)]);
         assert_eq!(loaded.realm(0).money, game.realm(0).money);
