@@ -3,6 +3,7 @@
 //! `ApplicationHandler` pattern with an async-initialized `State` delivered back
 //! through an `EventLoopProxy` (needed because device creation is async on web).
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use glam::Vec2;
@@ -13,11 +14,11 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::atlas::{self, Atlas, MapColors};
+use crate::atlas::{self, Atlas, MapColors, realm_sheet};
 use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
 use crate::game::{
     AUTO_ZONE_RADIUS, Anim, AxeWork, BuildMode, CamState, Dir, Entity, Faction, Game, Job,
-    MissileKind, RealmId, SandboxTool, SiteKind, Stroke, tile_at, tile_path,
+    MissileKind, RealmId, SandboxTool, SiteKind, Stroke, faction_of, tile_at, tile_path,
 };
 use crate::gfx::{Instance, Renderer};
 use crate::save;
@@ -46,53 +47,80 @@ const SANDBOX_LINE: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 /// The gap left around each testing-ground tile, in tiles: the grid line.
 const SANDBOX_GAP: f32 = 0.04;
 
-/// The sprite sheet a transport's hull is drawn from. The player's missions
+/// The sprite sheet a transport's hull is drawn from. A realm's missions
 /// sail the cargo hull in a tint (see `transport_tint`); an allied company
 /// and an enemy raid sail their own faction's hull, drawn as is.
-fn transport_sheet(t: &crate::game::Transport) -> &'static str {
-    match t.faction {
+fn transport_sheet(t: &crate::game::Transport) -> Cow<'static, str> {
+    Cow::Borrowed(match t.faction {
         crate::game::Faction::Realm(_) => "cargo_ship",
         crate::game::Faction::Enemy => "enemy_warship",
         crate::game::Faction::Ally => "ally_warship",
-    }
+    })
 }
 
-/// The hull tint for a transport: a blue wash on the player's cargo hull
-/// (mild for settlers, deeper for troops), none on a faction's own hull.
-fn transport_tint(t: &crate::game::Transport) -> [f32; 4] {
+/// `color` washed toward white by `amount` (0 keeps it, 1 is white), opaque.
+fn washed(color: [f32; 4], amount: f32) -> [f32; 4] {
+    let mut out = color;
+    for c in out.iter_mut().take(3) {
+        *c += (1.0 - *c) * amount;
+    }
+    out[3] = 1.0;
+    out
+}
+
+/// The hull tint for a transport: a wash of its realm's color on the cargo
+/// hull (mild for settlers, deeper for troops; the first realm keeps the
+/// classic blues), none on a faction's own hull.
+fn transport_tint(t: &crate::game::Transport, colors: &MapColors) -> [f32; 4] {
     match t.faction {
-        crate::game::Faction::Realm(_) if t.knights > 0 => TROOP_TINT,
-        crate::game::Faction::Realm(_) => SETTLER_TINT,
+        crate::game::Faction::Realm(0) if t.knights > 0 => TROOP_TINT,
+        crate::game::Faction::Realm(0) => SETTLER_TINT,
+        crate::game::Faction::Realm(r) if t.knights > 0 => washed(colors.realm(r), 0.25),
+        crate::game::Faction::Realm(r) => washed(colors.realm(r), 0.55),
         crate::game::Faction::Enemy | crate::game::Faction::Ally => WHITE,
     }
 }
 
 /// The tint of the banner planted on a transport's landing: the mission's
-/// blue for the player's, the allies' green for a hired company, the enemy's
-/// red for a raid.
-fn banner_tint(t: &crate::game::Transport) -> [f32; 4] {
+/// own tint for a realm's, the allies' green for a hired company, the
+/// enemy's red for a raid.
+fn banner_tint(t: &crate::game::Transport, colors: &MapColors) -> [f32; 4] {
     match t.faction {
-        crate::game::Faction::Realm(_) => transport_tint(t),
+        crate::game::Faction::Realm(_) => transport_tint(t, colors),
         crate::game::Faction::Enemy => RAID_TINT,
         crate::game::Faction::Ally => MERC_TINT,
     }
 }
 
 /// The sprite sheet a warship of `faction` is drawn from.
-fn warship_sheet(faction: crate::game::Faction) -> &'static str {
+fn warship_sheet(faction: crate::game::Faction) -> Cow<'static, str> {
     match faction {
-        crate::game::Faction::Realm(_) => "warship",
-        crate::game::Faction::Enemy => "enemy_warship",
-        crate::game::Faction::Ally => "ally_warship",
+        crate::game::Faction::Realm(r) => realm_sheet(r, "warship"),
+        crate::game::Faction::Enemy => Cow::Borrowed("enemy_warship"),
+        crate::game::Faction::Ally => Cow::Borrowed("ally_warship"),
     }
 }
 
 /// The fill of a warship's hull bar, in its faction's color.
-fn hull_bar_tint(faction: crate::game::Faction) -> [f32; 4] {
-    match faction {
-        crate::game::Faction::Realm(_) => [0.3, 0.55, 1.0, 0.95],
-        crate::game::Faction::Enemy => [0.9, 0.25, 0.2, 0.95],
-        crate::game::Faction::Ally => [0.35, 0.85, 0.4, 0.95],
+fn hull_bar_tint(faction: crate::game::Faction, colors: &MapColors) -> [f32; 4] {
+    let mut tint = match faction {
+        crate::game::Faction::Realm(r) => colors.realm(r),
+        crate::game::Faction::Enemy => [0.9, 0.25, 0.2, 1.0],
+        crate::game::Faction::Ally => [0.35, 0.85, 0.4, 1.0],
+    };
+    tint[3] = 0.95;
+    tint
+}
+
+/// The tint a wall is drawn in, so walls read apart by owner: the first
+/// realm's plain, other realms' washed in their color, the allies' green and
+/// the enemy's red.
+fn wall_tint(owner: crate::world::Owner, colors: &MapColors) -> [f32; 4] {
+    match crate::game::faction_of(owner) {
+        crate::game::Faction::Realm(0) => WHITE,
+        crate::game::Faction::Realm(r) => washed(colors.realm(r), 0.5),
+        crate::game::Faction::Ally => [0.55, 1.0, 0.6, 1.0],
+        crate::game::Faction::Enemy => [1.0, 0.55, 0.5, 1.0],
     }
 }
 
@@ -189,7 +217,7 @@ pub struct State {
 
 impl State {
     pub async fn new(window: Arc<Window>) -> Self {
-        let atlas = atlas::build();
+        let atlas = atlas::build(1);
         let renderer = Renderer::new(window.clone(), &atlas).await;
         let ui = crate::ui::Ui::new(&window);
         save::init(); // begin loading any existing saves (async on web)
@@ -390,10 +418,23 @@ impl State {
         )
     }
 
+    /// Make sure the atlas holds sprites for `realms` realms, rebuilding it
+    /// and re-uploading it when a world needs more than it was built for.
+    /// The startup atlas covers one; a match asks for its seats.
+    fn ensure_atlas(&mut self, realms: RealmId) {
+        if realms <= self.atlas.realms {
+            return;
+        }
+        self.atlas = atlas::build(realms);
+        self.renderer.set_atlas(&self.atlas);
+        self.colors = MapColors::from_atlas(&self.atlas);
+    }
+
     fn apply_action(&mut self, action: Action) {
         match action {
-            Action::CreateWorld(seed) => {
-                let game = Game::new(seed);
+            Action::CreateWorld(seed, settings) => {
+                let game = Game::new_match(seed, settings);
+                self.ensure_atlas(game.realm_count());
                 self.camera.center = game.start_center(self.me);
                 self.game = Some(game);
                 self.camera.view_height = DEFAULT_VIEW_HEIGHT;
@@ -412,6 +453,7 @@ impl State {
             Action::Load(name) => {
                 if let Some(bytes) = save::read(&name) {
                     if let Some((game, cam)) = Game::from_bytes(&bytes) {
+                        self.ensure_atlas(game.realm_count());
                         self.camera.center = Vec2::new(cam.cx, cam.cy);
                         self.camera.view_height = cam.view_height;
                         self.game = Some(game);
@@ -501,6 +543,15 @@ impl State {
         let enemy_hut = self.atlas.uv("enemy_hut");
         let ally_hut = self.atlas.uv("ally_hut");
         let white = self.atlas.uv("white");
+        // Each realm's houses and huts in its own color, looked up once per
+        // frame rather than once per tile.
+        let realms = game.realm_count().min(self.atlas.realms);
+        let realm_house: Vec<_> = (0..realms)
+            .map(|r| self.atlas.uv(&realm_sheet(r, "house")))
+            .collect();
+        let realm_hut: Vec<_> = (0..realms)
+            .map(|r| self.atlas.uv(&realm_sheet(r, "hut")))
+            .collect();
 
         let (minx, miny, maxx, maxy) = self.visible_bounds();
         let cap = ((maxx - minx + 1) * (maxy - miny + 1)) as usize * 2 + 256;
@@ -554,29 +605,29 @@ impl State {
                     bridges.push((x, y));
                 }
                 if let Some(owner) = world.house_owner(x, y) {
-                    let uv = match owner {
-                        0 => house,
-                        2 => ally_house,
-                        _ => enemy_house,
+                    let uv = match faction_of(owner) {
+                        Faction::Realm(r) => *realm_house.get(r as usize).unwrap_or(&house),
+                        Faction::Ally => ally_house,
+                        Faction::Enemy => enemy_house,
                     };
                     out.push(quad(p, [1.0, 1.0], uv));
                 } else if world.is_cave(x, y) {
                     out.push(quad(p, [1.0, 1.0], cave));
                 } else if let Some(h) = world.hut(x, y) {
-                    let uv = match h.owner {
-                        0 => hut,
-                        2 => ally_hut,
-                        _ => enemy_hut,
+                    let uv = match faction_of(h.owner) {
+                        Faction::Realm(r) => *realm_hut.get(r as usize).unwrap_or(&hut),
+                        Faction::Ally => ally_hut,
+                        Faction::Enemy => enemy_hut,
                     };
                     out.push(quad(p, [1.0, 1.0], uv));
                 } else if let Some(w) = world.wall(x, y) {
-                    // Tint walls by faction so they read apart: enemy red, ally green.
-                    let tint = match w.owner {
-                        0 => WHITE,
-                        2 => [0.55, 1.0, 0.6, 1.0],
-                        _ => [1.0, 0.55, 0.5, 1.0],
-                    };
-                    out.push(tinted(p, [1.0, 1.0], wall, tint));
+                    // Tint walls by owner so they read apart.
+                    out.push(tinted(
+                        p,
+                        [1.0, 1.0],
+                        wall,
+                        wall_tint(w.owner, &self.colors),
+                    ));
                 } else if let Some(node) = world.node(x, y) {
                     let uv = match node.kind {
                         Resource::Wood => tree,
@@ -610,12 +661,12 @@ impl State {
                 Dir::Down => 2,
                 Dir::Right => 3,
             };
-            let uv = self.atlas.frame_uv(transport_sheet(s), col, 0);
+            let uv = self.atlas.frame_uv(&transport_sheet(s), col, 0);
             out.push(tinted(
                 [s.pos.x - 1.0, s.pos.y - 1.0],
                 [2.0, 2.0],
                 uv,
-                transport_tint(s),
+                transport_tint(s, &self.colors),
             ));
         }
 
@@ -630,7 +681,7 @@ impl State {
                 Dir::Down => 2,
                 Dir::Right => 3,
             };
-            let uv = self.atlas.frame_uv(warship_sheet(w.faction), col, 0);
+            let uv = self.atlas.frame_uv(&warship_sheet(w.faction), col, 0);
             out.push(quad([w.pos.x - 1.0, w.pos.y - 1.0], [2.0, 2.0], uv));
             let ratio = w.hp_ratio();
             if ratio < 1.0 {
@@ -642,7 +693,7 @@ impl State {
                     [bx, by],
                     [bw * ratio, bh],
                     white,
-                    hull_bar_tint(w.faction),
+                    hull_bar_tint(w.faction, &self.colors),
                 ));
             }
         }
@@ -709,7 +760,7 @@ impl State {
             let (cx, cy) = self.cursor_tile();
             let mut wash = match game.place_faction {
                 _ if !owned => WHITE,
-                Faction::Realm(_) => self.colors.player,
+                Faction::Realm(r) => self.colors.realm(r),
                 Faction::Enemy => self.colors.enemy,
                 Faction::Ally => self.colors.ally,
             };
@@ -743,7 +794,7 @@ impl State {
                 continue;
             }
             let (sheet, col, row) = sprite_frame(e);
-            let uv = self.atlas.frame_uv(sheet, col, row);
+            let uv = self.atlas.frame_uv(&sheet, col, row);
             // A horseman's frames are 32x32, drawn over a 2x2-tile footprint
             // with the hooves on its tile, and lifted off the ground while it
             // leaps a stream. Everyone else is a 16x16 frame on one tile.
@@ -891,7 +942,7 @@ impl State {
                 [ax as f32, ay as f32],
                 [1.0, 1.0],
                 rally,
-                banner_tint(s),
+                banner_tint(s, &self.colors),
             ));
         }
 
@@ -921,7 +972,7 @@ impl State {
             color: WHITE,
         };
         let faction_color = |f: Faction| match f {
-            Faction::Realm(_) => c.player,
+            Faction::Realm(r) => c.realm(r),
             Faction::Enemy => c.enemy,
             Faction::Ally => c.ally,
         };
@@ -1005,8 +1056,10 @@ impl State {
             let off = (size - 1.0) * 0.5;
             out.push(solid([x as f32 - off, y as f32 - off], [size, size], col));
         };
-        for &t in game.houses(self.me) {
-            house(t, c.player, mark);
+        for r in 0..game.realm_count() {
+            for &t in game.houses(r) {
+                house(t, c.realm(r), mark);
+            }
         }
         for &t in world.houses_of(1) {
             house(t, c.enemy, mark);
@@ -1078,7 +1131,7 @@ impl State {
             vessel(s.pos, "cargo_ship", s.facing);
         }
         for w in game.warships() {
-            vessel(w.pos, warship_sheet(w.faction), w.facing);
+            vessel(w.pos, &warship_sheet(w.faction), w.facing);
         }
         for p in game.pirates() {
             vessel(p.pos, "pirate_ship", p.facing);
@@ -1087,13 +1140,13 @@ impl State {
         for s in game.transports() {
             let uv = self
                 .atlas
-                .frame_uv(transport_sheet(s), facing_col(s.facing), 0);
+                .frame_uv(&transport_sheet(s), facing_col(s.facing), 0);
             out.push(Instance {
                 pos: [s.pos.x - ship * 0.5, s.pos.y - ship * 0.5],
                 size: [ship, ship],
                 uv_min: [uv[0], uv[1]],
                 uv_max: [uv[2], uv[3]],
-                color: transport_tint(s),
+                color: transport_tint(s, &self.colors),
             });
         }
 
@@ -1133,7 +1186,7 @@ impl State {
                 size: [size, size],
                 uv_min: [uv[0], uv[1]],
                 uv_max: [uv[2], uv[3]],
-                color: banner_tint(s),
+                color: banner_tint(s, &self.colors),
             });
         }
 
@@ -1263,25 +1316,26 @@ const SPIN_FPS: f32 = 14.0;
 /// Frames per second a thrown axe tumbles through its eight turns.
 const AXE_SPIN_FPS: f32 = 20.0;
 
-/// Map an entity's state + facing to a (sheet, column, row) frame.
-fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
+/// Map an entity's state + facing to a (sheet, column, row) frame. A realm's
+/// units come from that realm's recolored sheets (see `atlas::realm_sheet`).
+fn sprite_frame(e: &Entity) -> (Cow<'static, str>, u32, u32) {
     // Civilians keep the classic farmer art whatever job they've taken up.
     let sheet = match (e.faction, e.job) {
-        (Faction::Realm(_), Job::Civilian) => "farmer",
-        (Faction::Realm(_), Job::Knight) => "knight",
-        (Faction::Realm(_), Job::Horseman) => "horseman",
-        (Faction::Realm(_), Job::Bowman) => "bowman",
-        (Faction::Realm(_), Job::Axeman) => "axeman",
-        (Faction::Enemy, Job::Civilian) => "enemy_farmer",
-        (Faction::Enemy, Job::Knight) => "enemy_knight",
-        (Faction::Enemy, Job::Horseman) => "enemy_horseman",
-        (Faction::Enemy, Job::Bowman) => "enemy_bowman",
-        (Faction::Enemy, Job::Axeman) => "enemy_axeman",
-        (Faction::Ally, Job::Civilian) => "ally_farmer",
-        (Faction::Ally, Job::Knight) => "ally_knight",
-        (Faction::Ally, Job::Horseman) => "ally_horseman",
-        (Faction::Ally, Job::Bowman) => "ally_bowman",
-        (Faction::Ally, Job::Axeman) => "ally_axeman",
+        (Faction::Realm(r), Job::Civilian) => realm_sheet(r, "farmer"),
+        (Faction::Realm(r), Job::Knight) => realm_sheet(r, "knight"),
+        (Faction::Realm(r), Job::Horseman) => realm_sheet(r, "horseman"),
+        (Faction::Realm(r), Job::Bowman) => realm_sheet(r, "bowman"),
+        (Faction::Realm(r), Job::Axeman) => realm_sheet(r, "axeman"),
+        (Faction::Enemy, Job::Civilian) => Cow::Borrowed("enemy_farmer"),
+        (Faction::Enemy, Job::Knight) => Cow::Borrowed("enemy_knight"),
+        (Faction::Enemy, Job::Horseman) => Cow::Borrowed("enemy_horseman"),
+        (Faction::Enemy, Job::Bowman) => Cow::Borrowed("enemy_bowman"),
+        (Faction::Enemy, Job::Axeman) => Cow::Borrowed("enemy_axeman"),
+        (Faction::Ally, Job::Civilian) => Cow::Borrowed("ally_farmer"),
+        (Faction::Ally, Job::Knight) => Cow::Borrowed("ally_knight"),
+        (Faction::Ally, Job::Horseman) => Cow::Borrowed("ally_horseman"),
+        (Faction::Ally, Job::Bowman) => Cow::Borrowed("ally_bowman"),
+        (Faction::Ally, Job::Axeman) => Cow::Borrowed("ally_axeman"),
     };
     let rows = match e.job {
         Job::Civilian => FARMER_ROWS,

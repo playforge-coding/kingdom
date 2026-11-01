@@ -6,6 +6,7 @@
 //! sprite sheets are stored whole, with their grid dimensions, so we can slice
 //! out individual animation frames at render time.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use image::{GenericImage, GenericImageView, RgbaImage};
@@ -17,9 +18,28 @@ pub struct Atlas {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
-    rects: HashMap<&'static str, UvRect>,
+    /// How many realms this atlas holds sprites for (see `realm_sheet`).
+    pub realms: u8,
+    rects: HashMap<String, UvRect>,
     /// name -> (whole-sheet uv rect, cols, rows)
-    sheets: HashMap<&'static str, (UvRect, u32, u32)>,
+    sheets: HashMap<String, (UvRect, u32, u32)>,
+}
+
+/// The sprites that come in a per-realm color: the base name of each unit
+/// sheet, hull and building the atlas recolors for realms past the first.
+const REALM_SPRITES: [&str; 8] = [
+    "farmer", "knight", "horseman", "bowman", "axeman", "warship", "house", "hut",
+];
+
+/// The name of `base`'s sprite in `realm`'s color: the plain name for the
+/// first realm, whose art is the original blue, and a recolored copy for
+/// every realm after it.
+pub fn realm_sheet(realm: u8, base: &'static str) -> Cow<'static, str> {
+    if realm == 0 {
+        Cow::Borrowed(base)
+    } else {
+        Cow::Owned(format!("realm{realm}_{base}"))
+    }
 }
 
 impl Atlas {
@@ -99,6 +119,62 @@ pub struct MapColors {
 }
 
 impl MapColors {
+    /// The color a realm's units, houses and flags are drawn in on the map
+    /// and the minimap: the classic blue for the first realm, and for every
+    /// further one a hue stepped around the wheel, skipping the enemy's red
+    /// and the allies' green so no realm is mistaken for either. Any number
+    /// of realms get a color; neighbors on the wheel stay far apart.
+    pub fn realm(&self, realm: u8) -> [f32; 4] {
+        if realm == 0 {
+            return self.player;
+        }
+        realm_hue_rgb(realm_hue(realm))
+    }
+}
+
+/// The hue, in degrees, a realm past the first is drawn in: a golden-angle
+/// walk from orange, re-stepped past any hue within reach of the enemy's red
+/// (0) or the allies' green (120), so successive realms land far apart and
+/// never on a faction color.
+fn realm_hue(realm: u8) -> f32 {
+    const GOLDEN: f32 = 137.508;
+    let near = |h: f32, c: f32| {
+        let d = (h - c).rem_euclid(360.0);
+        d.min(360.0 - d) < 28.0
+    };
+    let mut h = 35.0;
+    let mut picked = 0;
+    loop {
+        if !near(h, 0.0) && !near(h, 120.0) {
+            picked += 1;
+            if picked == realm {
+                return h;
+            }
+        }
+        h = (h + GOLDEN).rem_euclid(360.0);
+    }
+}
+
+/// A bright, fully saturated color of the given hue, in the linear RGBA the
+/// map's flat colors use (matching the player's blue in lightness).
+fn realm_hue_rgb(hue: f32) -> [f32; 4] {
+    let h = hue / 60.0;
+    let x = 1.0 - (h.rem_euclid(2.0) - 1.0).abs();
+    let (r, g, b) = match h as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    };
+    // Lift toward white a little so dark hues (blues, purples) read on the
+    // map the way the player's own blue does.
+    let lift = |c: f32| 0.25 + 0.75 * c;
+    [lift(r), lift(g), lift(b), 1.0]
+}
+
+impl MapColors {
     pub fn from_atlas(atlas: &Atlas) -> Self {
         let grass = atlas.average_color("grass");
         // A tree or rock only covers part of its tile, so blend it with the
@@ -125,27 +201,99 @@ impl MapColors {
 }
 
 struct Source {
-    name: &'static str,
+    name: String,
     img: RgbaImage,
     /// `Some((cols, rows))` marks this as an animation sheet.
     grid: Option<(u32, u32)>,
 }
 
 impl Source {
-    fn sprite(name: &'static str, img: RgbaImage) -> Self {
+    fn sprite(name: impl Into<String>, img: RgbaImage) -> Self {
         Source {
-            name,
+            name: name.into(),
             img,
             grid: None,
         }
     }
-    fn sheet(name: &'static str, img: RgbaImage, cols: u32, rows: u32) -> Self {
+    fn sheet(name: impl Into<String>, img: RgbaImage, cols: u32, rows: u32) -> Self {
         Source {
-            name,
+            name: name.into(),
             img,
             grid: Some((cols, rows)),
         }
     }
+
+    /// This source's art in `realm`'s color (see `recolor`), named for it.
+    fn for_realm(&self, enemy: &RgbaImage, realm: u8) -> Self {
+        Source {
+            name: realm_sheet(realm, "").into_owned() + &self.name,
+            img: recolor(&self.img, enemy, realm_hue(realm)),
+            grid: self.grid,
+        }
+    }
+}
+
+/// `base`'s art with its team color swapped for `hue`. The team-colored
+/// pixels are found by comparing the sprite with the enemy's copy of it,
+/// which differs exactly where the clothing, banners and paintwork are;
+/// each such pixel keeps its own shade and only changes hue, so the shading
+/// of the original art carries over to every realm's color.
+fn recolor(base: &RgbaImage, enemy: &RgbaImage, hue: f32) -> RgbaImage {
+    let mut out = base.clone();
+    for (x, y, px) in out.enumerate_pixels_mut() {
+        if px[3] == 0 {
+            continue;
+        }
+        let other = enemy.get_pixel(x, y);
+        if px[0] == other[0] && px[1] == other[1] && px[2] == other[2] {
+            continue;
+        }
+        let (_, s, l) = rgb_to_hsl(px[0], px[1], px[2]);
+        let (r, g, b) = hsl_to_rgb(hue, s, l);
+        *px = image::Rgba([r, g, b, px[3]]);
+    }
+    out
+}
+
+fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    if max == min {
+        return (0.0, 0.0, l);
+    }
+    let d = max - min;
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
+    let h = if max == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    (h * 60.0, s, l)
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h.rem_euclid(360.0) / 60.0;
+    let x = c * (1.0 - (hp.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let to8 = |v: f32| ((v + m).clamp(0.0, 1.0) * 255.0).round() as u8;
+    (to8(r), to8(g), to8(b))
 }
 
 fn load(bytes: &[u8]) -> RgbaImage {
@@ -173,7 +321,10 @@ fn pad_to_tile(src: &RgbaImage) -> RgbaImage {
     out
 }
 
-pub fn build() -> Atlas {
+/// Pack the atlas with sprites for `realms` realms: the first realm's art as
+/// drawn, and a recolored copy of every team-colored sprite for each realm
+/// after it. One realm is the single-player atlas.
+pub fn build(realms: u8) -> Atlas {
     let grass = load(include_bytes!("../assets/textures/tiles/grass.png"));
     let water = load(include_bytes!("../assets/textures/tiles/water.png"));
     let houses = load(include_bytes!("../assets/textures/tiles/houses.png"));
@@ -239,7 +390,20 @@ pub fn build() -> Atlas {
     ));
     let cannonball = load(include_bytes!("../assets/textures/entities/cannonball.png"));
 
-    let sources = vec![
+    // The enemy's copies of the team-colored sprites, kept aside to tell
+    // which pixels carry the team color when recoloring for further realms.
+    let enemy_of: HashMap<&str, RgbaImage> = HashMap::from([
+        ("farmer", enemy_farmer.clone()),
+        ("knight", enemy_knight.clone()),
+        ("horseman", enemy_horseman.clone()),
+        ("bowman", enemy_bowman.clone()),
+        ("axeman", enemy_axeman.clone()),
+        ("warship", enemy_warship.clone()),
+        ("house", crop(&enemy_houses, 0, 0, 16, 16)),
+        ("hut", enemy_hut.clone()),
+    ]);
+
+    let mut sources = vec![
         Source::sprite("white", white_pixel()),
         Source::sprite("grass", grass),
         Source::sprite("water", water),
@@ -306,13 +470,29 @@ pub fn build() -> Atlas {
         Source::sprite("cannonball", cannonball),
     ];
 
-    pack(sources)
+    // Every realm after the first gets its own copy of each team-colored
+    // sprite, in its own hue.
+    let realms = realms.max(1);
+    for realm in 1..realms {
+        for base in REALM_SPRITES {
+            let src = sources
+                .iter()
+                .find(|s| s.name == base)
+                .expect("every realm sprite has a base");
+            sources.push(src.for_realm(&enemy_of[base], realm));
+        }
+    }
+
+    pack(sources, realms)
 }
 
 /// Simple shelf packer with 1px padding to avoid bleeding between sprites.
-fn pack(mut sources: Vec<Source>) -> Atlas {
+fn pack(mut sources: Vec<Source>, realms: u8) -> Atlas {
     const PAD: u32 = 1;
-    const ATLAS_W: u32 = 512;
+    // A single realm's sprites fit a narrow sheet; a match's recolored
+    // copies need the width, or the atlas would grow taller than textures
+    // may be.
+    let atlas_w: u32 = if realms > 1 { 1024 } else { 512 };
 
     sources.sort_by_key(|s| std::cmp::Reverse(s.img.height()));
 
@@ -323,7 +503,7 @@ fn pack(mut sources: Vec<Source>) -> Atlas {
 
     for (i, s) in sources.iter().enumerate() {
         let (w, h) = (s.img.width(), s.img.height());
-        if cursor_x + w + PAD > ATLAS_W {
+        if cursor_x + w + PAD > atlas_w {
             cursor_x = PAD;
             cursor_y += shelf_h + PAD;
             shelf_h = 0;
@@ -334,7 +514,7 @@ fn pack(mut sources: Vec<Source>) -> Atlas {
     }
 
     let atlas_h = (cursor_y + shelf_h + PAD).next_power_of_two();
-    let mut atlas = RgbaImage::from_pixel(ATLAS_W, atlas_h, image::Rgba([0, 0, 0, 0]));
+    let mut atlas = RgbaImage::from_pixel(atlas_w, atlas_h, image::Rgba([0, 0, 0, 0]));
     let mut rects = HashMap::new();
     let mut sheets = HashMap::new();
 
@@ -343,25 +523,26 @@ fn pack(mut sources: Vec<Source>) -> Atlas {
         atlas.copy_from(&src.img, x, y).unwrap();
         let (w, h) = (src.img.width(), src.img.height());
         let rect = [
-            x as f32 / ATLAS_W as f32,
+            x as f32 / atlas_w as f32,
             y as f32 / atlas_h as f32,
-            (x + w) as f32 / ATLAS_W as f32,
+            (x + w) as f32 / atlas_w as f32,
             (y + h) as f32 / atlas_h as f32,
         ];
         match src.grid {
             Some((cols, rows)) => {
-                sheets.insert(src.name, (rect, cols, rows));
+                sheets.insert(src.name.clone(), (rect, cols, rows));
             }
             None => {
-                rects.insert(src.name, rect);
+                rects.insert(src.name.clone(), rect);
             }
         }
     }
 
     Atlas {
-        width: ATLAS_W,
+        width: atlas_w,
         height: atlas_h,
         rgba: atlas.into_raw(),
+        realms,
         rects,
         sheets,
     }
@@ -371,12 +552,73 @@ fn pack(mut sources: Vec<Source>) -> Atlas {
 mod tests {
     use super::*;
 
+    /// An atlas for a match holds a recolored copy of every team-colored
+    /// sprite for each realm past the first, under the names the renderer
+    /// asks for, and each is a real recolor: same shape, different hue.
+    #[test]
+    fn a_match_atlas_recolors_every_realm_sprite() {
+        let atlas = build(3);
+        assert_eq!(atlas.realms, 3);
+        for realm in 1..3 {
+            for base in [
+                "farmer", "knight", "horseman", "bowman", "axeman", "warship",
+            ] {
+                let uv = atlas.frame_uv(&realm_sheet(realm, base), 0, 0);
+                assert!(
+                    uv[2] > uv[0] && uv[3] > uv[1],
+                    "realm {realm} {base} is empty"
+                );
+            }
+            for base in ["house", "hut"] {
+                let uv = atlas.uv(&realm_sheet(realm, base));
+                assert!(
+                    uv[2] > uv[0] && uv[3] > uv[1],
+                    "realm {realm} {base} is empty"
+                );
+            }
+        }
+        // Realms land on hues well clear of the enemy's red and the allies'
+        // green, and of each other.
+        let hues: Vec<f32> = (1..8).map(realm_hue).collect();
+        for (i, &h) in hues.iter().enumerate() {
+            let apart = |c: f32| {
+                let d = (h - c).rem_euclid(360.0);
+                d.min(360.0 - d)
+            };
+            assert!(
+                apart(0.0) >= 28.0 && apart(120.0) >= 28.0,
+                "realm {} hue {h}",
+                i + 1
+            );
+            for &o in &hues[..i] {
+                assert!(apart(o) >= 20.0, "realms share a hue: {h} and {o}");
+            }
+        }
+        // The recolor leaves alpha and untouched pixels alone and changes the
+        // team-colored ones.
+        let blue = load(include_bytes!("../assets/textures/entities/farmer.png"));
+        let red = load(include_bytes!(
+            "../assets/textures/entities/enemy_farmer.png"
+        ));
+        let orange = recolor(&blue, &red, realm_hue(1));
+        let mut changed = 0;
+        for (x, y, px) in orange.enumerate_pixels() {
+            let b = blue.get_pixel(x, y);
+            assert_eq!(px[3], b[3], "alpha changed at {x},{y}");
+            if px.0 != b.0 {
+                changed += 1;
+                assert_ne!(b.0[..3], red.get_pixel(x, y).0[..3]);
+            }
+        }
+        assert!(changed > 0, "nothing was recolored");
+    }
+
     #[test]
     fn every_hull_the_renderer_draws_is_packed() {
         // The renderer picks a ship's sheet by its owner, so each faction's
         // hull must be in the atlas or the first enemy raid would panic
         // mid-frame rather than here.
-        let atlas = build();
+        let atlas = build(1);
         for sheet in [
             "cargo_ship",
             "warship",
@@ -398,7 +640,7 @@ mod tests {
     fn every_rider_sheet_is_packed_with_all_twelve_rows() {
         // The renderer reads a horseman's frame by facing block and row, so
         // each faction's sheet must be packed with its full 4x12 grid.
-        let atlas = build();
+        let atlas = build(1);
         for sheet in ["horseman", "enemy_horseman", "ally_horseman"] {
             for row in 0..12 {
                 for col in 0..4 {
@@ -417,7 +659,7 @@ mod tests {
         // The renderer reads a bowman's frame by state block and facing, so
         // each faction's sheet must be packed with its full 5x8 grid, and the
         // arrow with both of its headings.
-        let atlas = build();
+        let atlas = build(1);
         for sheet in ["bowman", "enemy_bowman", "ally_bowman"] {
             for row in 0..8 {
                 for col in 0..5 {
@@ -440,7 +682,7 @@ mod tests {
         // The renderer reads an axeman's frame by state and facing, so each
         // faction's sheet must be packed with its full 6x6 grid, and the
         // thrown axe with all eight turns.
-        let atlas = build();
+        let atlas = build(1);
         for sheet in ["axeman", "enemy_axeman", "ally_axeman"] {
             for row in 0..6 {
                 for col in 0..6 {
