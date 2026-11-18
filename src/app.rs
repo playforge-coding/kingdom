@@ -17,7 +17,7 @@ use crate::atlas::{self, Atlas, MapColors};
 use crate::camera::{Camera, DETAIL_VIEW_HEIGHT};
 use crate::game::{
     AUTO_ZONE_RADIUS, Anim, AxeWork, CamState, Dir, Entity, Faction, Game, Job, MissileKind,
-    SandboxTool, SiteKind, Stroke, tile_at, tile_path,
+    RealmId, SandboxTool, SiteKind, Stroke, tile_at, tile_path,
 };
 use crate::gfx::{Instance, Renderer};
 use crate::save;
@@ -51,7 +51,7 @@ const SANDBOX_GAP: f32 = 0.04;
 /// and an enemy raid sail their own faction's hull, drawn as is.
 fn transport_sheet(t: &crate::game::Transport) -> &'static str {
     match t.faction {
-        crate::game::Faction::Player => "cargo_ship",
+        crate::game::Faction::Realm(_) => "cargo_ship",
         crate::game::Faction::Enemy => "enemy_warship",
         crate::game::Faction::Ally => "ally_warship",
     }
@@ -61,8 +61,8 @@ fn transport_sheet(t: &crate::game::Transport) -> &'static str {
 /// (mild for settlers, deeper for troops), none on a faction's own hull.
 fn transport_tint(t: &crate::game::Transport) -> [f32; 4] {
     match t.faction {
-        crate::game::Faction::Player if t.knights > 0 => TROOP_TINT,
-        crate::game::Faction::Player => SETTLER_TINT,
+        crate::game::Faction::Realm(_) if t.knights > 0 => TROOP_TINT,
+        crate::game::Faction::Realm(_) => SETTLER_TINT,
         crate::game::Faction::Enemy | crate::game::Faction::Ally => WHITE,
     }
 }
@@ -72,7 +72,7 @@ fn transport_tint(t: &crate::game::Transport) -> [f32; 4] {
 /// red for a raid.
 fn banner_tint(t: &crate::game::Transport) -> [f32; 4] {
     match t.faction {
-        crate::game::Faction::Player => transport_tint(t),
+        crate::game::Faction::Realm(_) => transport_tint(t),
         crate::game::Faction::Enemy => RAID_TINT,
         crate::game::Faction::Ally => MERC_TINT,
     }
@@ -81,7 +81,7 @@ fn banner_tint(t: &crate::game::Transport) -> [f32; 4] {
 /// The sprite sheet a warship of `faction` is drawn from.
 fn warship_sheet(faction: crate::game::Faction) -> &'static str {
     match faction {
-        crate::game::Faction::Player => "warship",
+        crate::game::Faction::Realm(_) => "warship",
         crate::game::Faction::Enemy => "enemy_warship",
         crate::game::Faction::Ally => "ally_warship",
     }
@@ -90,7 +90,7 @@ fn warship_sheet(faction: crate::game::Faction) -> &'static str {
 /// The fill of a warship's hull bar, in its faction's color.
 fn hull_bar_tint(faction: crate::game::Faction) -> [f32; 4] {
     match faction {
-        crate::game::Faction::Player => [0.3, 0.55, 1.0, 0.95],
+        crate::game::Faction::Realm(_) => [0.3, 0.55, 1.0, 0.95],
         crate::game::Faction::Enemy => [0.9, 0.25, 0.2, 0.95],
         crate::game::Faction::Ally => [0.35, 0.85, 0.4, 0.95],
     }
@@ -171,6 +171,10 @@ pub struct State {
     scene: Scene,
     menu: MenuState,
     game: Option<Game>,
+    /// The realm this player runs. Always the first realm for now: a
+    /// single-player world has one, and the testing ground's units of
+    /// "yours" are its.
+    me: RealmId,
     /// The save-slot name the HUD's save box edits: prefilled from the slot a
     /// world was loaded from, or with a fresh name when one is created.
     save_name: String,
@@ -200,6 +204,7 @@ impl State {
             scene: Scene::Menu,
             menu: MenuState::default(),
             game: None,
+            me: 0,
             save_name: String::new(),
             autosave_timer: 0.0,
             input: Input::default(),
@@ -320,11 +325,11 @@ impl State {
         if let Some(game) = &mut self.game {
             // Settled before the press acts, since the press may cancel the
             // very order that makes this drag an eraser.
-            self.input.drag = game.stroke_at(world).map(|s| (tile_at(world), s));
+            self.input.drag = game.stroke_at(self.me, world).map(|s| (tile_at(world), s));
             if game.sandbox() {
                 game.sandbox_click(world);
             } else {
-                game.try_build(world);
+                game.try_build(self.me, world);
             }
         }
     }
@@ -350,7 +355,7 @@ impl State {
         }
         if let Some(game) = &mut self.game {
             for t in tile_path(last, to) {
-                game.stroke_build(t, stroke);
+                game.stroke_build(self.me, t, stroke);
             }
         }
     }
@@ -383,7 +388,7 @@ impl State {
         match action {
             Action::CreateWorld(seed) => {
                 let game = Game::new(seed);
-                self.camera.center = game.start_center();
+                self.camera.center = game.start_center(self.me);
                 self.game = Some(game);
                 self.camera.view_height = DEFAULT_VIEW_HEIGHT;
                 self.scene = Scene::Playing;
@@ -537,12 +542,13 @@ impl State {
                 if world.is_bridge(x, y) {
                     bridges.push((x, y));
                 }
-                if world.is_house(x, y) {
-                    out.push(quad(p, [1.0, 1.0], house));
-                } else if world.is_enemy_house(x, y) {
-                    out.push(quad(p, [1.0, 1.0], enemy_house));
-                } else if world.is_ally_house(x, y) {
-                    out.push(quad(p, [1.0, 1.0], ally_house));
+                if let Some(owner) = world.house_owner(x, y) {
+                    let uv = match owner {
+                        0 => house,
+                        2 => ally_house,
+                        _ => enemy_house,
+                    };
+                    out.push(quad(p, [1.0, 1.0], uv));
                 } else if world.is_cave(x, y) {
                     out.push(quad(p, [1.0, 1.0], cave));
                 } else if let Some(h) = world.hut(x, y) {
@@ -692,7 +698,7 @@ impl State {
             let (cx, cy) = self.cursor_tile();
             let mut wash = match game.place_faction {
                 _ if !owned => WHITE,
-                Faction::Player => self.colors.player,
+                Faction::Realm(_) => self.colors.player,
                 Faction::Enemy => self.colors.enemy,
                 Faction::Ally => self.colors.ally,
             };
@@ -717,7 +723,7 @@ impl State {
             let key = (
                 e.pos.x.floor() as i32,
                 e.pos.y.floor() as i32,
-                matches!(e.faction, Faction::Player),
+                matches!(e.faction, Faction::Realm(_)),
                 e.job,
             );
             let count = stack.entry(key).or_insert(0);
@@ -759,7 +765,7 @@ impl State {
                 };
                 out.push(tinted([bx, by], [bw, bh], white, [0.15, 0.0, 0.0, 0.85]));
                 let col = match e.faction {
-                    Faction::Player => [0.3, 0.55, 1.0, 0.95],
+                    Faction::Realm(_) => [0.3, 0.55, 1.0, 0.95],
                     Faction::Ally => [0.25, 0.85, 0.3, 0.95],
                     Faction::Enemy => [0.9, 0.25, 0.2, 0.95],
                 };
@@ -805,9 +811,10 @@ impl State {
         // Builder zones: a translucent plot over each marked area, brighter
         // while the autonomous-building switch is on, with a small center mark.
         let zone_span = (AUTO_ZONE_RADIUS * 2 + 1) as f32;
-        for &(zx, zy) in game.auto_zones() {
+        let me = game.realm(self.me);
+        for &(zx, zy) in me.auto_zones() {
             let mut fill = self.colors.player;
-            fill[3] = if game.auto_build { 0.16 } else { 0.08 };
+            fill[3] = if me.auto_build { 0.16 } else { 0.08 };
             out.push(tinted(
                 [
                     (zx - AUTO_ZONE_RADIUS) as f32,
@@ -847,14 +854,14 @@ impl State {
         }
 
         // Rally flags: the knights' waypoints, drawn on top of everything.
-        for r in game.rallies() {
+        for r in me.rallies() {
             let rally = self.atlas.uv("rally");
             out.push(quad([r.pos.x - 0.5, r.pos.y - 0.5], [1.0, 1.0], rally));
         }
 
         // Navy rally flags: the warships' waypoints, tinted the player's blue
         // to tell them apart from the knights' flags.
-        for r in game.navy_rallies() {
+        for r in me.navy_rallies() {
             let rally = self.atlas.uv("rally");
             let mut tint = self.colors.player;
             tint[3] = 1.0;
@@ -903,7 +910,7 @@ impl State {
             color: WHITE,
         };
         let faction_color = |f: Faction| match f {
-            Faction::Player => c.player,
+            Faction::Realm(_) => c.player,
             Faction::Enemy => c.enemy,
             Faction::Ally => c.ally,
         };
@@ -965,7 +972,7 @@ impl State {
             let h = (v.max.1 - v.min.1) as f32 + 1.0 + 2.0 * pad;
             let base = faction_color(v.faction);
             out.push(solid([x0, y0], [w, h], with_alpha(base, 0.22)));
-            let edge = if v.faction == Faction::Player && v.threatened {
+            let edge = if v.faction == Faction::Realm(0) && v.threatened {
                 let mut e = c.enemy;
                 for (ch, b) in e.iter_mut().zip(base) {
                     *ch = b + (*ch - b) * pulse;
@@ -987,13 +994,13 @@ impl State {
             let off = (size - 1.0) * 0.5;
             out.push(solid([x as f32 - off, y as f32 - off], [size, size], col));
         };
-        for &t in game.player_houses() {
+        for &t in game.houses(self.me) {
             house(t, c.player, mark);
         }
-        for &t in &world.enemy_house_tiles {
+        for &t in world.houses_of(1) {
             house(t, c.enemy, mark);
         }
-        for &t in &world.ally_house_tiles {
+        for &t in world.houses_of(2) {
             house(t, c.ally, mark);
         }
         for &(x, y) in game.huts() {
@@ -1010,9 +1017,10 @@ impl State {
         // Builder zones as faint plots, so the overview shows where autonomous
         // building is permitted.
         let zone_span = (AUTO_ZONE_RADIUS * 2 + 1) as f32;
-        for &(zx, zy) in game.auto_zones() {
+        let me = game.realm(self.me);
+        for &(zx, zy) in me.auto_zones() {
             let mut fill = c.player;
-            fill[3] = if game.auto_build { 0.18 } else { 0.1 };
+            fill[3] = if me.auto_build { 0.18 } else { 0.1 };
             out.push(solid(
                 [
                     (zx - AUTO_ZONE_RADIUS) as f32,
@@ -1078,7 +1086,7 @@ impl State {
             });
         }
 
-        for r in game.rallies() {
+        for r in me.rallies() {
             let size = 1.5 * kf;
             out.push(sprite(
                 [r.pos.x - size * 0.5, r.pos.y - size * 0.5],
@@ -1088,7 +1096,7 @@ impl State {
         }
 
         // The navy's flags keep their player-blue tint out here too.
-        for r in game.navy_rallies() {
+        for r in me.navy_rallies() {
             let size = 1.5 * kf;
             let uv = self.atlas.uv("rally");
             let mut tint = c.player;
@@ -1154,6 +1162,7 @@ impl State {
                     window,
                     UiScene::Game {
                         game,
+                        me: self.me,
                         view,
                         colors: &self.colors,
                         save_name: &mut self.save_name,
@@ -1246,11 +1255,11 @@ const AXE_SPIN_FPS: f32 = 20.0;
 fn sprite_frame(e: &Entity) -> (&'static str, u32, u32) {
     // Civilians keep the classic farmer art whatever job they've taken up.
     let sheet = match (e.faction, e.job) {
-        (Faction::Player, Job::Civilian) => "farmer",
-        (Faction::Player, Job::Knight) => "knight",
-        (Faction::Player, Job::Horseman) => "horseman",
-        (Faction::Player, Job::Bowman) => "bowman",
-        (Faction::Player, Job::Axeman) => "axeman",
+        (Faction::Realm(_), Job::Civilian) => "farmer",
+        (Faction::Realm(_), Job::Knight) => "knight",
+        (Faction::Realm(_), Job::Horseman) => "horseman",
+        (Faction::Realm(_), Job::Bowman) => "bowman",
+        (Faction::Realm(_), Job::Axeman) => "axeman",
         (Faction::Enemy, Job::Civilian) => "enemy_farmer",
         (Faction::Enemy, Job::Knight) => "enemy_knight",
         (Faction::Enemy, Job::Horseman) => "enemy_horseman",
@@ -1493,8 +1502,9 @@ impl ApplicationHandler<State> for App {
                         );
                         game.sandbox_erase(world);
                     } else {
-                        game.clear_rally();
-                        game.clear_navy_rally();
+                        let me = game.realm_mut(state.me);
+                        me.clear_rally();
+                        me.clear_navy_rally();
                     }
                 }
             }
