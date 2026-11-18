@@ -58,8 +58,12 @@ Three kinds of faction share the world:
   trading and recruiting the way you do. In a single-player world there is
   one, yours. The code is built for several (see
   **[Multiplayer](multiplayer.md)**), each with its own stockpile, flags,
-  orders and alerts; realms are at war with one another unless they are the
-  same realm.
+  orders and alerts. Realms start **at war** with one another and can make
+  **alliances**: one proposes, the other accepts, and from then on their units
+  leave each other alone and hold each other's villages against capture.
+  Leaving an alliance takes a minute's notice to come into force. Alliances
+  are between pairs, so allying with one realm says nothing about its other
+  friends and foes.
 - **The enemy** (red): hostile to everyone. Their villages raid you *and* the
   allies, and you capture ground by clearing their villages of defenders. Once
   a village of theirs grows large, it **raids by sea** too, landing knights by

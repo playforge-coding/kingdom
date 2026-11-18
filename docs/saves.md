@@ -44,6 +44,9 @@ A save captures everything needed to reconstruct your session exactly:
   (wood, stone, and gold), its priorities and switches, its builder zones and
   the bridges it laid. A single-player world has one realm, yours.
 - **Stats:** enemies defeated, and each realm's units lost.
+- **Diplomacy:** which realms are allied, the proposals awaiting an answer,
+  any alliance under notice with the time it has left, and whether the
+  computer's realms may ally.
 - **Every unit:** position, faction, role, and state, including where settlers
   on the road between villages are headed, so they finish the trip after a
   load.
@@ -92,8 +95,9 @@ every warship as yours). Where a section changed shape, the loader converts
 it: saves from before version 20 stored houses as three separate layers (yours,
 the enemy's, and the allies'), which are folded into the single per-tile owner
 layer the world keeps now, and they described a single realm, which loads as
-the first (and only) realm owning every ship, order and hired unit. Only a save
-written by a *newer* build than the one
+the first (and only) realm owning every ship, order and hired unit. Saves from
+before version 21 carry no diplomacy and load with every realm at war. Only a
+save written by a *newer* build than the one
 loading it, or one older than the loader still supports, is refused.
 
 ## Where they live

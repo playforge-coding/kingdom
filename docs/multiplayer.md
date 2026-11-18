@@ -50,7 +50,7 @@ flowchart LR
 | --- | --- | --- |
 | **Realms** | Every per-player thing (stockpile, flags, switches, alerts, hired help) lives in a `Realm`, and the game holds a list of them. Houses, ships and orders carry their owner. | Done |
 | **Orders** | Everything the HUD does is a `Command` the game applies for a given realm (`Game::apply`), so a remote player and the computer can give the same orders a local one does. The HUD only reads the game and hands orders back. | Done |
-| **Diplomacy** | A relations table replaces the fixed "realms are always at war" rule, with proposals, acceptances and notice periods. | Planned |
+| **Diplomacy** | A relations table (`Diplomacy`) decides who fights whom. Realms start at war; `ProposeAlliance`, `AcceptAlliance`, `DeclineAlliance` and `LeaveAlliance` orders change that, with a one-minute notice before an alliance ends. The Realm panel shows and drives it. A computer-run realm answers a proposal at once, accepting when the match allows it; weighing the offer properly comes with the computer players. | Done |
 | **Match setup** | Worlds with several starting villages spaced apart, seats filled by people or the computer, and unit colors generated per realm. | Planned |
 | **Computer players** | A player that runs a realm through the same orders a person uses. | Planned |
 | **Server and rooms** | A headless server running matches in rooms over WebSockets, and the client's lobby and connection screens. | Planned |
@@ -58,5 +58,6 @@ flowchart LR
 ## What this means for saves
 
 A save now records every realm along with who owns each ship, construction
-order and hired unit. Saves from before this (format version 20) describe one
-realm and load as one; see **[Saves & Files](saves.md)**.
+order and hired unit (format version 20), and the state of diplomacy between
+them (version 21). Older saves describe one realm and load as one, at war
+with nobody but the enemy; see **[Saves & Files](saves.md)**.
