@@ -5227,7 +5227,7 @@ impl Game {
     /// `try_build`, since the press may cancel the very order this looks for.
     pub fn stroke_at(&self, world_pos: Vec2) -> Option<Stroke> {
         if self.sandbox() {
-            return (self.sandbox_tool == SandboxTool::PlaceTile).then_some(Stroke::Place);
+            return (self.sandbox_tool != SandboxTool::Rally).then_some(Stroke::Place);
         }
         let kind = self.build_kind()?;
         let t = tile_at(world_pos);
@@ -5243,17 +5243,24 @@ impl Game {
     }
 
     /// Carry a drag on to tile `t`: order the current mode's structure there
-    /// (or, on the testing ground, paint the brush), or cancel the matching
-    /// pending order, by `stroke`. Unlike a click it never flips a tile the
-    /// other way, so sweeping back over a line leaves it as it is. Returns
-    /// whether anything changed.
+    /// (or, on the testing ground, paint the brush or put a unit down), or
+    /// cancel the matching pending order, by `stroke`. Unlike a click it never
+    /// flips a tile the other way, so sweeping back over a line leaves it as
+    /// it is. Returns whether anything changed.
     pub fn stroke_build(&mut self, t: Tile, stroke: Stroke) -> bool {
         if self.sandbox() {
-            if self.sandbox_tool != SandboxTool::PlaceTile {
-                return false;
-            }
-            self.place_tile(t, self.place_brush);
-            return true;
+            return match self.sandbox_tool {
+                SandboxTool::PlaceTile => {
+                    self.place_tile(t, self.place_brush);
+                    true
+                }
+                // One unit per tile: a drag back over a line it just laid,
+                // or over anyone already standing there, adds nobody.
+                SandboxTool::PlaceUnit if !self.entities.iter().any(|e| e.tile() == t) => {
+                    self.place_unit(t)
+                }
+                _ => false,
+            };
         }
         let Some(kind) = self.build_kind() else {
             return false;
@@ -13464,6 +13471,28 @@ mod tests {
         let none = share_out(&units, &flags, |u, _| u != 2);
         assert_eq!(none[2], None);
         assert_eq!(none.iter().flatten().count(), 4);
+    }
+
+    #[test]
+    fn dragging_on_the_testing_ground_lays_a_line_of_units() {
+        let mut game = Game::new_sandbox();
+        game.place_job = Job::Bowman;
+        let (a, b) = ((0, 0), (5, 0));
+        assert_eq!(game.stroke_at(tile_center(a)), Some(Stroke::Place));
+        assert!(game.sandbox_click(tile_center(a)));
+        for t in tile_path(a, b) {
+            assert!(game.stroke_build(t, Stroke::Place));
+        }
+        assert_eq!(game.faction_counts().0, 6);
+        // Sweeping back over the line adds nobody.
+        for t in tile_path(b, a) {
+            assert!(!game.stroke_build(t, Stroke::Place));
+        }
+        assert_eq!(game.faction_counts().0, 6);
+
+        // Rally flags still take one click each.
+        game.sandbox_tool = SandboxTool::Rally;
+        assert_eq!(game.stroke_at(tile_center(a)), None);
     }
 
     #[test]

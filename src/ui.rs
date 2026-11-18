@@ -329,8 +329,8 @@ fn sandbox_ui(ctx: &egui::Context, game: &mut Game, colors: &MapColors) -> Optio
             )));
             ui.small(
                 "Left-click a tile to put the chosen unit, terrain or building down; \
-                 everything stands at once. Drag with a brush to paint a stroke. \
-                 Right-click a tile to remove whoever stands \
+                 everything stands at once. Drag to lay a line of units or paint a \
+                 stroke with a brush. Right-click a tile to remove whoever stands \
                  on it, or to wipe it back to grass. Units behave as they would in a \
                  real game.",
             );

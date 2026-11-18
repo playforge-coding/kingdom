@@ -40,7 +40,7 @@ menu. The camera opens on the origin at the usual zoom, and all the normal
 ```mermaid
 flowchart LR
     faction["Pick a faction"] --> tool{"Tool"}
-    tool -- "Place a unit" --> unit["Left-click: a unit of the chosen type appears"]
+    tool -- "Place a unit" --> unit["Left-click or drag: a unit of the chosen type appears on each tile"]
     tool -- "Paint terrain or a building" --> paint["Left-click or drag: the chosen brush replaces each tile"]
     tool -- "Rally your knights" --> rally["Left-click: your knights rush the flag"]
     right["Right-click a tile"] --> who{"Anyone standing there?"}
@@ -64,6 +64,11 @@ tile to put one down. Click again to stack more on the same tile; once a
 fight reaches them they spread out (see
 **[Combat resolution](units.md#combat-resolution)**). A tile nobody could
 stand on (a wall or water, say) refuses the click.
+
+To raise a whole line at once, hold the button and **drag**: one unit goes
+down on every tile the pointer crosses. A drag only fills empty tiles, so
+sweeping back over the line, or across units already standing there, adds
+nobody. Tiles nobody could stand on are skipped.
 
 ### Terrain and buildings
 

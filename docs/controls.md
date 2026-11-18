@@ -30,10 +30,9 @@ at once, or start the drag on a pending order to cancel a line of them. See
 **[Building](building.md)** for what each mode does.
 
 On the **[testing ground](testing.md)** the mouse does something simpler:
-left-click places the unit picked in its panel, paints the chosen terrain or
-building onto the tile at once (drag to paint a stroke), or plants a rally
-flag, and right-click
-removes whoever stands on the tile (or wipes an empty tile back to grass).
+left-click places the unit picked in its panel or paints the chosen terrain
+or building onto the tile at once (drag to lay a line of units or paint a
+stroke), or plants a rally flag, and right-click removes whoever stands on the tile (or wipes an empty tile back to grass).
 
 ## The HUD panel
 
