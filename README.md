@@ -165,6 +165,11 @@ both natively and in the browser (via WebGL) using **Trunk**.
     stockpile lasts.
 - Units navigate with grid **pathfinding** (BFS) and treat water, buildings and
   resource nodes as obstacles, routing around them or across bridges.
+- **Multiplayer.** Press **Host** in the menu (native builds) or run
+  `kingdom-server` on any machine, and players connect from the menu, open or join rooms, and play one match together, each running
+  a realm. The computer plays every seat nobody takes and any seat whose
+  player leaves. Alliances between realms are proposed and accepted in the
+  Realm panel.
 - **Testing ground.** The menu's **Testing Ground** button opens an empty,
   light gray grid instead of a world. Pick a faction and a unit type in its
   panel and **left-click to place units**, or pick a brush and **paint water,
@@ -228,20 +233,44 @@ native WebGPU support, and it falls back to WebGL whenever WebGPU can't provide
 an adapter. Cranelift cannot target wasm, so `trunk serve` builds
 with the `web-dev` profile, which is the debug profile on LLVM.
 
+### Match server
+
+```sh
+cargo run -p kingdom-server --release -- --web dist
+```
+
+Hosts multiplayer rooms on port 7777 and, with `--web dist`, serves the web
+build too. See the [Multiplayer](docs/multiplayer.md) docs for its options.
+
+### Tests
+
+```sh
+cargo test --workspace
+```
+
 ## Project layout
+
+The repository is a Cargo workspace of three crates: the client at the root,
+the simulation in `crates/core`, and the match server in `crates/server`.
 
 | File | Responsibility |
 |------|----------------|
 | `src/main.rs` | Entry point (native + wasm), logging/panic hooks |
 | `src/app.rs` | winit event loop, input, camera, per-frame draw list + animation |
 | `src/gfx.rs` | wgpu instanced sprite-batch renderer + egui render pass |
-| `src/atlas.rs` | Packs all PNGs into one texture atlas; slices animation frames |
-| `src/world.rs` | Chunked infinite world, worldgen, bridges, walkability |
-| `src/pathfind.rs` | Bounded BFS grid pathfinding |
-| `src/game.rs` | Simulation: factions, AI, gathering, combat, spawns, building, save (de)serialization |
+| `src/atlas.rs` | Packs all PNGs into one texture atlas, recolored per realm; slices animation frames |
+| `src/online.rs` | The connection to a match server and the lobby as the client sees it |
+| `crates/core/src/world.rs` | Chunked infinite world, worldgen, bridges, walkability |
+| `crates/core/src/pathfind.rs` | Bounded BFS grid pathfinding |
+| `crates/core/src/game.rs` | Simulation: realms, factions, diplomacy, gathering, combat, spawns, building, save and wire (de)serialization |
+| `crates/core/src/bot.rs` | The computer player: the orders a computer-run realm gives |
+| `crates/core/src/net.rs` | The client/server message protocol |
+| `crates/server/src/lobby.rs` | Rooms, seats and hosts: what each client message does |
+| `crates/server/src/sim.rs` | One running match: steps the world and streams it to its seats |
+| `crates/server/src/lib.rs` | Command line, WebSocket endpoint, serving the web build |
 | `src/save.rs` | `.dat` persistence (native file / web IndexedDB) |
 | `src/camera.rs` | Top-down orthographic camera (tile units) |
-| `src/ui.rs` | egui menu, in-game panels, minimap and alerts |
+| `src/ui.rs` | egui menu (including the multiplayer lobby), in-game panels, minimap and alerts |
 | `src/shader.wgsl` | Instanced textured-quad shader |
 | `assets/textures/` | Tile, building and character-sheet PNGs |
 | `assets/icons/` | Lucide SVG icons for the HUD |

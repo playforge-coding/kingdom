@@ -31,6 +31,10 @@ Everything starts at the main menu:
   a world, then click to place units of any faction and type, and paint water,
   trees, walls, and houses around them in an instant, to see how they behave.
   See **[Testing Ground](testing.md)**.
+- **:lucide-users: Multiplayer:** host a match server from the game (native
+  builds) or connect to someone else's, then open a room
+  or join one and play a match with other people, the computer filling every
+  seat nobody takes. See **[Multiplayer](multiplayer.md)**.
 
 See **[The World](world.md)** for how a seed becomes terrain.
 

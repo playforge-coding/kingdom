@@ -1,0 +1,15 @@
+[package]
+name = "kingdom-core"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "The Kingdom simulation: world, realms, units, orders and the computer player, with nothing that draws or talks to a window."
+
+[dependencies]
+glam = { version = "0.34", features = ["bytemuck", "serde"] }
+fastnoise-lite = "1.1"
+log = "0.4"
+rustc-hash = "2.1.3"
+# The wire protocol between client and server (see `net`).
+serde = { version = "1", features = ["derive"] }
+bitcode = { version = "0.6", features = ["serde"] }
