@@ -89,6 +89,10 @@ same.
     server share one address. The hosted version of the game on GitHub Pages
     can only reach a server that has `wss://` set up in front of it.
 
+    A page served over plain `http` from any address but `localhost` also
+    gets no WebGPU, since browsers keep it for secure pages, so the game
+    draws with WebGL there. That is expected and plays the same.
+
 ## How a match runs
 
 The server runs the world; clients draw it and send orders. A client never

@@ -119,6 +119,20 @@ fn atlas_bind_group(
     })
 }
 
+/// The surface size for a window of `width` by `height` pixels on a GPU
+/// whose textures are at most `max_side` pixels a side: the window's own
+/// size when that fits, otherwise scaled down evenly so the longer side
+/// fits, keeping the shape so the stretched picture isn't distorted.
+fn surface_size(width: u32, height: u32, max_side: u32) -> (u32, u32) {
+    let longest = width.max(height);
+    if longest <= max_side {
+        return (width.max(1), height.max(1));
+    }
+    let scale = max_side as f64 / longest as f64;
+    let fit = |v: u32| ((v as f64 * scale).floor() as u32).clamp(1, max_side);
+    (fit(width), fit(height))
+}
+
 impl Renderer {
     pub async fn new(window: Arc<Window>, atlas: &Atlas) -> Self {
         let size = window.inner_size();
@@ -143,10 +157,15 @@ impl Renderer {
             .await
             .expect("no suitable GPU adapter found");
 
+        // WebGL2's guaranteed minimums, but with the texture sizes this GPU
+        // really allows. The minimum is 2048 pixels a side, smaller than a
+        // full-screen canvas on a high-DPI display, and a page served over
+        // plain http from anywhere but localhost gets no WebGPU and lands
+        // here.
         let required_limits = if cfg!(target_arch = "wasm32") {
-            wgpu::Limits::downlevel_webgl2_defaults()
+            wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
         } else {
-            wgpu::Limits::default()
+            wgpu::Limits::default().using_resolution(adapter.limits())
         };
 
         let (device, queue) = adapter
@@ -166,12 +185,14 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        let max_side = device.limits().max_texture_dimension_2d;
+        let (width, height) = surface_size(size.width, size.height, max_side);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
-            width: size.width,
-            height: size.height,
+            width,
+            height,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
@@ -359,8 +380,8 @@ impl Renderer {
             return;
         }
         self.size = winit::dpi::PhysicalSize::new(width, height);
-        self.config.width = width;
-        self.config.height = height;
+        let max_side = self.device.limits().max_texture_dimension_2d;
+        (self.config.width, self.config.height) = surface_size(width, height, max_side);
         self.surface.configure(&self.device, &self.config);
     }
 
@@ -463,9 +484,12 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
 
         // Upload egui geometry for this frame.
+        // A surface held under the window's size (see `surface_size`) is
+        // stretched to fill it, so the UI is drawn at the same scale down.
+        let shrink = self.config.width as f32 / self.size.width.max(1) as f32;
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
-            pixels_per_point: ui.pixels_per_point,
+            pixels_per_point: ui.pixels_per_point * shrink,
         };
         self.egui_renderer.update_buffers(
             &self.device,
@@ -534,5 +558,21 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         self.queue.present(frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::surface_size;
+
+    #[test]
+    fn a_surface_too_big_for_the_gpu_shrinks_evenly() {
+        assert_eq!(surface_size(1200, 900, 2048), (1200, 900));
+        assert_eq!(surface_size(2048, 1600, 2048), (2048, 1600));
+        // A high-DPI browser window on WebGL's minimum texture size.
+        let (w, h) = surface_size(2400, 1958, 2048);
+        assert_eq!(w, 2048);
+        assert!(h <= 2048 && (w as f32 / h as f32 - 2400.0 / 1958.0).abs() < 0.01);
+        assert_eq!(surface_size(0, 0, 2048), (1, 1));
     }
 }
