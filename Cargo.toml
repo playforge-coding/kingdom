@@ -47,6 +47,8 @@ web-sys = { version = "0.3", features = [
     "IdbFactory", "IdbOpenDbRequest", "IdbDatabase", "IdbTransaction",
     "IdbTransactionMode", "IdbObjectStore", "IdbRequest", "Event",
     "IdbCursor", "IdbCursorWithValue", "Location",
+    # The HUD's text boxes reach the system clipboard (src/web_clipboard.rs).
+    "KeyboardEvent", "ClipboardEvent", "DataTransfer", "Navigator", "Clipboard",
 ] }
 # WebGL backend so the game runs in browsers without WebGPU.
 wgpu = { version = "30", features = ["webgl"] }

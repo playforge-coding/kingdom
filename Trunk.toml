@@ -1,6 +1,11 @@
 [build]
 target = "index.html"
 
+# The Playwright MCP writes screenshots and console logs here while checking
+# the game, and reloading on each of those would reset the page mid-check.
+[watch]
+ignore = [".playwright-mcp"]
+
 [serve]
 addresses = ["127.0.0.1"]
 port = 8080

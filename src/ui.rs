@@ -207,6 +207,8 @@ pub struct Ui {
     pub ctx: egui::Context,
     state: egui_winit::State,
     minimap: Minimap,
+    #[cfg(target_arch = "wasm32")]
+    clipboard: crate::web_clipboard::WebClipboard,
 }
 
 pub struct UiOutput {
@@ -219,6 +221,13 @@ impl Ui {
     pub fn new(window: &Window) -> Self {
         let ctx = egui::Context::default();
         egui_extras::install_image_loaders(&ctx);
+        // In the browser egui can't tell the OS at compile time and assumes
+        // Ctrl is the command key, which leaves Cmd+C and friends dead on a
+        // Mac. The user agent says which it is.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(ua) = web_sys::window().and_then(|w| w.navigator().user_agent().ok()) {
+            ctx.set_os(egui::os::OperatingSystem::from_user_agent(&ua));
+        }
         let state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,
@@ -231,6 +240,8 @@ impl Ui {
             ctx,
             state,
             minimap: Minimap::default(),
+            #[cfg(target_arch = "wasm32")]
+            clipboard: crate::web_clipboard::WebClipboard::install(),
         }
     }
 
@@ -245,11 +256,25 @@ impl Ui {
         // egui may run the closure more than once in a frame (it discards a
         // pass when layout settles late, e.g. while an icon loads), so each
         // pass borrows `scene` again and the last one to ask for an action wins.
-        let raw_input = self.state.take_egui_input(window);
-        let full_output = self.ctx.run_ui(raw_input, |ui| {
+        #[allow(unused_mut)]
+        let mut raw_input = self.state.take_egui_input(window);
+        #[cfg(target_arch = "wasm32")]
+        self.clipboard.feed(&mut raw_input);
+        #[allow(unused_mut)]
+        let mut full_output = self.ctx.run_ui(raw_input, |ui| {
             if let Some(a) = build_ui(ui, &mut scene, &mut self.minimap) {
                 action = Some(a);
             }
+        });
+        // egui-winit would keep copied text in its own in-memory clipboard on
+        // the web, so it goes to the browser's instead.
+        #[cfg(target_arch = "wasm32")]
+        full_output.platform_output.commands.retain(|c| match c {
+            egui::OutputCommand::CopyText(text) => {
+                self.clipboard.copy(text);
+                false
+            }
+            _ => true,
         });
         self.state
             .handle_platform_output(window, full_output.platform_output);
